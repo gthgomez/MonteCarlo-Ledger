@@ -1,6 +1,50 @@
-# Monte Carlo Budget Simulator
+# MonteCarlo-Ledger
 
-A personal finance CLI tool with a ledger-first SQLite backend and a Monte Carlo risk engine. Calculates a deterministic "safe-to-spend" value by projecting your income and bills forward, then stress-tests that projection across 500 simulated scenarios.
+**A personal finance CLI with a ledger-first SQLite backend and a Monte Carlo risk engine.**
+
+Instead of tracking a cached balance, every dollar in this tool is derived from the sum of all transactions — a proper double-entry approach in a local SQLite database. Monte Carlo simulation then stress-tests your 90-day forecast across 500 scenarios to give you a P10 worst-case safe-to-spend number.
+
+---
+
+## What It Is
+
+A command-line tool for personal budgeting that combines:
+- **Ledger-first accounting** — your balance is always computed from your transaction history, never stored as a mutable field
+- **Deterministic Monte Carlo** — 500 forward simulations with a fixed seed, so identical financial data produces identical output every time
+- **Local-only design** — all data stays on your machine in `budget.db`; nothing is sent anywhere
+
+## Why Ledger-First + Deterministic Monte Carlo
+
+Most budgeting tools store a balance and mutate it. That approach silently drifts under concurrent writes or migration failures. A ledger approach makes every transaction an immutable fact — the balance is always a derivation, never a source of truth.
+
+Monte Carlo adds honest uncertainty. A single 90-day projection is a guess. 500 projections with randomized income variance and surprise expenses give you a distribution — and reporting the P10 outcome tells you what to expect if things go reasonably wrong.
+
+---
+
+## Requirements
+
+- Python 3.9+
+- SQLite 3.25.0+ (ships with Python on most platforms)
+
+## Quick Start
+
+```bash
+# Clone the repo
+git clone https://github.com/gthgomez/MonteCarlo-Ledger.git
+cd MonteCarlo-Ledger
+
+# Install dependencies
+pip install -r requirements.txt
+
+# Run the CLI
+python main.py
+```
+
+On first run, the app walks you through onboarding: set your current balance, add income sources, and add recurring payments. All data is stored locally in `budget.db`.
+
+> **Note:** `budget.db` is created in the project directory on first run and is intentionally gitignored. It contains your personal financial data and will never be committed to the repository.
+
+---
 
 ## Features
 
@@ -10,31 +54,7 @@ A personal finance CLI tool with a ledger-first SQLite backend and a Monte Carlo
 - **Interactive CLI** — guided onboarding and full CRUD for income sources, payments, and transactions
 - **FastAPI layer** — exposes a local `GET /safe-to-spend` endpoint for programmatic access
 
-## Requirements
-
-- Python 3.9+
-- SQLite 3.25.0+ (ships with Python on most platforms)
-
-## Setup
-
-```bash
-# Clone the repo
-git clone <repo-url>
-cd Montecarlo_Budget_Sim
-
-# Install dependencies
-pip install -r requirements.txt
-```
-
-## Running the CLI
-
-```bash
-python main.py
-```
-
-On first run, the app walks you through onboarding: set your current balance, add income sources, and add recurring payments. All data is stored locally in `budget.db`.
-
-> **Note:** `budget.db` is created in the project directory on first run and is intentionally gitignored. It contains your personal financial data and will never be committed to the repository.
+---
 
 ## Running the API
 
@@ -64,6 +84,8 @@ python -m uvicorn api:app --reload --host 127.0.0.1 --port 8000
 
 Returns `409 Conflict` if the cached balance and the transaction ledger are out of sync — use the CLI reconciliation flow to fix.
 
+---
+
 ## Running Tests
 
 ```bash
@@ -78,6 +100,8 @@ python test_int_safety.py
 ```
 
 All test databases are created in-process and deleted in `tearDown`. No persistent test data is written.
+
+---
 
 ## Monte Carlo Defaults
 
@@ -94,6 +118,8 @@ Simulation parameters are defined in [`monte_carlo_config.py`](./monte_carlo_con
 
 Because `seed=42` is the default, two users with identical financial data will get identical simulation outputs. Override `seed` in `MonteCarloConfig` if you need non-deterministic runs.
 
+---
+
 ## Architecture
 
 ```
@@ -108,6 +134,14 @@ schema.sql         — Database schema and initial data
 ```
 
 All monetary values are stored and processed as **integer cents**. Float arithmetic is forbidden in persistence and core math to prevent drift.
+
+---
+
+## Status
+
+Working local tool. Not packaged for distribution. The API layer is local-only and has no authentication — treat it as a development convenience, not a production service.
+
+---
 
 ## License
 
