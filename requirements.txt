@@ -1,0 +1,6 @@
+# Runtime dependencies
+fastapi>=0.100.0,<1.0.0
+uvicorn[standard]>=0.20.0,<1.0.0
+
+# Required by FastAPI's TestClient (used in test suite)
+httpx>=0.24.0,<1.0.0
