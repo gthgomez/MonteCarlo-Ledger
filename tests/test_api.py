@@ -1,11 +1,11 @@
 import os
 
 # Mock DB PATH for testing
-import db_manager
+from monte_carlo_ledger import db_manager
 db_manager.DB_PATH = 'test_ledger_api.db'
 
 from fastapi.testclient import TestClient
-from api import app
+from monte_carlo_ledger.api import app
 
 client = TestClient(app)
 

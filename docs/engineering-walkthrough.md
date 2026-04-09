@@ -31,7 +31,7 @@ What changed:
 - The code now lives under the `monte_carlo_ledger` package.
 - Forecast logic moved into `forecasting.py`.
 - Monte Carlo logic moved into `risk.py`.
-- Root-level modules remain as compatibility shims for existing tests and scripts.
+- Tests and helper scripts now import the package directly.
 
 Why it matters:
 - The repo now reads like an intentional Python project instead of a gradually expanding script

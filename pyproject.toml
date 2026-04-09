@@ -59,12 +59,3 @@ extend-exclude = [
 
 [tool.ruff.lint]
 select = ["F", "I"]
-
-[tool.ruff.lint.per-file-ignores]
-"api.py" = ["F403"]
-"budget_engine.py" = ["F403"]
-"db_manager.py" = ["F403"]
-"domain_rules.py" = ["F403"]
-"main.py" = ["F403"]
-"monte_carlo_config.py" = ["F403"]
-"timeline_service.py" = ["F403"]

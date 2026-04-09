@@ -2,9 +2,7 @@ import sqlite3
 import os
 import unittest
 from datetime import datetime, date, timedelta
-import db_manager
-import timeline_service
-import budget_engine
+from monte_carlo_ledger import budget_engine, db_manager, timeline_service
 
 DB_PATH = 'test_regressions.db'
 

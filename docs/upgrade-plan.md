@@ -99,7 +99,7 @@ Definition of done:
 
 - Foreign keys enforced on every SQLite connection.
 - New database migration for cascade-safe `bill_occurrences` relationships.
-- Package layout introduced under `monte_carlo_ledger/` with compatibility shims.
+- Package layout introduced under `monte_carlo_ledger/` as the primary public architecture.
 - Installable package metadata, Ruff, Pyright, and GitHub Actions CI added.
 - README, architecture docs, and project guidance refreshed.
 - Property-based tests added for recurrence and money parsing invariants.

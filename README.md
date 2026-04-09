@@ -76,12 +76,6 @@ pip install -e .[dev]
 python -m monte_carlo_ledger
 ```
 
-Legacy compatibility entry point:
-
-```bash
-python main.py
-```
-
 On first run, the app walks through onboarding and stores data in `ledger.db` at the repo root.
 That file is gitignored and should remain local-only because it contains personal financial data.
 
@@ -91,12 +85,6 @@ This API is intentionally local-only. It has no authentication and should not be
 
 ```bash
 python -m uvicorn monte_carlo_ledger.api:app --reload --host 127.0.0.1 --port 8000
-```
-
-Legacy compatibility entry point:
-
-```bash
-python -m uvicorn api:app --reload --host 127.0.0.1 --port 8000
 ```
 
 ### Example Endpoint
@@ -173,9 +161,7 @@ These checks also run in GitHub Actions.
 └── scripts/
 ```
 
-`workflows.py` acts as a stable facade over smaller domain-specific workflow modules, and
-legacy root-level modules remain as compatibility shims so older scripts and imports continue to
-work.
+`workflows.py` acts as a stable facade over smaller domain-specific workflow modules.
 
 ## Engineering Decisions
 

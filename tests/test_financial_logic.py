@@ -1,8 +1,7 @@
 import unittest
 import os
 import sqlite3
-import db_manager     # type: ignore[import-not-found]
-import budget_engine  # type: ignore[import-not-found]
+from monte_carlo_ledger import budget_engine, db_manager
 from datetime import datetime, timedelta
 
 class TestLedgerLogic(unittest.TestCase):
@@ -182,7 +181,7 @@ class TestTimelineLogic(unittest.TestCase):
             os.remove(self.test_db)
 
     def test_timeline_ordering(self):
-        import main
+        import monte_carlo_ledger.cli as main
         today = datetime.now()
         day_str = today.strftime('%Y-%m-%d')
         
@@ -198,7 +197,7 @@ class TestTimelineLogic(unittest.TestCase):
         self.assertEqual(timeline[1]["type"], "bill")
 
     def test_safe_spend_before_paycheck(self):
-        import main
+        import monte_carlo_ledger.cli as main
         timeline = [
             {"date": "2026-03-18", "type": "bill", "amount": -45000, "name": "Rent"},
             {"date": "2026-03-25", "type": "income", "amount": 200000, "name": "Paycheck"}
@@ -209,7 +208,7 @@ class TestTimelineLogic(unittest.TestCase):
         self.assertEqual(safe_spend, 5000)
 
     def test_negative_safe_spend(self):
-        import main
+        import monte_carlo_ledger.cli as main
         # If bills exceed balance before income, safe_spend should be negative.
         timeline = [
             {"date": "2026-03-18", "type": "bill", "amount": -60000, "name": "Rent"},
@@ -219,14 +218,14 @@ class TestTimelineLogic(unittest.TestCase):
         self.assertEqual(safe_spend, -10000)
 
     def test_daily_limit_edge_cases(self):
-        import main
+        import monte_carlo_ledger.cli as main
         self.assertEqual(main.calculate_daily_safe_spend(-10000, 5), 0)
         self.assertEqual(main.calculate_daily_safe_spend(50000, 0), 50000)
         self.assertEqual(main.calculate_daily_safe_spend(50000, -2), 50000)
         self.assertEqual(main.calculate_daily_safe_spend(50000, 5), 10000)
 
     def test_next_event_detection_implicit(self):
-        import main
+        import monte_carlo_ledger.cli as main
         timeline = [
             {"date": "2026-03-18", "type": "income", "amount": 200000, "name": "Paycheck"},
             {"date": "2026-03-25", "type": "bill", "amount": -60000, "name": "Rent"}
@@ -237,7 +236,7 @@ class TestTimelineLogic(unittest.TestCase):
 
 class TestForecastLogic(unittest.TestCase):
     def test_forecast_row_generation(self):
-        import main
+        import monte_carlo_ledger.cli as main
         balance_cents = 100000
         timeline_events = [
             {"date": "2026-03-20", "name": "Income 1", "type": "income", "amount": 50000},
@@ -253,7 +252,7 @@ class TestForecastLogic(unittest.TestCase):
         self.assertEqual(forecast[2]['balance_after'], -5000)
 
     def test_forecast_summary_metrics(self):
-        import main
+        import monte_carlo_ledger.cli as main
         balance_cents = 100000
         forecast_rows = [
             {"date": "2026-03-20", "name": "Income 1", "type": "income", "amount": 50000, "balance_after": 150000},
@@ -271,7 +270,7 @@ class TestForecastLogic(unittest.TestCase):
         self.assertEqual(summary['first_negative_date'], "2026-03-22")
 
     def test_no_negative_scenario(self):
-        import main
+        import monte_carlo_ledger.cli as main
         balance_cents = 50000
         forecast_rows = [
             {"date": "2026-03-20", "name": "Bill 1", "type": "bill", "amount": -20000, "balance_after": 30000},
@@ -284,7 +283,7 @@ class TestForecastLogic(unittest.TestCase):
         self.assertIsNone(summary['first_negative_date'])
 
     def test_forecast_ordering(self):
-        import main
+        import monte_carlo_ledger.cli as main
         # Ensure Phase 6.5 ordering logic transfers to forecast correctness
         balance_cents = 0
         timeline_events = [
@@ -312,30 +311,32 @@ class TestMonteCarloLogic(unittest.TestCase):
         self.base_balance = 50000
     
     def test_scenario_generation_immutability(self):
-        import main
+        import monte_carlo_ledger.cli as main
+        import monte_carlo_ledger.risk as risk
         import random
         # Base timeline should not be modified
         original_copy = list(self.base_timeline)
         rng = random.Random(42)
         config = main.MonteCarloConfig()
-        _ = main.generate_scenario_timeline(self.base_timeline, rng, config)
+        _ = risk.generate_scenario_timeline(self.base_timeline, rng, config)
         self.assertEqual(self.base_timeline, original_copy)
 
     def test_reproducibility(self):
-        import main
+        import monte_carlo_ledger.cli as main
         config = main.MonteCarloConfig(runs=10, seed=123)
         res1 = main.run_monte_carlo(self.base_balance, self.base_timeline, config)
         res2 = main.run_monte_carlo(self.base_balance, self.base_timeline, config)
         self.assertEqual(res1, res2)
         
     def test_variation_bounds(self):
-        import main
+        import monte_carlo_ledger.cli as main
+        import monte_carlo_ledger.risk as risk
         import random
         rng = random.Random(42)
         # Force lots of generations to check bounds
         config = main.MonteCarloConfig()
         for _ in range(100):
-            scenario = main.generate_scenario_timeline(self.base_timeline, rng, config)
+            scenario = risk.generate_scenario_timeline(self.base_timeline, rng, config)
             for event in scenario:
                 if event['name'] == 'Salary':
                     self.assertGreaterEqual(event['amount'], 0) # Must remain positive income
@@ -343,19 +344,20 @@ class TestMonteCarloLogic(unittest.TestCase):
                     self.assertLessEqual(event['amount'], 0) # All bills including surprise must be negative
 
     def test_scenario_simulation_correctness(self):
-        import main
+        import monte_carlo_ledger.cli as main
+        import monte_carlo_ledger.risk as risk
         # Hardcode a scenario that will dip negative
         scenario = [
             {"date": "2026-03-20", "name": "Rent", "type": "bill", "priority": 1, "amount": -80000},
             {"date": "2026-03-25", "name": "Salary", "type": "income", "priority": 0, "amount": 100000}
         ]
-        res = main.simulate_scenario(50000, scenario)
+        res = risk.simulate_scenario(50000, scenario)
         self.assertEqual(res['lowest_balance'], -30000)
         self.assertEqual(res['first_negative_date'], "2026-03-20")
         self.assertEqual(res['ending_balance'], 70000)
 
     def test_monte_carlo_aggregation(self):
-        import main
+        import monte_carlo_ledger.cli as main
         # Guarantee a negative outcome by using 0 starting balance and only bills
         doom_timeline = [
             {"date": "2026-03-20", "name": "Rent", "type": "bill", "priority": 1, "amount": -80000}
@@ -369,7 +371,8 @@ class TestMonteCarloLogic(unittest.TestCase):
         self.assertLess(res['median_ending_balance'], 0)
         
     def test_same_day_ordering(self):
-        import main
+        import monte_carlo_ledger.cli as main
+        import monte_carlo_ledger.risk as risk
         import random
         # Base with same day income and bill
         clashing_timeline = [
@@ -378,13 +381,14 @@ class TestMonteCarloLogic(unittest.TestCase):
         ]
         rng = random.Random(42)
         config = main.MonteCarloConfig()
-        scenario = main.generate_scenario_timeline(clashing_timeline, rng, config)
+        scenario = risk.generate_scenario_timeline(clashing_timeline, rng, config)
         # Even after generation, income on same day MUST come first
         self.assertEqual(scenario[0]['type'], 'income')
         self.assertEqual(scenario[1]['name'], 'Bill')
         
     def test_surprise_expense_horizon_pre_event(self):
-        import main
+        import monte_carlo_ledger.cli as main
+        import monte_carlo_ledger.risk as risk
         import random
         from datetime import datetime, timedelta
         # Timeline starts way in the future
@@ -398,7 +402,7 @@ class TestMonteCarloLogic(unittest.TestCase):
         config = main.MonteCarloConfig()
         
         for _ in range(50):
-            scenario = main.generate_scenario_timeline(future_timeline, rng, config)
+            scenario = risk.generate_scenario_timeline(future_timeline, rng, config)
             for event in scenario:
                 if event['name'] == 'Unexpected Expense':
                     if event['date'] < future_timeline[0]['date'] and event['date'] >= today_str:
@@ -410,7 +414,7 @@ class TestMonteCarloLogic(unittest.TestCase):
         self.assertTrue(surprises_found_early, "A surprise expense should appear before the first distant event")
 
     def test_deterministic_percentile_rule(self):
-        import main
+        import monte_carlo_ledger.cli as main
         timeline = [{"date": "2026-03-20", "name": "Salary", "type": "income", "priority": 0, "amount": 100000}]
         config = main.MonteCarloConfig(runs=5, seed=42)
         res = main.run_monte_carlo(0, timeline, config)
@@ -419,7 +423,7 @@ class TestMonteCarloLogic(unittest.TestCase):
         self.assertIsNotNone(res['worst_10_percent_ending_balance'])
 
     def test_negative_run_counting(self):
-        import main
+        import monte_carlo_ledger.cli as main
         timeline = [
             {"date": "2026-03-20", "name": "Rent", "type": "bill", "priority": 1, "amount": -80000}
         ]
@@ -429,7 +433,7 @@ class TestMonteCarloLogic(unittest.TestCase):
         self.assertEqual(res['probability_negative'], 100.0)
 
     def test_dashboard_safety_no_negatives(self):
-        import main
+        import monte_carlo_ledger.cli as main
         timeline = [
             {"date": "2026-03-20", "name": "Salary", "type": "income", "priority": 0, "amount": 100000}
         ]
@@ -455,7 +459,7 @@ class TestProjectionBleed(unittest.TestCase):
             os.remove(self.test_db)
 
     def test_expected_amount_only_first_payday(self):
-        import main
+        import monte_carlo_ledger.cli as main
         today = datetime.now()
         # Bi-weekly income: base $1000 (100000c), expected next paycheck $800 (80000c)
         last_payday = (today - timedelta(days=14)).strftime('%Y-%m-%d')
@@ -495,7 +499,7 @@ class TestPaidStatusPhantom(unittest.TestCase):
             os.remove(self.test_db)
 
     def test_paid_bill_excluded_from_timeline(self):
-        import main
+        import monte_carlo_ledger.cli as main
         today = datetime.now()
         bill_date = (today + timedelta(days=5)).strftime('%Y-%m-%d')
         db_manager.add_payment("TestBill", 5000, "One-time", bill_date)
@@ -578,7 +582,7 @@ class TestSafeSpendGlobalMinimum(unittest.TestCase):
     """Regression: safe spend must find the TRUE minimum across the entire timeline."""
 
     def test_minimum_after_income_event(self):
-        import main
+        import monte_carlo_ledger.cli as main
         # Scenario: balance=100, income +500, then bills -450 and -200
         # Running: 100 -> 600 -> 150 -> -50 (minimum is at the END, not before income)
         timeline = [
@@ -591,7 +595,7 @@ class TestSafeSpendGlobalMinimum(unittest.TestCase):
         self.assertEqual(safe, -5000, "Must find minimum at end of timeline, not stop at first income")
 
     def test_minimum_between_incomes(self):
-        import main
+        import monte_carlo_ledger.cli as main
         # Two income events with a big expense in between
         timeline = [
             {"date": "2026-03-15", "type": "income", "amount": 100000, "name": "Pay1"},
@@ -605,3 +609,6 @@ class TestSafeSpendGlobalMinimum(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+

@@ -1,13 +1,6 @@
 {
     "include": [
-        "monte_carlo_ledger",
-        "main.py",
-        "api.py",
-        "db_manager.py",
-        "budget_engine.py",
-        "timeline_service.py",
-        "domain_rules.py",
-        "monte_carlo_config.py"
+        "monte_carlo_ledger"
     ],
     "exclude": [
         "**/__pycache__",

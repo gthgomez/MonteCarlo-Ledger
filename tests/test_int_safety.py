@@ -1,4 +1,4 @@
-import db_manager
+from monte_carlo_ledger import db_manager
 
 def test_int_safety():
     # Passing cases

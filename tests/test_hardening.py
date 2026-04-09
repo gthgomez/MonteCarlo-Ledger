@@ -4,8 +4,7 @@ import os
 from datetime import datetime, date, timedelta
 from unittest.mock import patch
 
-import db_manager
-import timeline_service
+from monte_carlo_ledger import db_manager, timeline_service
 
 DB_PATH = 'test_ledger_hardening.db'
 

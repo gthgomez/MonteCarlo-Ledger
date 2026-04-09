@@ -1,6 +1,6 @@
 import unittest
 from datetime import datetime
-import budget_engine  # type: ignore[import-not-found]
+from monte_carlo_ledger import budget_engine
 
 class TestLedgerEngine(unittest.TestCase):
 

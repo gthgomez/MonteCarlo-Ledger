@@ -3,7 +3,7 @@ from datetime import date, datetime, timedelta
 
 from hypothesis import given, settings, strategies as st
 
-import budget_engine
+from monte_carlo_ledger import budget_engine
 
 
 @given(st.integers(min_value=-1_000_000, max_value=1_000_000))

@@ -2,12 +2,11 @@ import unittest
 import os
 from datetime import datetime, timedelta
 
-import db_manager
-import timeline_service
-import main
-from monte_carlo_config import MonteCarloConfig
+import monte_carlo_ledger.cli as main
+from monte_carlo_ledger import db_manager, timeline_service
+from monte_carlo_ledger.monte_carlo_config import MonteCarloConfig
 from fastapi.testclient import TestClient
-from api import app
+from monte_carlo_ledger.api import app
 
 class TestRefactorVerification(unittest.TestCase):
     def setUp(self):

@@ -2,7 +2,7 @@ import unittest
 import os
 from datetime import datetime, timedelta
 
-import db_manager  # type: ignore[import-not-found]
+from monte_carlo_ledger import db_manager
 
 class TestPaymentDeletionOrphans(unittest.TestCase):
     """
