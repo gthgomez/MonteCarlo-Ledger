@@ -55,3 +55,6 @@ GEMINI.md
 WebLLM-Contextdoc.md
 AGENTS.md
 AGENTS_README.md
+
+# Internal workspace-only files
+.internal/
