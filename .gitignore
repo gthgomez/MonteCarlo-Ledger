@@ -10,6 +10,9 @@ __pycache__/
 *.pyo
 *.pyd
 .pytest_cache/
+.hypothesis/
+.ruff_cache/
+.pyright/
 *.pyo
 
 # Coverage and test output
@@ -49,3 +52,9 @@ desktop.ini
 
 # Internal agent orchestration files (local-only tooling)
 GEMINI.md
+WebLLM-Contextdoc.md
+AGENTS.md
+AGENTS_README.md
+
+# Internal workspace-only files
+.internal/

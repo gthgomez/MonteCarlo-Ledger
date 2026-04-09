@@ -1,11 +1,6 @@
 import unittest
 import os
-import sys
 from datetime import datetime, timedelta
-
-# Ensure local modules can be found
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-sys.path.append(BASE_DIR)
 
 import db_manager
 import timeline_service
@@ -17,7 +12,7 @@ from api import app
 class TestRefactorVerification(unittest.TestCase):
     def setUp(self):
         # Use a separate test database
-        self.db_path = 'test_verification.db'
+        self.db_path = 'test_ledger_verification.db'
         db_manager.DB_PATH = self.db_path
         if os.path.exists(self.db_path):
             os.remove(self.db_path)

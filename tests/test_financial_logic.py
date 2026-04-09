@@ -5,11 +5,11 @@ import db_manager     # type: ignore[import-not-found]
 import budget_engine  # type: ignore[import-not-found]
 from datetime import datetime, timedelta
 
-class TestFinancialLogic(unittest.TestCase):
+class TestLedgerLogic(unittest.TestCase):
 
     def setUp(self):
         # Use a temporary test database
-        self.test_db = 'test_budget_v5.db'
+        self.test_db = 'test_ledger_logic.db'
         db_manager.DB_PATH = self.test_db
         if os.path.exists(self.test_db):
             os.remove(self.test_db)
@@ -92,13 +92,13 @@ class TestFinancialLogic(unittest.TestCase):
         conn.commit()
         conn.close()
         
-        # Init should trigger migration to v6
+        # Init should trigger migration to the latest schema
         db_manager.init_db()
         
         with db_manager.get_db_connection() as conn:
             v = conn.execute("PRAGMA user_version").fetchone()[0]
-            self.assertEqual(v, 9)
-            
+            self.assertEqual(v, 10)
+             
             # Verify type column exists
             res = conn.execute("PRAGMA table_info(transactions)").fetchall()
             cols = [r[1] for r in res]
@@ -171,7 +171,7 @@ class TestFinancialLogic(unittest.TestCase):
 
 class TestTimelineLogic(unittest.TestCase):
     def setUp(self):
-        self.test_db = 'test_budget_timeline.db'
+        self.test_db = 'test_ledger_timeline.db'
         db_manager.DB_PATH = self.test_db
         if os.path.exists(self.test_db):
             os.remove(self.test_db)
@@ -605,4 +605,3 @@ class TestSafeSpendGlobalMinimum(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
-
