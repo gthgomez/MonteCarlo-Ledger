@@ -1,0 +1,70 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "monte-carlo-ledger"
+version = "0.1.0"
+description = "Local-first personal finance forecasting with ledger-first accounting, deterministic cash-flow simulation, and Monte Carlo risk analysis."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+  { name = "Antigravity Projects" }
+]
+keywords = ["finance", "forecasting", "monte-carlo", "cash-flow", "sqlite", "cli"]
+classifiers = [
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+]
+dependencies = [
+  "fastapi>=0.100.0,<1.0.0",
+  "uvicorn[standard]>=0.20.0,<1.0.0",
+  "httpx>=0.24.0,<1.0.0"
+]
+
+[project.optional-dependencies]
+dev = [
+  "hypothesis>=6.100.0,<7.0.0",
+  "pytest>=8.0.0,<9.0.0",
+  "ruff>=0.11.0,<0.12.0",
+  "pyright>=1.1.400,<2.0.0"
+]
+
+[project.scripts]
+monte-carlo-ledger = "monte_carlo_ledger.cli:main"
+
+[tool.setuptools]
+packages = ["monte_carlo_ledger"]
+
+[tool.setuptools.package-data]
+monte_carlo_ledger = ["schema.sql"]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = [
+  "tests"
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+extend-exclude = [
+  "tests",
+  "scripts/reproduce_issues.py",
+  "scripts/reproduce_regressions.py"
+]
+
+[tool.ruff.lint]
+select = ["F", "I"]
+
+[tool.ruff.lint.per-file-ignores]
+"api.py" = ["F403"]
+"budget_engine.py" = ["F403"]
+"db_manager.py" = ["F403"]
+"domain_rules.py" = ["F403"]
+"main.py" = ["F403"]
+"monte_carlo_config.py" = ["F403"]
+"timeline_service.py" = ["F403"]

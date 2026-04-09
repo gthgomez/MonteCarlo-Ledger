@@ -10,7 +10,7 @@ from api import app
 
 class TestReproduction(unittest.TestCase):
     def setUp(self):
-        self.test_db = 'repro_budget.db'
+        self.test_db = 'repro_ledger.db'
         db_manager.DB_PATH = self.test_db
         if os.path.exists(self.test_db):
             os.remove(self.test_db)

@@ -2,7 +2,7 @@ import unittest
 from datetime import datetime
 import budget_engine  # type: ignore[import-not-found]
 
-class TestBudgetEngine(unittest.TestCase):
+class TestLedgerEngine(unittest.TestCase):
 
     def test_parse_money_input(self):
         # Basic parsing

@@ -1,19 +1,13 @@
 import unittest
 import sqlite3
 import os
-import sys
 from datetime import datetime, date, timedelta
-from unittest.mock import patch, MagicMock
-
-# Ensure local modules can be found
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-if BASE_DIR not in sys.path:
-    sys.path.append(BASE_DIR)
+from unittest.mock import patch
 
 import db_manager
 import timeline_service
 
-DB_PATH = 'test_hardening.db'
+DB_PATH = 'test_ledger_hardening.db'
 
 class TestHardening(unittest.TestCase):
     def setUp(self):
