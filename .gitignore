@@ -58,3 +58,6 @@ AGENTS_README.md
 
 # Internal workspace-only files
 .internal/
+
+.vercel
+.env*.local
