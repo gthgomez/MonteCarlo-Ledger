@@ -26,7 +26,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Added
 - `dashboards.py` — read-only dashboard rendering separated from workflow logic
 - `workflow_reporting.py` — reporting and schedule views isolated as a workflow module
-- `docs/upgrade-plan.md` — forward-looking engineering decisions
+- `docs/archive/upgrade-plan-2026-04-09.md` — archived upgrade plan with forward-looking engineering decisions from the 0.2.0 cycle
 - GitHub Actions CI: ruff + pyright + pytest gates on every push
 
 ### Changed

@@ -155,7 +155,8 @@ These checks also run in GitHub Actions.
 ├── docs/
 │   ├── ARCHITECTURE.md
 │   ├── engineering-walkthrough.md
-│   ├── upgrade-plan.md
+│   ├── archive/
+│   │   └── upgrade-plan-2026-04-09.md
 │   └── assets/
 ├── tests/
 └── scripts/
@@ -176,7 +177,7 @@ These checks also run in GitHub Actions.
 
 - [Architecture](./docs/ARCHITECTURE.md)
 - [Engineering Walkthrough](./docs/engineering-walkthrough.md)
-- [Upgrade Plan](./docs/upgrade-plan.md)
+- [Archived Upgrade Plan](./docs/archive/upgrade-plan-2026-04-09.md)
 
 ## Status
 
