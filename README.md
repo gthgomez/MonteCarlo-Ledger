@@ -9,6 +9,8 @@ The project combines a ledger-first SQLite core, a deterministic cash-flow timel
 Monte Carlo risk model. The result is a CLI and local API that feel practical to use while still
 reading like an intentional engineering project instead of a themed CRUD app.
 
+> **Companion app:** [MonteCarloLedger-Android](https://github.com/gthgomez/MonteCarloLedger-Android) — deterministic bill pacing and AES-GCM encrypted backups on Android.
+
 ![Monte Carlo Ledger architecture overview](./docs/assets/architecture-overview.svg)
 
 ## At a Glance
