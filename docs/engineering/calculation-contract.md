@@ -26,9 +26,31 @@ Sources: `monte_carlo_ledger/risk.py`, configured by
   variation and bounded surprise expenses.
 - Behavior: sample many scenario timelines by varying income amounts within configured bounds and
   injecting surprise expenses at random, then run the same balance walk on each scenario.
-- Output: summary statistics over the simulated ending balances, including a low percentile
-  (currently labeled `worst_10_percent_ending_balance`, computed at the configured
-  `worst_percentile`, default `0.10`).
+- Output: summary statistics over the simulated ending balances, including a low percentile named
+  `low_percentile_ending_balance`, computed at the configured `low_percentile` value
+  (`worst_percentile` in the config, default `0.10`). The key `worst_10_percent_ending_balance` is
+  a deprecated alias kept for backwards compatibility and always equals
+  `low_percentile_ending_balance`; it no longer implies a fixed 10% selection.
+
+### Config validation contract (MC03)
+
+All `MonteCarloConfig` fields are validated at construction time, before any sampling occurs;
+invalid configurations raise `ValueError` and can never produce a partial run.
+
+- `runs`: integer in `[1, 100_000]` (`MAX_RUNS`, the documented resource budget for a single
+  invocation).
+- `seed`: integer.
+- `income_variation_min` / `income_variation_max`: integers with `min <= max` and `max >= 0`
+  (percent points; a negative lower bound is allowed by design).
+- `surprise_probability`: number in the closed interval `[0, 1]`; `0` means no surprise is ever
+  injected and `1` means every check injects one (both boundaries behave exactly). NaN and
+  non-numeric values are rejected.
+- `surprise_check_interval_days`: integer `>= 1`.
+- `surprise_amount_min` / `surprise_amount_max`: nonnegative integers (cents) with `min <= max`.
+- `worst_percentile`: number in the **normalized scale `(0, 1]`** — the scale historically used by
+  this configuration (`0.10` = 10th percentile). It is deliberately not a 0-100 percentage and is
+  not reinterpreted, so previously saved configurations keep their exact meaning. NaN, zero,
+  negative, and values above `1` are rejected.
 
 This layer **models uncertainty**. Percentile outputs are simulated estimates from a bounded
 variance model. **They are not guarantees and not worst cases.** Reality can be worse than any
