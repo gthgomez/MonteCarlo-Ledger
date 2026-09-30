@@ -1,5 +1,5 @@
-from datetime import datetime, timedelta
-from typing import Dict, List
+from datetime import date, datetime, timedelta
+from typing import Dict, List, Optional
 
 from . import budget_engine, db_manager, domain_rules
 
@@ -101,11 +101,20 @@ def merge_and_sort_events(bill_events: List[Dict], income_events: List[Dict]) ->
     timeline.sort(key=lambda x: (x['date'], x['priority']))
     return timeline
 
-def build_financial_timeline(days_ahead: int = 30, read_only: bool = False) -> List[Dict]:
-    """Orchestrates the retrieval, prediction, and merging of financial events."""
-    today = datetime.now()
-    start_date = today.strftime('%Y-%m-%d')
-    end_date = (today + timedelta(days=days_ahead)).strftime('%Y-%m-%d')
+def build_financial_timeline(
+    days_ahead: int = 30,
+    read_only: bool = False,
+    as_of: Optional[date] = None,
+) -> List[Dict]:
+    """Orchestrates the retrieval, prediction, and merging of financial events.
+
+    ``as_of`` is the explicit simulation date supplied by the CLI/API
+    boundary. When omitted, the legacy default (today) is retained for
+    display-only callers; risk/baseline paths pass it explicitly.
+    """
+    start = as_of if as_of is not None else date.today()
+    start_date = start.strftime('%Y-%m-%d')
+    end_date = (start + timedelta(days=days_ahead)).strftime('%Y-%m-%d')
     
     bill_events = get_unpaid_bill_events(start_date, end_date, read_only=read_only)
     income_events = generate_income_events(start_date, end_date)

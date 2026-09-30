@@ -1,4 +1,5 @@
 import sys
+from datetime import date
 
 from . import dashboards, db_manager, forecasting, monte_carlo_config, risk, workflows
 from .ui import Theme, cprint, show_global_help, wait_for_user
@@ -38,6 +39,11 @@ view_upcoming_30 = workflows.view_upcoming_30
 
 def main():
     db_manager.init_db()
+
+    # Clock boundary: capture "today" once and pass it explicitly to every
+    # simulation/baseline path. Nothing below this point reads the wall clock
+    # for scenario generation.
+    as_of = date.today()
 
     if not db_manager.is_onboarded():
         run_onboarding()
@@ -90,9 +96,9 @@ def main():
             elif choice == "9":
                 handle_view_history()
             elif choice == "10":
-                handle_forecast()
+                handle_forecast(as_of=as_of)
             elif choice == "11":
-                handle_risk_outlook()
+                handle_risk_outlook(as_of=as_of)
             elif choice == "12":
                 sys.exit(0)
             else:

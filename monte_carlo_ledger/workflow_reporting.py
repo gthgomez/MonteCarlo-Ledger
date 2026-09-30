@@ -5,13 +5,13 @@ from .dashboards import render_forecast_dashboard, render_monte_carlo_dashboard
 from .ui import format_currency, format_date_display
 
 
-def handle_forecast():
-    render_forecast_dashboard()
+def handle_forecast(*, as_of=None):
+    render_forecast_dashboard(as_of=as_of)
     input("\nPress Enter...")
 
 
-def handle_risk_outlook():
-    render_monte_carlo_dashboard()
+def handle_risk_outlook(*, as_of):
+    render_monte_carlo_dashboard(as_of=as_of)
     input("\nPress Enter...")
 
 

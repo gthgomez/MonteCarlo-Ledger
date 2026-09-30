@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 
 from . import budget_engine, db_manager, timeline_service
 from .forecasting import (
@@ -98,7 +98,7 @@ def show_summary():
     cprint("╚" + "═" * 48 + "╝", Theme.CYAN)
 
 
-def render_monte_carlo_dashboard(days_ahead: int = 90, runs: int = 500):
+def render_monte_carlo_dashboard(days_ahead: int = 90, runs: int = 500, *, as_of: date):
     """Renders the 90-Day Risk Outlook UI using Monte Carlo simulations."""
     clear_screen()
     is_sync, ledger, stored = db_manager.validate_balance_consistency()
@@ -106,9 +106,9 @@ def render_monte_carlo_dashboard(days_ahead: int = 90, runs: int = 500):
         _render_balance_warning(ledger, stored)
 
     balance_cents = stored
-    base_timeline = build_financial_timeline(days_ahead)
+    base_timeline = build_financial_timeline(days_ahead, as_of=as_of)
     config = MonteCarloConfig(runs=runs)
-    risk_summary = run_monte_carlo(balance_cents, base_timeline, config)
+    risk_summary = run_monte_carlo(balance_cents, base_timeline, config, as_of=as_of)
 
     cprint("=" * 48, Theme.CYAN)
     print(f"{Theme.BOLD}{days_ahead}-DAY RISK OUTLOOK{Theme.RESET}")
@@ -171,15 +171,19 @@ def render_monte_carlo_dashboard(days_ahead: int = 90, runs: int = 500):
     cprint("=" * 48, Theme.CYAN)
 
 
-def render_forecast_dashboard(days_ahead: int = 90):
-    """Renders the 90-Day Forecast Engine UI."""
+def render_forecast_dashboard(days_ahead: int = 90, *, as_of=None):
+    """Renders the 90-Day Forecast Engine UI.
+
+    ``as_of`` is the explicit simulation date; when omitted the legacy
+    today-default of the timeline service is retained for display callers.
+    """
     clear_screen()
     is_sync, ledger, stored = db_manager.validate_balance_consistency()
     if not is_sync:
         _render_balance_warning(ledger, stored)
 
     balance_cents = stored
-    timeline = build_financial_timeline(days_ahead)
+    timeline = build_financial_timeline(days_ahead, as_of=as_of)
     forecast_rows = build_balance_forecast(balance_cents, timeline)
     summary = calculate_forecast_summary(balance_cents, forecast_rows)
 
