@@ -1,6 +1,6 @@
 import unittest
 import os
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 import monte_carlo_ledger.cli as main
 from monte_carlo_ledger import db_manager, timeline_service
@@ -136,8 +136,8 @@ class TestRefactorVerification(unittest.TestCase):
         
         # Check Monte Carlo reproducibility
         config = MonteCarloConfig(runs=100, seed=42)
-        res1 = main.run_monte_carlo(50000, timeline, config)
-        res2 = main.run_monte_carlo(50000, timeline, config)
+        res1 = main.run_monte_carlo(50000, timeline, config, as_of=date.today())
+        res2 = main.run_monte_carlo(50000, timeline, config, as_of=date.today())
         self.assertEqual(res1['median_ending_balance'], res2['median_ending_balance'])
         self.assertGreater(res1['probability_negative'], 0)
 
