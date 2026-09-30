@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [
-  { name = "Antigravity Projects" }
+  { name = "Jonathan Gomez Aguilar" }
 ]
 keywords = ["finance", "forecasting", "monte-carlo", "cash-flow", "sqlite", "cli"]
 classifiers = [
