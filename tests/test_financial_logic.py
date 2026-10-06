@@ -2,7 +2,7 @@ import unittest
 import os
 import sqlite3
 from monte_carlo_ledger import budget_engine, db_manager
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 class TestLedgerLogic(unittest.TestCase):
 
@@ -318,14 +318,14 @@ class TestMonteCarloLogic(unittest.TestCase):
         original_copy = list(self.base_timeline)
         rng = random.Random(42)
         config = main.MonteCarloConfig()
-        _ = risk.generate_scenario_timeline(self.base_timeline, rng, config)
+        _ = risk.generate_scenario_timeline(self.base_timeline, rng, config, as_of=date(2026, 3, 1))
         self.assertEqual(self.base_timeline, original_copy)
 
     def test_reproducibility(self):
         import monte_carlo_ledger.cli as main
         config = main.MonteCarloConfig(runs=10, seed=123)
-        res1 = main.run_monte_carlo(self.base_balance, self.base_timeline, config)
-        res2 = main.run_monte_carlo(self.base_balance, self.base_timeline, config)
+        res1 = main.run_monte_carlo(self.base_balance, self.base_timeline, config, as_of=date(2026, 3, 1))
+        res2 = main.run_monte_carlo(self.base_balance, self.base_timeline, config, as_of=date(2026, 3, 1))
         self.assertEqual(res1, res2)
         
     def test_variation_bounds(self):
@@ -336,7 +336,7 @@ class TestMonteCarloLogic(unittest.TestCase):
         # Force lots of generations to check bounds
         config = main.MonteCarloConfig()
         for _ in range(100):
-            scenario = risk.generate_scenario_timeline(self.base_timeline, rng, config)
+            scenario = risk.generate_scenario_timeline(self.base_timeline, rng, config, as_of=date(2026, 3, 1))
             for event in scenario:
                 if event['name'] == 'Salary':
                     self.assertGreaterEqual(event['amount'], 0) # Must remain positive income
@@ -363,7 +363,7 @@ class TestMonteCarloLogic(unittest.TestCase):
             {"date": "2026-03-20", "name": "Rent", "type": "bill", "priority": 1, "amount": -80000}
         ]
         config = main.MonteCarloConfig(runs=10, seed=42)
-        res = main.run_monte_carlo(0, doom_timeline, config)
+        res = main.run_monte_carlo(0, doom_timeline, config, as_of=date(2026, 3, 1))
         
         self.assertEqual(res['negative_runs'], 10)
         self.assertEqual(res['probability_negative'], 100)
@@ -380,8 +380,10 @@ class TestMonteCarloLogic(unittest.TestCase):
             {"date": "2026-03-20", "name": "Income", "type": "income", "priority": 0, "amount": 100000}
         ]
         rng = random.Random(42)
-        config = main.MonteCarloConfig()
-        scenario = risk.generate_scenario_timeline(clashing_timeline, rng, config)
+        # surprise_probability=0 keeps the fixture focused on same-day ordering
+        # (with an explicit as_of in the past, surprises legitimately generate).
+        config = main.MonteCarloConfig(surprise_probability=0.0)
+        scenario = risk.generate_scenario_timeline(clashing_timeline, rng, config, as_of=date(2026, 3, 1))
         # Even after generation, income on same day MUST come first
         self.assertEqual(scenario[0]['type'], 'income')
         self.assertEqual(scenario[1]['name'], 'Bill')
@@ -402,7 +404,7 @@ class TestMonteCarloLogic(unittest.TestCase):
         config = main.MonteCarloConfig()
         
         for _ in range(50):
-            scenario = risk.generate_scenario_timeline(future_timeline, rng, config)
+            scenario = risk.generate_scenario_timeline(future_timeline, rng, config, as_of=datetime.now().date())
             for event in scenario:
                 if event['name'] == 'Unexpected Expense':
                     if event['date'] < future_timeline[0]['date'] and event['date'] >= today_str:
@@ -417,7 +419,7 @@ class TestMonteCarloLogic(unittest.TestCase):
         import monte_carlo_ledger.cli as main
         timeline = [{"date": "2026-03-20", "name": "Salary", "type": "income", "priority": 0, "amount": 100000}]
         config = main.MonteCarloConfig(runs=5, seed=42)
-        res = main.run_monte_carlo(0, timeline, config)
+        res = main.run_monte_carlo(0, timeline, config, as_of=date(2026, 3, 1))
         # With 5 runs, 10% is 0.5. math.ceil(0.5) = 1. index max(0, 1-1) = 0.
         # It must return the lowest possible generated value.
         self.assertIsNotNone(res['worst_10_percent_ending_balance'])
@@ -428,7 +430,7 @@ class TestMonteCarloLogic(unittest.TestCase):
             {"date": "2026-03-20", "name": "Rent", "type": "bill", "priority": 1, "amount": -80000}
         ]
         config = main.MonteCarloConfig(runs=10, seed=42)
-        res = main.run_monte_carlo(0, timeline, config)
+        res = main.run_monte_carlo(0, timeline, config, as_of=date(2026, 3, 1))
         self.assertEqual(res['negative_runs'], 10)
         self.assertEqual(res['probability_negative'], 100.0)
 
@@ -438,7 +440,7 @@ class TestMonteCarloLogic(unittest.TestCase):
             {"date": "2026-03-20", "name": "Salary", "type": "income", "priority": 0, "amount": 100000}
         ]
         config = main.MonteCarloConfig(runs=10, seed=42)
-        res = main.run_monte_carlo(100000, timeline, config)
+        res = main.run_monte_carlo(100000, timeline, config, as_of=date(2026, 3, 1))
         self.assertEqual(res['negative_runs'], 0)
         self.assertEqual(res['probability_negative'], 0)
         self.assertIsNone(res['most_common_first_negative_date'])

@@ -1,4 +1,6 @@
 from contextlib import asynccontextmanager
+from datetime import date
+from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Query
 
@@ -24,11 +26,25 @@ app = FastAPI(
 # NOTE: This endpoint is intended for local use only (127.0.0.1).
 # It has no authentication. Do not expose this API to an external network.
 @app.get("/safe-to-spend")
-def get_safe_to_spend(days_ahead: int = Query(30, ge=1, le=365)):
+def get_safe_to_spend(
+    days_ahead: int = Query(30, ge=1, le=365),
+    as_of: Optional[str] = Query(None, description="Simulation date, YYYY-MM-DD. Defaults to today at this boundary."),
+):
     """
     Calculates the maximum safe spend amount before the next income event
     without triggering a negative balance window.
     """
+    # Clock boundary: capture today once when the caller does not pin as_of.
+    if as_of is None:
+        effective_as_of = date.today()
+    else:
+        try:
+            effective_as_of = date.fromisoformat(as_of)
+        except ValueError:
+            raise HTTPException(
+                status_code=422,
+                detail="as_of must be an ISO date (YYYY-MM-DD).",
+            )
     # 0. Validate consistency before serving data
     is_sync, ledger, stored = db_manager.validate_balance_consistency()
     if not is_sync:
@@ -41,12 +57,15 @@ def get_safe_to_spend(days_ahead: int = Query(30, ge=1, le=365)):
     balance_cents = stored
     
     # 2. Generate timeline of deterministic events
-    timeline = timeline_service.build_financial_timeline(days_ahead=days_ahead, read_only=True)
-    
+    timeline = timeline_service.build_financial_timeline(
+        days_ahead=days_ahead, read_only=True, as_of=effective_as_of
+    )
+
     # 3. Process running balance simulation to find minima
     safe_spend_cents = calculate_safe_spend(balance_cents, timeline)
-    
+
     return {
         "safe_spend_cents": safe_spend_cents,
-        "days_ahead": days_ahead
+        "days_ahead": days_ahead,
+        "as_of": effective_as_of.isoformat(),
     }
