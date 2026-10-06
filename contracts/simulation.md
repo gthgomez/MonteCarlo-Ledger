@@ -97,6 +97,9 @@ Notes:
 - Draws happen **only** for the branches whose range is enabled. With the defaults
   (`income -8..8`, `expense 0..0`), each run draws once per income event and never for expenses.
   This keeps the default stream simple and identical across engines.
+- **Step 3 is unconditional.** Surprise generation depends only on `horizon_days` and the surprise
+  parameters, never on whether the scenario has scheduled events. A scenario with no events still
+  produces a surprise-driven distribution over the starting balance (MCD-0023).
 - Income variation is clamped at `0` (income cannot become negative). Expense variation is clamped at
   `0` (an expense cannot become income).
 - The draw order is part of the contract: step 2 fully precedes step 3, events are visited in

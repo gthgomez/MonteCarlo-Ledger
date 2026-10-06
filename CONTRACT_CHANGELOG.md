@@ -53,6 +53,8 @@ Initial semantic foundation. Derived from the MC-00 cross-engine inventory
   (MCD-0021); `end_date` is inclusive; schema-invalid scenarios report `SCHEMA_INVALID` before
   engine semantics. No version bump: these clarify previously ambiguous text and are not observable
   by prior valid fixtures except the new `boundary/anchor-differs-from-start`.
+- MC-06b added `MCD-0023`: simulation is defined for any scenario; surprise generation depends only
+  on the horizon and surprise parameters, not on scheduled events (`fixtures/stochastic/no-events-surprises`).
 
 ### Deferred to a future version
 
