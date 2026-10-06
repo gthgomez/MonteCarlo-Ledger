@@ -1,0 +1,22 @@
+{
+  "scenario": {
+    "contract_version": "1.0",
+    "scenario_id": "safe-to-spend",
+    "as_of": "2026-10-01",
+    "starting_balance_cents": 50000,
+    "horizon_days": 90,
+    "events": [
+      { "name": "rent", "date": "2026-10-05", "amount_cents": -95000, "type": "expense" },
+      { "name": "paycheck", "date": "2026-10-10", "amount_cents": 90000, "type": "income" }
+    ],
+    "simulation": {
+      "runs": 500,
+      "seed": 42,
+      "quantile_num": 1,
+      "quantile_den": 10,
+      "reserve_cents": 10000
+    }
+  },
+  "expected_status": "pending-generation",
+  "expected": null
+}

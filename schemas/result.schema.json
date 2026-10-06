@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://montecarlo.dev/schemas/result.schema.json",
+  "title": "MonteCarlo canonical result (contract 1.0)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["contract_version", "scenario_id", "forecast"],
+  "properties": {
+    "contract_version": { "const": "1.0" },
+    "scenario_id": { "type": "string" },
+    "forecast": { "$ref": "#/$defs/forecast" },
+    "risk": { "$ref": "#/$defs/risk" }
+  },
+  "$defs": {
+    "forecast": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "minimum_balance_cents",
+        "minimum_balance_date",
+        "ending_balance_cents",
+        "first_negative_date"
+      ],
+      "properties": {
+        "minimum_balance_cents": { "type": "integer" },
+        "minimum_balance_date": { "type": "string", "format": "date" },
+        "ending_balance_cents": { "type": "integer" },
+        "first_negative_date": { "type": ["string", "null"], "format": "date" }
+      }
+    },
+    "risk": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "negative_balance_probability_ppm",
+        "minimum_balance_p10_cents",
+        "minimum_balance_p50_cents",
+        "minimum_balance_p90_cents",
+        "ending_balance_p10_cents",
+        "ending_balance_p50_cents",
+        "ending_balance_p90_cents",
+        "projected_low_point_cents",
+        "safe_to_spend_cents"
+      ],
+      "properties": {
+        "negative_balance_probability_ppm": { "type": "integer", "minimum": 0, "maximum": 1000000 },
+        "minimum_balance_p10_cents": { "type": "integer" },
+        "minimum_balance_p50_cents": { "type": "integer" },
+        "minimum_balance_p90_cents": { "type": "integer" },
+        "ending_balance_p10_cents": { "type": "integer" },
+        "ending_balance_p50_cents": { "type": "integer" },
+        "ending_balance_p90_cents": { "type": "integer" },
+        "projected_low_point_cents": { "type": "integer" },
+        "safe_to_spend_cents": { "type": "integer" }
+      }
+    }
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "contract_version": "1.0",
+  "components": {
+    "money": "1.0",
+    "timeline": "1.0",
+    "ledger": "1.0",
+    "forecast": "1.0",
+    "simulation": "1.0",
+    "risk": "1.0"
+  },
+  "released": "2026-10-06",
+  "status": "draft"
+}

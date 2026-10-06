@@ -1,0 +1,23 @@
+{
+  "scenario": {
+    "contract_version": "1.0",
+    "scenario_id": "horizon-end-exclusive",
+    "as_of": "2026-10-01",
+    "starting_balance_cents": 100000,
+    "horizon_days": 10,
+    "events": [
+      { "name": "in-window", "date": "2026-10-10", "amount_cents": -30000, "type": "expense" },
+      { "name": "out-of-window", "date": "2026-10-11", "amount_cents": -40000, "type": "expense" }
+    ]
+  },
+  "expected": {
+    "contract_version": "1.0",
+    "scenario_id": "horizon-end-exclusive",
+    "forecast": {
+      "minimum_balance_cents": 70000,
+      "minimum_balance_date": "2026-10-10",
+      "ending_balance_cents": 70000,
+      "first_negative_date": null
+    }
+  }
+}

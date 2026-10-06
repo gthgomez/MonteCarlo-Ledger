@@ -1,0 +1,18 @@
+{
+  "scenario": {
+    "contract_version": "1.0",
+    "scenario_id": "negative-probability",
+    "as_of": "2026-10-01",
+    "starting_balance_cents": 30000,
+    "horizon_days": 90,
+    "events": [
+      { "name": "rent", "date": "2026-10-03", "amount_cents": -95000, "type": "expense" },
+      { "name": "paycheck", "date": "2026-10-10", "amount_cents": 90000, "type": "income" },
+      { "name": "paycheck", "date": "2026-10-24", "amount_cents": 90000, "type": "income" },
+      { "name": "utilities", "date": "2026-10-18", "amount_cents": -12000, "type": "expense" }
+    ],
+    "simulation": { "runs": 500, "seed": 42 }
+  },
+  "expected_status": "pending-generation",
+  "expected": null
+}

@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://montecarlo.dev/schemas/scenario.schema.json",
+  "title": "MonteCarlo canonical scenario (contract 1.0)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["contract_version", "scenario_id", "as_of", "starting_balance_cents", "horizon_days", "events"],
+  "properties": {
+    "contract_version": { "const": "1.0" },
+    "scenario_id": { "type": "string", "minLength": 1 },
+    "as_of": { "type": "string", "format": "date" },
+    "starting_balance_cents": { "type": "integer" },
+    "horizon_days": { "type": "integer", "minimum": 0 },
+    "events": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/event" }
+    },
+    "recurrences": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/recurrence" }
+    },
+    "simulation": { "$ref": "#/$defs/simulation" }
+  },
+  "$defs": {
+    "recurrence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "type", "amount_cents", "frequency", "start_date"],
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "type": { "enum": ["income", "expense"] },
+        "amount_cents": { "type": "integer" },
+        "frequency": {
+          "enum": ["weekly", "biweekly", "semimonthly", "monthly", "bimonthly", "quarterly", "semiannually", "annually", "onetime"]
+        },
+        "start_date": { "type": "string", "format": "date" },
+        "end_date": { "type": "string", "format": "date" },
+        "anchor_day": { "type": "integer", "minimum": 1, "maximum": 31 },
+        "expected_amount_cents": { "type": "integer" }
+      }
+    },
+    "event": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["date", "amount_cents", "type"],
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "date": { "type": "string", "format": "date" },
+        "amount_cents": { "type": "integer" },
+        "type": { "enum": ["income", "expense", "adjustment"] },
+        "sequence": { "type": "integer" }
+      }
+    },
+    "simulation": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "runs": { "type": "integer", "minimum": 1 },
+        "seed": { "type": "integer", "minimum": 0 },
+        "income_variation_min": { "type": "integer" },
+        "income_variation_max": { "type": "integer" },
+        "expense_variation_min": { "type": "integer" },
+        "expense_variation_max": { "type": "integer" },
+        "surprise_probability_ppm": { "type": "integer", "minimum": 0, "maximum": 1000000 },
+        "surprise_check_interval_days": { "type": "integer", "minimum": 1 },
+        "surprise_amount_min": { "type": "integer", "minimum": 0 },
+        "surprise_amount_max": { "type": "integer", "minimum": 0 },
+        "quantile_num": { "type": "integer", "minimum": 1 },
+        "quantile_den": { "type": "integer", "minimum": 1 },
+        "reserve_cents": { "type": "integer", "minimum": 0 }
+      }
+    }
+  }
+}
