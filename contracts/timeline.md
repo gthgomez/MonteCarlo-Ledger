@@ -69,22 +69,33 @@ Expansion procedure (normative):
    `expected_amount_cents`; all others use `amount_cents`.
 4. Expanded income occurrences default to `sequence = 0`; expanded expenses to `sequence = 1`.
 5. Occurrences before `as_of` are not emitted (they are overdue state; see below).
+6. Occurrence ordering: all expanded recurrence occurrences use an `input_index` greater than every
+   explicit event's index, assigned in recurrence-array order and then ascending occurrence date.
+7. Schema precedence: a scenario that omits a schema-required field (for example `as_of`) is
+   `SCHEMA_INVALID`. `MISSING_AS_OF` is reserved for an `as_of` that is present but empty or
+   unparseable.
 
-`start_date` is the first possible occurrence. A recurrence must always make forward progress.
+`start_date` is the first possible occurrence / lower bound. A recurrence must always make forward
+progress.
 
 ## Recurrence rules
 
 The contract fixes the produced dates.
 
-- **Weekly** — `+7` days. **Biweekly** — `+14` days.
-- **Monthly / bimonthly / quarterly** — advance by 1 / 2 / 3 calendar months, then place the
-  occurrence on the **anchor day of month**, clamped to the last valid day of the target month. The
-  anchor is preserved across clamped months: the sequence from Jan 31 with anchor 31 is
-  Jan 31 → Feb 28 → Mar 31 (not Mar 28).
-- **Annually** — `+1` year, same month/clamp rule. Feb 29 → Feb 28 in a common year, and returns to
-  Feb 29 in the next leap year.
-- **Semimonthly** — two occurrences per month: `(1st, 15th)` or `(15th, last day)`, selected by the
-  anchor.
+- **Weekly** — `start_date + k*7` days. **Biweekly** — `start_date + k*14` days.
+- **Monthly / bimonthly / quarterly / semiannually / annually** — occurrence months are
+  `start_date`'s month plus `k*1 / k*2 / k*3 / k*6 / k*12` calendar months. In each such month the
+  date is `min(anchor, last_day_of_month)`, where `anchor = anchor_day` when given, otherwise
+  `start_date.day`. `start_date` is a **lower bound**, not necessarily the first occurrence: the
+  first occurrence is the smallest generated date `>= start_date`. The anchor is preserved across
+  clamped months: Jan 31 → Feb 28 → Mar 31 (not Mar 28), and annually Feb 29 → Feb 28 in a common
+  year, returning to Feb 29 in the next leap year. If `anchor_day` is earlier than `start_date.day`
+  in `start_date`'s month, that first month's occurrence is dropped and the series begins the
+  following month.
+- **Semimonthly** — two occurrences per month: `(1st, 15th)` when `anchor < 15`, otherwise
+  `(15th, last day)`. The first occurrence is the smallest pair date `>= start_date`.
+- **`end_date` is inclusive**: occurrences are generated while `occurrence <= end_date`, in addition
+  to the horizon bound.
 - A recurrence must always advance; an implementation that cannot advance must stop and report,
   never loop.
 - An occurrence that is **clamped** or **user-modified** is still a single occurrence; it must not be

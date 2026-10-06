@@ -48,6 +48,11 @@ Initial semantic foundation. Derived from the MC-00 cross-engine inventory
   the contradiction with the simulation pseudocode and with Kotlin's `scaleCentsByPercent`
   (`scale(100,1)=101`). It is now defined as scaling by `(100 + percent)%`, and the basis-point
   functions remain fractions. See MCD-0007. No version bump: 1.0 was never released.
+- During MC-06 integration the recurrence text was clarified: `start_date` is a lower bound and
+  `anchor_day` sets the day of month (MCD-0022); generated-entry ordering indices are specified
+  (MCD-0021); `end_date` is inclusive; schema-invalid scenarios report `SCHEMA_INVALID` before
+  engine semantics. No version bump: these clarify previously ambiguous text and are not observable
+  by prior valid fixtures except the new `boundary/anchor-differs-from-start`.
 
 ### Deferred to a future version
 

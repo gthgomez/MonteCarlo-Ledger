@@ -19,6 +19,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from monte_carlo_ledger.contract import run_scenario_safe  # noqa: E402
 
 
+def _validator(schemas_dir: Path):
+    try:
+        import jsonschema
+    except Exception:  # pragma: no cover
+        return None
+    schema = json.loads((schemas_dir / "scenario.schema.json").read_text())
+    return jsonschema.Draft202012Validator(schema)
+
+
 def fixture_files(root: Path) -> List[Path]:
     return sorted(root.glob("**/*.json"))
 
@@ -27,9 +36,13 @@ def main(argv: List[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Python contract conformance runner")
     parser.add_argument("--fixtures", type=Path, default=Path("fixtures"))
     parser.add_argument("--out", type=Path, default=None, help="write one result JSON per fixture")
+    parser.add_argument("--schemas", type=Path, default=None, help="schema dir (default: sibling of --fixtures)")
     parser.add_argument("--freeze", action="store_true", help="freeze pending stochastic expected blocks")
     parser.add_argument("--refreeze", action="store_true", help="overwrite expected in simulation fixtures")
     args = parser.parse_args(argv)
+
+    schemas_dir = args.schemas or (args.fixtures.parent / "schemas")
+    validator = _validator(schemas_dir)
 
     if args.out:
         args.out.mkdir(parents=True, exist_ok=True)
@@ -39,7 +52,11 @@ def main(argv: List[str] | None = None) -> int:
         doc: Dict[str, Any] = json.loads(path.read_text())
         scenario = doc.get("scenario", doc)
         status = doc.get("expected_status", "frozen")
-        result = run_scenario_safe(scenario)
+        # Schema validation precedes engine semantics: an invalid scenario is SCHEMA_INVALID.
+        if validator is not None and list(validator.iter_errors(scenario)):
+            result: Dict[str, Any] = {"error": "SCHEMA_INVALID"}
+        else:
+            result = run_scenario_safe(scenario)
 
         if args.out:
             (args.out / f"{scenario.get('scenario_id', path.stem)}.json").write_text(

@@ -15,7 +15,7 @@ from .prng import SplitMix64
 
 CONTRACT_VERSION = "1.0"
 _MAX_OCCURRENCES = 100_000
-_MONTH_STEPS = {"monthly": 1, "bimonthly": 2, "quarterly": 3, "semiannually": 6}
+_MONTH_STEPS = {"monthly": 1, "bimonthly": 2, "quarterly": 3, "semiannually": 6, "annually": 12}
 _FREQUENCIES = {
     "weekly", "biweekly", "semimonthly", "monthly", "bimonthly",
     "quarterly", "semiannually", "annually", "onetime",
@@ -49,13 +49,6 @@ def _parse_date(value: Any, code: str = "INVALID_DATE") -> date:
 
 def _last_day(year: int, month: int) -> int:
     return calendar.monthrange(year, month)[1]
-
-
-def _add_months(d: date, months: int, anchor: int) -> date:
-    total = d.year * 12 + (d.month - 1) + months
-    year, month = divmod(total, 12)
-    month += 1
-    return date(year, month, min(anchor, _last_day(year, month)))
 
 
 def _validate_event(ev: Dict[str, Any]) -> None:
@@ -125,19 +118,21 @@ def _occurrences(rec: Dict[str, Any], ceiling: date) -> List[date]:
             if stop(date(year, month, 1)):
                 return out
         return out
-    if freq == "annually":
-        d = start
-        while not stop(d) and len(out) < _MAX_OCCURRENCES:
-            out.append(d)
-            year = d.year + 1
-            d = date(year, start.month, min(anchor, _last_day(year, start.month)))
+    if freq == "annually" or freq in _MONTH_STEPS:
+        step = _MONTH_STEPS[freq]
+        year, month = start.year, start.month
+        while len(out) < _MAX_OCCURRENCES:
+            last = _last_day(year, month)
+            d = date(year, month, min(anchor, last))
+            if stop(d):
+                return out
+            if d >= start:  # start_date is a lower bound (MCD-0022)
+                out.append(d)
+            month += step
+            year += (month - 1) // 12
+            month = (month - 1) % 12 + 1
         return out
-    step = _MONTH_STEPS[freq]
-    d = start
-    while not stop(d) and len(out) < _MAX_OCCURRENCES:
-        out.append(d)
-        d = _add_months(d, step, anchor)
-    return out
+    raise ContractError("INVALID_FREQUENCY", freq)
 
 
 def expand(scenario: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], date, int, date]:
