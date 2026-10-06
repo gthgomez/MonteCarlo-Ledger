@@ -1,0 +1,32 @@
+name: Contract conformance
+
+on:
+  push:
+    branches: ["master", "campaign/**"]
+  pull_request:
+
+jobs:
+  conformance:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install package and dev dependencies
+        run: python -m pip install --upgrade pip && pip install -e .[dev] jsonschema
+
+      - name: Python passes the golden corpus
+        run: python -m pytest tests/test_contract_conformance.py -q
+
+      - name: Emit Python canonical results
+        run: python tools/conformance/run_python.py --out build/python-results
+
+      - name: Cross-engine comparison against the pinned Kotlin baseline
+        run: |
+          python tools/conformance/cross_engine.py \
+            --fixtures fixtures \
+            --python-dir build/python-results \
+            --kotlin-dir tools/conformance/kotlin-baseline

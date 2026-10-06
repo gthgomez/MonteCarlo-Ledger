@@ -1,9 +1,10 @@
 # MC-06 — Cross-Engine Divergence Report
 
-Fixtures checked: **22**  ·  Divergences: **0**
+Fixtures checked: **23**  ·  Divergences: **0**
 
 | scenario_id | outcome | detail |
 |---|---|---|
+| anchor-differs-from-start | PASS |  |
 | horizon-end-exclusive | PASS |  |
 | horizon-zero | PASS |  |
 | leap-year-recurrence | PASS |  |

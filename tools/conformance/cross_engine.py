@@ -9,10 +9,12 @@ no financial computation.
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from compare import deep_diff, load_json  # same directory
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from compare import deep_diff, load_json  # noqa: E402  (same directory)
 
 
 def find(fixture_dir: Path) -> List[Path]:
