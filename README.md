@@ -105,6 +105,12 @@ Example response:
 If the cached balance and ledger diverge, the API returns `409 Conflict` instead of serving a
 potentially misleading number.
 
+Note that `/safe-to-spend` is baseline-derived: it walks the deterministic cash-flow timeline and
+returns the lowest projected balance point. It does not run the Monte Carlo simulation and is not a
+worst-case guarantee. The Monte Carlo layer (see `monte_carlo_ledger/risk.py`) models uncertainty
+around that baseline and reports percentile outcomes, which are simulated estimates, not guarantees.
+See the [calculation contract](./docs/engineering/calculation-contract.md) for the exact semantics.
+
 ## Example Scenario
 
 Imagine this setup:
@@ -179,7 +185,22 @@ These checks also run in GitHub Actions.
 
 - [Architecture](./docs/ARCHITECTURE.md)
 - [Engineering Walkthrough](./docs/engineering-walkthrough.md)
+- [Calculation Contract](./docs/engineering/calculation-contract.md)
 - [Archived Upgrade Plan](./docs/archive/upgrade-plan-2026-04-09.md)
+
+## Versioning
+
+Two version domains exist in this repository and are intentionally independent:
+
+- **Package version** (`0.1.0` in `pyproject.toml`): the version of the installable
+  `monte-carlo-ledger` distribution. It stays at `0.1.0` until a real release is cut; it is not
+  bumped for documentation or metadata changes.
+- **API contract version** (`1.0.0` in `monte_carlo_ledger/api.py`): the version advertised by the
+  local FastAPI surface for its endpoint shapes. It changes only when the API's request/response
+  contract changes, and may therefore differ from the package version.
+
+The default (and currently only maintained) branch is `master`. That is an intentional choice, not
+a leftover; there are no plans to rename it.
 
 ## Status
 

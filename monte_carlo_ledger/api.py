@@ -15,6 +15,8 @@ async def lifespan(_: FastAPI):
 app = FastAPI(
     title="Monte Carlo Budget API",
     description="API layer for the Monte Carlo Budget Simulator exposing deterministic safe spend metrics.",
+    # API contract version, independent of the package version in pyproject.toml.
+    # Bump only when the request/response shapes of these endpoints change.
     version="1.0.0",
     lifespan=lifespan,
 )
