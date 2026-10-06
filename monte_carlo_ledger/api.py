@@ -21,6 +21,8 @@ app = FastAPI(
         "Local-only API over the canonical MonteCarlo contract engine. "
         "All financial conclusions are produced by the contract engine."
     ),
+    # API contract version, independent of the package version in pyproject.toml.
+    # Bump only when the request/response shapes of these endpoints change.
     version="2.0.0",
     lifespan=lifespan,
 )
@@ -35,23 +37,37 @@ def _require_sync() -> None:
         )
 
 
-def _boundary_as_of(as_of: Optional[str]) -> str:
-    """The core never reads a clock; the HTTP boundary may default to today."""
-    return as_of or date.today().isoformat()
+def _resolve_as_of(as_of: Optional[str]) -> str:
+    """The core never reads a clock; this HTTP boundary may default to today.
+
+    A malformed date is a 422, not a silent fallback, so automation cannot
+    accidentally query the wrong window.
+    """
+    if as_of is None:
+        return date.today().isoformat()
+    try:
+        return date.fromisoformat(as_of).isoformat()
+    except ValueError:
+        raise HTTPException(
+            status_code=422,
+            detail="as_of must be an ISO date (YYYY-MM-DD).",
+        )
 
 
 # NOTE: Local use only (127.0.0.1). No authentication. Do not expose to a network.
 @app.get("/safe-to-spend")
 def get_safe_to_spend(
     days_ahead: int = Query(30, ge=1, le=365),
-    as_of: Optional[str] = None,
+    as_of: Optional[str] = Query(
+        None, description="Simulation date, YYYY-MM-DD. Defaults to today at this boundary."
+    ),
     quantile_num: int = Query(1, ge=1),
     quantile_den: int = Query(10, ge=1),
     reserve_cents: int = Query(0, ge=0),
 ):
     """Quantile-based safe-to-spend over the given horizon (MCD-0008)."""
     _require_sync()
-    effective_as_of = _boundary_as_of(as_of)
+    effective_as_of = _resolve_as_of(as_of)
     result = run_scenario(build_scenario(
         effective_as_of,
         days_ahead,
@@ -78,7 +94,7 @@ def v1_forecast(
     as_of: str = Query(...),
     horizon_days: int = Query(90, ge=0, le=3650),
 ):
-    return decisions.forecast(as_of, horizon_days)
+    return decisions.forecast(_resolve_as_of(as_of), horizon_days)
 
 
 @app.get("/v1/risk")
@@ -88,7 +104,7 @@ def v1_risk(
     seed: int = Query(42, ge=0),
     runs: int = Query(500, ge=1),
 ):
-    return decisions.risk(as_of, horizon_days, {"seed": seed, "runs": runs})
+    return decisions.risk(_resolve_as_of(as_of), horizon_days, {"seed": seed, "runs": runs})
 
 
 @app.get("/v1/safe-to-spend")
@@ -101,7 +117,7 @@ def v1_safe_to_spend(
     quantile_den: int = Query(10, ge=1),
     reserve_cents: int = Query(0, ge=0),
 ):
-    return decisions.risk(as_of, horizon_days, {
+    return decisions.risk(_resolve_as_of(as_of), horizon_days, {
         "seed": seed,
         "runs": runs,
         "quantile_num": quantile_num,
@@ -117,7 +133,7 @@ def v1_overdraft(
     seed: int = Query(42, ge=0),
     runs: int = Query(500, ge=1),
 ):
-    return decisions.overdraft_risk(as_of, horizon_days, {"seed": seed, "runs": runs})
+    return decisions.overdraft_risk(_resolve_as_of(as_of), horizon_days, {"seed": seed, "runs": runs})
 
 
 @app.get("/v1/simulate-purchase")
@@ -130,5 +146,6 @@ def v1_simulate_purchase(
     runs: int = Query(500, ge=1),
 ):
     return decisions.simulate_purchase(
-        amount_cents, purchase_date, as_of, horizon_days, {"seed": seed, "runs": runs}
+        amount_cents, purchase_date, _resolve_as_of(as_of), horizon_days,
+        {"seed": seed, "runs": runs},
     )

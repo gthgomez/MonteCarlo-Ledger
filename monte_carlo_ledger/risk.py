@@ -1,19 +1,31 @@
 import math
 import random
 from collections import Counter
-from datetime import datetime, timedelta
+from datetime import date, timedelta
 from typing import Dict, List, Optional
 
 from .forecasting import build_balance_forecast, calculate_forecast_summary
 from .monte_carlo_config import MonteCarloConfig
 
+# Version of the scenario-generation algorithm. Recorded in run_monte_carlo
+# output; no guarantee of identical results across future versions.
+SIMULATION_ALGORITHM_VERSION = "1"
+
 
 def generate_scenario_timeline(
-    base_timeline: List[Dict], rng: random.Random, config: MonteCarloConfig
+    base_timeline: List[Dict],
+    rng: random.Random,
+    config: MonteCarloConfig,
+    *,
+    as_of: date,
 ) -> List[Dict]:
     """
     Generates a Monte Carlo scenario timeline.
     Mutates amounts safely within integer bounds and appends bounded surprise events.
+
+    ``as_of`` is the explicit simulation date (captured once at the CLI/API
+    boundary). This module must never read the wall clock. The horizon is
+    inclusive: both ``as_of`` itself and the last event date belong to it.
     """
     scenario = []
 
@@ -30,14 +42,13 @@ def generate_scenario_timeline(
         scenario.append(new_event)
 
     if base_timeline:
-        start_date = datetime.now()
-        end_date = datetime.strptime(base_timeline[-1]["date"], "%Y-%m-%d")
-        days_total = (end_date - start_date).days
+        end_date = date.fromisoformat(base_timeline[-1]["date"])
+        days_total = (end_date - as_of).days + 1
 
         checks = days_total // config.surprise_check_interval_days
         for i in range(checks):
             if rng.random() < config.surprise_probability:
-                surprise_day = start_date + timedelta(
+                surprise_day = as_of + timedelta(
                     days=i * config.surprise_check_interval_days
                     + rng.randint(0, config.surprise_check_interval_days - 1)
                 )
@@ -69,8 +80,14 @@ def run_monte_carlo(
     balance_cents: int,
     base_timeline: List[Dict],
     config: Optional[MonteCarloConfig] = None,
+    *,
+    as_of: date,
 ) -> Dict:
-    """Executes multiple scenarios and aggregates deterministic risk metrics."""
+    """Executes multiple scenarios and aggregates deterministic risk metrics.
+
+    ``as_of`` is the explicit simulation date; the caller (CLI/API boundary)
+    supplies it. Results are a pure function of the inputs and the seed.
+    """
     if config is None:
         config = MonteCarloConfig()
 
@@ -82,7 +99,7 @@ def run_monte_carlo(
     negative_dates = []
 
     for _ in range(config.runs):
-        scenario = generate_scenario_timeline(base_timeline, rng, config)
+        scenario = generate_scenario_timeline(base_timeline, rng, config, as_of=as_of)
         res = simulate_scenario(balance_cents, scenario)
 
         ending_balances.append(res["ending_balance"])
@@ -106,8 +123,11 @@ def run_monte_carlo(
     median_ending = get_median(ending_balances)
     median_lowest = get_median(lowest_balances)
 
-    tenth_idx = max(0, math.ceil(config.worst_percentile * len(ending_balances)) - 1)
-    worst_10_ending = ending_balances[tenth_idx] if ending_balances else 0
+    # Low-percentile order statistic at the configured (normalized, 0 < p <= 1)
+    # percentile of the simulated ending balances. This is a simulated estimate,
+    # not a guarantee and not a worst case.
+    low_idx = max(0, math.ceil(config.worst_percentile * len(ending_balances)) - 1)
+    low_percentile_ending = ending_balances[low_idx] if ending_balances else 0
 
     most_common_neg_date = None
     window_start = None
@@ -123,11 +143,18 @@ def run_monte_carlo(
 
     return {
         "runs": config.runs,
+        "seed": config.seed,
+        "as_of": as_of.isoformat(),
+        "simulation_algorithm_version": SIMULATION_ALGORITHM_VERSION,
         "probability_negative": prob_neg,
         "negative_runs": negative_runs,
         "median_ending_balance": median_ending,
         "median_lowest_balance": median_lowest,
-        "worst_10_percent_ending_balance": worst_10_ending,
+        "low_percentile": config.worst_percentile,
+        "low_percentile_ending_balance": low_percentile_ending,
+        # Deprecated alias kept for backwards compatibility with the old fixed
+        # 10% label; use ``low_percentile_ending_balance`` instead.
+        "worst_10_percent_ending_balance": low_percentile_ending,
         "most_common_first_negative_date": most_common_neg_date,
         "most_common_negative_window": {
             "start": window_start,
