@@ -1,26 +1,24 @@
-# PROJECT_CONTEXT.md - MonteCarloLedgerPython
+# PROJECT_CONTEXT.md — MonteCarlo Ledger Python
 
-## What This Is
+## Current repository facts
 
-Experimental research and Python implementation of the Monte Carlo Ledger logic. This serves as a reference and research playground for the Android/Kotlin implementation.
+Python 3.10+ package for a local-first financial ledger, deterministic cash-flow
+forecasting and bounded Monte Carlo risk analysis. `pyproject.toml` defines the
+`monte-carlo-ledger` entrypoint; source lives in `monte_carlo_ledger/`.
+Read [README.md](../../README.md) and [architecture](../ARCHITECTURE.md) for behavior.
+Financial convergence with Android or other interfaces must be qualified by tests.
 
-This file is the agent-neutral project context.
+## Startup and commands
 
-## Startup Sequence
+Follow [repository-root AGENTS.md](../../AGENTS.md), then touched source/tests.
+Parent workspace and Android references are optional, never absent dependencies.
+Run from this repository root:
 
-1. Read `C:\Workspace\ENGINEERING.md`.
-2. Read `C:\Workspace\AGENTS.md`.
-3. Read this file.
-4. Read the Android context at `C:\Workspace\Project_Android\MonteCarloLedger\PROJECT_CONTEXT.md` for the production reference.
+- Setup: `python -m pip install -e '.[dev]'`
+- Static checks: `python -m ruff check .` and `python -m pyright`
+- Tests: `python -m pytest -q`
+- CLI: `python -m monte_carlo_ledger` (may create/mutate the local ledger)
 
-## Local Rules
-
-- Research focus: deterministic forecasting and reconciliation logic.
-- Prototype new algorithms here before porting to Kotlin.
-
-## Verification & Commands
-
-Run from `C:\Workspace\Project_Research\MonteCarloLedgerPython`.
-
-- Run research scripts: `python research/run_simulation.py`
-- Verify logic: `pytest tests/`
+Protect integer-cents accounting, reconciliation, schema integrity, user data,
+and deterministic tests. Do not treat a repository name or dated research note
+as proof of the current architecture, parity, or release status.
