@@ -6,10 +6,10 @@
 
 | Engine | Revision | Domain | Status |
 |---|---|---|---|
-| Python `monte_carlo_ledger/contract` (reference) | `a233614` | CLI/API/MCP/Site (later) | passes 23/23 fixtures |
-| Kotlin `com.montecarlo.ledger.contract` | `8dde17f` (pin `a233614`) | Android | passes 23/23 fixtures |
+| Python `monte_carlo_ledger/contract` (reference) | `d2e621c` | CLI/API/MCP/Site (later) | passes 24/24 fixtures |
+| Kotlin `com.montecarlo.ledger.contract` | `002dabc` (pin `d2e621c`) | Android | passes 24/24 fixtures |
 
-**Cross-engine result (dumb comparer, `tools/conformance/cross_engine.py`):** 23 fixtures checked,
+**Cross-engine result (dumb comparer, `tools/conformance/cross_engine.py`):** 24 fixtures checked,
 **0 divergences**. Python and Kotlin emit byte-identical canonical results, and both match the
 fixture `expected`.
 
@@ -71,15 +71,15 @@ fixture `expected`.
 
 - [x] Every normative rule documented (`contracts/`).
 - [x] Both engines consume the same contract revision (`a233614`, hash-pinned).
-- [x] Python passes the golden corpus (23/23).
-- [x] Kotlin passes the golden corpus (23/23).
+- [x] Python passes the golden corpus (24/24).
+- [x] Kotlin passes the golden corpus (24/24).
 - [x] Stochastic reproducibility explicit and documented (SplitMix64, MCD-0006).
-- [x] No unexplained cross-engine differences (0 divergences over 23 shared fixtures).
+- [x] No unexplained cross-engine differences (0 divergences over 24 shared fixtures).
 - [x] Every resolved disagreement has evidence or an MCD.
 - [x] CI prevents silent drift (Python conformance + cross-engine comparer in `.github/workflows/contract-conformance.yml`; Kotlin pin + conformance tests in the Android repo).
-- [ ] CLI/API/MCP/Site do not duplicate financial logic — **not yet done** (native paths still exist); see next campaign.
-- [x] Android remains native (new contract package is Kotlin-native, no Python runtime).
-- [x] Repository communicates that contract + fixtures define truth (`contracts/README.md`, `docs/contract-guide.md`).
+- [x] CLI/API do not duplicate financial logic — **done in MC-04/05**: CLI/API delegate to the contract engine (`scenario.py`, `decisions.py`, `commands.py`). Interactive terminal dashboards still use the legacy paths (remaining work).
+- [x] Android remains native (contract engine is Kotlin-native, no Python runtime).
+- [~] Android product adoption — **partially done in MC-06b**: dashboard/widget headline forecast, Monte Carlo and safe-to-spend run the contract engine behind `FeatureFlags.contractForecastEnabled`; the fan chart, `ForecastEngine` cash-flow rows, and `DebtPayoffEngine` remain native (non-normative / follow-on).
 
 > Note: Python and Kotlin both pass all 23 fixtures. Python additionally has unit tests for the
 > PRNG, rounding, and percentile vectors.

@@ -1,6 +1,6 @@
 # MC-06 — Cross-Engine Divergence Report
 
-Fixtures checked: **23**  ·  Divergences: **0**
+Fixtures checked: **24**  ·  Divergences: **0**
 
 | scenario_id | outcome | detail |
 |---|---|---|
@@ -25,5 +25,6 @@ Fixtures checked: **23**  ·  Divergences: **0**
 | invalid-zero-income | PASS |  |
 | income-variation | PASS |  |
 | negative-probability | PASS |  |
+| no-events-surprises | PASS |  |
 | safe-to-spend | PASS |  |
 | seeded-reproducibility | PASS |  |
