@@ -186,6 +186,36 @@ def _ordered(events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return sorted(events, key=lambda e: (e["date"], e["sequence"], e["order"]))
 
 
+def ordered_events(scenario: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """The canonical in-window event sequence for a scenario (MCD-0002/0003/0021).
+
+    Exposes the same ordering the forecast and simulation use, so surface adapters
+    (CLI/dashboard renderers) never re-implement recurrence or ordering semantics.
+    """
+    events, _as_of, _horizon, _window_end = expand(scenario)
+    return _ordered(events)
+
+
+def event_rows(scenario: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Canonical ordered event timeline with running balances.
+
+    A display adapter over ``ordered_events`` + ``checked_add``; it introduces no
+    new financial rule, so every row is consistent with the canonical forecast.
+    """
+    balance = int(scenario["starting_balance_cents"])
+    rows: List[Dict[str, Any]] = []
+    for ev in ordered_events(scenario):
+        balance = checked_add(balance, ev["amount"])
+        rows.append({
+            "date": ev["date"].isoformat(),
+            "name": ev["name"],
+            "type": ev["type"],
+            "amount": ev["amount"],
+            "balance_after": balance,
+        })
+    return rows
+
+
 def forecast(start: int, as_of: date, ordered_events: List[Dict[str, Any]]) -> Dict[str, Any]:
     balance = start
     minimum = start

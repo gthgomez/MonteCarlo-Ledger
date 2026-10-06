@@ -1,21 +1,10 @@
 import sys
 from datetime import date
 
-from . import dashboards, db_manager, forecasting, monte_carlo_config, risk, workflows
+from . import dashboards, db_manager, workflows
 from .ui import Theme, cprint, show_global_help, wait_for_user
 
-build_financial_timeline = dashboards.build_financial_timeline
-render_forecast_dashboard = dashboards.render_forecast_dashboard
-render_monte_carlo_dashboard = dashboards.render_monte_carlo_dashboard
 render_timeline_dashboard = dashboards.render_timeline_dashboard
-show_summary = dashboards.show_summary
-
-build_balance_forecast = forecasting.build_balance_forecast
-calculate_daily_safe_spend = forecasting.calculate_daily_safe_spend
-calculate_forecast_summary = forecasting.calculate_forecast_summary
-calculate_safe_spend = forecasting.calculate_safe_spend
-MonteCarloConfig = monte_carlo_config.MonteCarloConfig
-run_monte_carlo = risk.run_monte_carlo
 
 handle_add_bill = workflows.handle_add_bill
 handle_forecast = workflows.handle_forecast
@@ -56,7 +45,7 @@ def main():
 
     while True:
         try:
-            render_timeline_dashboard()
+            render_timeline_dashboard(as_of=as_of)
             options = [
                 "1. Pay a Bill               (Subtract from balance)",
                 "2. Record Paycheck          (Add to balance)",

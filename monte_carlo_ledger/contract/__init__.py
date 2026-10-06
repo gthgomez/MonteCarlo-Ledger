@@ -5,9 +5,11 @@ from __future__ import annotations
 from .engine import (
     CONTRACT_VERSION,
     SIMULATION_DEFAULTS,
+    event_rows,
     expand,
     forecast,
     nearest_rank,
+    ordered_events,
     run_scenario,
     run_scenario_safe,
 )
@@ -30,9 +32,11 @@ __all__ = [
     "ContractError",
     "SplitMix64",
     "checked_add",
+    "event_rows",
     "expand",
     "forecast",
     "nearest_rank",
+    "ordered_events",
     "round_half_away",
     "run_scenario",
     "run_scenario_safe",
