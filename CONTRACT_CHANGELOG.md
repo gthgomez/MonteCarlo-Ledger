@@ -42,6 +42,13 @@ Initial semantic foundation. Derived from the MC-00 cross-engine inventory
 | D-19 | Single currency (USD) | MCD-0019 |
 | D-20 | Overflow is an error, never a wrap | MCD-0020 |
 
+### Corrected while drafting (pre-release)
+
+- `scale_cents_by_percent` was initially written as a *delta* function. The MC-03 reference exposed
+  the contradiction with the simulation pseudocode and with Kotlin's `scaleCentsByPercent`
+  (`scale(100,1)=101`). It is now defined as scaling by `(100 + percent)%`, and the basis-point
+  functions remain fractions. See MCD-0007. No version bump: 1.0 was never released.
+
 ### Deferred to a future version
 
 - Calibration (deriving simulation parameters from history).

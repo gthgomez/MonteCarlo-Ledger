@@ -31,23 +31,30 @@ This is exact integer arithmetic and is identical in every language. `sign(0) = 
 
 ## Percentage scaling
 
-Two canonical scaling functions, both built only on `round_half_away`:
+Two *different* canonical functions. They are not interchangeable.
 
 ```text
-scale_cents_by_percent(amount_cents, percent)  = round_half_away(amount_cents * percent, 100)
+# Scale an amount by a signed percent variation: result is (100 + percent)% of the amount.
+scale_cents_by_percent(amount_cents, percent) = round_half_away(amount_cents * (100 + percent), 100)
+
+# A basis-point fraction of an amount (interest, minimum payments): result is bps/10000 of it.
 scale_cents_by_basis_points(amount_cents, bps) = round_half_away(amount_cents * bps, 10000)
 scale_cents_by_bps_over_months(amount_cents, bps, months)
                                                = round_half_away(amount_cents * bps, 10000 * months)
 ```
 
+`percent` is a signed variation (`-20` means 20% less); `bps` is a non-negative fraction in
+hundredths of a percent (`500` bps = 5%). The simulation's income/expense variation uses
+`scale_cents_by_percent`; debt/interest uses the basis-point functions.
+
 Examples (binding):
 
 | call | result |
 |---|---|
-| `scale_cents_by_percent(100, 1)` | `1` |
-| `scale_cents_by_percent(100, -1)` | `-1` |
-| `scale_cents_by_percent(101, -8)` | `-8` (not `-9`) |
-| `scale_cents_by_percent(150, 0)` | `0` |
+| `scale_cents_by_percent(100, 1)` | `101` |
+| `scale_cents_by_percent(100, -1)` | `99` |
+| `scale_cents_by_percent(101, -8)` | `93` (101 × 0.92 = 92.92 → 93) |
+| `scale_cents_by_percent(150, 0)` | `150` |
 | `scale_cents_by_basis_points(999, 500)` | `50` (5% of 999 = 49.95 → 50) |
 
 Integer floor division (`//`, `Math.floorDiv`) must **not** be used to apply a percentage; that is
