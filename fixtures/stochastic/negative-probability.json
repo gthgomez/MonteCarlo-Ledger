@@ -1,0 +1,61 @@
+{
+  "scenario": {
+    "contract_version": "1.0",
+    "scenario_id": "negative-probability",
+    "as_of": "2026-10-01",
+    "starting_balance_cents": 30000,
+    "horizon_days": 90,
+    "events": [
+      {
+        "name": "rent",
+        "date": "2026-10-03",
+        "amount_cents": -95000,
+        "type": "expense"
+      },
+      {
+        "name": "paycheck",
+        "date": "2026-10-10",
+        "amount_cents": 90000,
+        "type": "income"
+      },
+      {
+        "name": "paycheck",
+        "date": "2026-10-24",
+        "amount_cents": 90000,
+        "type": "income"
+      },
+      {
+        "name": "utilities",
+        "date": "2026-10-18",
+        "amount_cents": -12000,
+        "type": "expense"
+      }
+    ],
+    "simulation": {
+      "runs": 500,
+      "seed": 42
+    }
+  },
+  "expected_status": "frozen",
+  "expected": {
+    "contract_version": "1.0",
+    "scenario_id": "negative-probability",
+    "forecast": {
+      "minimum_balance_cents": -65000,
+      "minimum_balance_date": "2026-10-03",
+      "ending_balance_cents": 103000,
+      "first_negative_date": "2026-10-03"
+    },
+    "risk": {
+      "negative_balance_probability_ppm": 1000000,
+      "minimum_balance_p10_cents": -65000,
+      "minimum_balance_p50_cents": -65000,
+      "minimum_balance_p90_cents": -65000,
+      "ending_balance_p10_cents": 81645,
+      "ending_balance_p50_cents": 96010,
+      "ending_balance_p90_cents": 107500,
+      "projected_low_point_cents": -65000,
+      "safe_to_spend_cents": -65000
+    }
+  }
+}

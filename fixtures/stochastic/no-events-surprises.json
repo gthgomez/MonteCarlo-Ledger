@@ -1,0 +1,37 @@
+{
+  "scenario": {
+    "contract_version": "1.0",
+    "scenario_id": "no-events-surprises",
+    "as_of": "2026-10-01",
+    "starting_balance_cents": 100000,
+    "horizon_days": 90,
+    "events": [],
+    "simulation": {
+      "runs": 500,
+      "seed": 42
+    }
+  },
+  "expected_status": "frozen",
+  "expected": {
+    "contract_version": "1.0",
+    "scenario_id": "no-events-surprises",
+    "forecast": {
+      "minimum_balance_cents": 100000,
+      "minimum_balance_date": "2026-10-01",
+      "ending_balance_cents": 100000,
+      "first_negative_date": null
+    },
+    "risk": {
+      "negative_balance_probability_ppm": 0,
+      "minimum_balance_p10_cents": 78344,
+      "minimum_balance_p50_cents": 93634,
+      "minimum_balance_p90_cents": 100000,
+      "ending_balance_p10_cents": 78344,
+      "ending_balance_p50_cents": 93634,
+      "ending_balance_p90_cents": 100000,
+      "projected_low_point_cents": 100000,
+      "safe_to_spend_cents": 78344
+    }
+  },
+  "notes": "Surprise generation depends only on horizon_days and surprise parameters, not on the presence of scheduled events (MCD-0023)."
+}

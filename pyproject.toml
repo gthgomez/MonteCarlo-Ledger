@@ -30,14 +30,15 @@ dev = [
   "hypothesis>=6.100.0,<7.0.0",
   "pytest>=8.0.0,<9.0.0",
   "ruff>=0.11.0,<0.12.0",
-  "pyright>=1.1.400,<2.0.0"
+  "pyright>=1.1.400,<2.0.0",
+  "jsonschema>=4.0.0"
 ]
 
 [project.scripts]
 monte-carlo-ledger = "monte_carlo_ledger.cli:main"
 
 [tool.setuptools]
-packages = ["monte_carlo_ledger"]
+packages = ["monte_carlo_ledger", "monte_carlo_ledger.contract"]
 
 [tool.setuptools.package-data]
 monte_carlo_ledger = ["schema.sql"]

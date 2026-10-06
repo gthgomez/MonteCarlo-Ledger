@@ -1,0 +1,22 @@
+{
+  "scenario": {
+    "contract_version": "1.0",
+    "scenario_id": "exact-zero",
+    "as_of": "2026-10-01",
+    "starting_balance_cents": 50000,
+    "horizon_days": 10,
+    "events": [
+      { "name": "big-bill", "date": "2026-10-05", "amount_cents": -50000, "type": "expense" }
+    ]
+  },
+  "expected": {
+    "contract_version": "1.0",
+    "scenario_id": "exact-zero",
+    "forecast": {
+      "minimum_balance_cents": 0,
+      "minimum_balance_date": "2026-10-05",
+      "ending_balance_cents": 0,
+      "first_negative_date": null
+    }
+  }
+}

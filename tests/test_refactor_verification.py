@@ -103,9 +103,10 @@ class TestRefactorVerification(unittest.TestCase):
         safe_spend = main.calculate_safe_spend(50000, timeline)
         self.assertEqual(safe_spend, 30000)
         
-        # API Check
+        # API Check: the contract endpoint reports the deterministic low point
+        # separately from the quantile-based safe-to-spend (MCD-0008).
         response = self.api_client.get("/safe-to-spend?days_ahead=30")
-        self.assertEqual(response.json()['safe_spend_cents'], 30000)
+        self.assertEqual(response.json()['projected_low_point_cents'], 30000)
 
     def test_scenario_3_negative_balance_risk(self):
         """

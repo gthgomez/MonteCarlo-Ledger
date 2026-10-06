@@ -1,0 +1,10 @@
+{
+  "scenario": {
+    "contract_version": "1.0",
+    "scenario_id": "invalid-missing-as-of",
+    "starting_balance_cents": 1000,
+    "horizon_days": 10,
+    "events": []
+  },
+  "expected": { "error": "SCHEMA_INVALID" }
+}

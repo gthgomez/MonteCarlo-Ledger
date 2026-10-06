@@ -1,0 +1,1 @@
+{"contract_version":"1.0","scenario_id":"negative-start","forecast":{"minimum_balance_cents":-20000,"minimum_balance_date":"2026-10-01","ending_balance_cents":30000,"first_negative_date":"2026-10-01"}}

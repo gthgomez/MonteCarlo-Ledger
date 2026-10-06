@@ -1,0 +1,22 @@
+{
+  "scenario": {
+    "contract_version": "1.0",
+    "scenario_id": "negative-start",
+    "as_of": "2026-10-01",
+    "starting_balance_cents": -20000,
+    "horizon_days": 10,
+    "events": [
+      { "name": "paycheck", "date": "2026-10-05", "amount_cents": 50000, "type": "income" }
+    ]
+  },
+  "expected": {
+    "contract_version": "1.0",
+    "scenario_id": "negative-start",
+    "forecast": {
+      "minimum_balance_cents": -20000,
+      "minimum_balance_date": "2026-10-01",
+      "ending_balance_cents": 30000,
+      "first_negative_date": "2026-10-01"
+    }
+  }
+}

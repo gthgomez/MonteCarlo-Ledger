@@ -1,0 +1,22 @@
+{
+  "scenario": {
+    "contract_version": "1.0",
+    "scenario_id": "horizon-zero",
+    "as_of": "2026-10-01",
+    "starting_balance_cents": 12345,
+    "horizon_days": 0,
+    "events": [
+      { "name": "excluded", "date": "2026-10-01", "amount_cents": -100, "type": "expense" }
+    ]
+  },
+  "expected": {
+    "contract_version": "1.0",
+    "scenario_id": "horizon-zero",
+    "forecast": {
+      "minimum_balance_cents": 12345,
+      "minimum_balance_date": "2026-10-01",
+      "ending_balance_cents": 12345,
+      "first_negative_date": null
+    }
+  }
+}

@@ -1,0 +1,58 @@
+{
+  "scenario": {
+    "contract_version": "1.0",
+    "scenario_id": "income-variation",
+    "as_of": "2026-10-01",
+    "starting_balance_cents": 200000,
+    "horizon_days": 90,
+    "events": [
+      {
+        "name": "paycheck",
+        "date": "2026-10-10",
+        "amount_cents": 100000,
+        "type": "income"
+      },
+      {
+        "name": "paycheck",
+        "date": "2026-10-24",
+        "amount_cents": 100000,
+        "type": "income"
+      },
+      {
+        "name": "paycheck",
+        "date": "2026-11-07",
+        "amount_cents": 100000,
+        "type": "income"
+      }
+    ],
+    "simulation": {
+      "runs": 500,
+      "seed": 42,
+      "income_variation_min": -20,
+      "income_variation_max": 20,
+      "surprise_probability_ppm": 0
+    }
+  },
+  "expected_status": "frozen",
+  "expected": {
+    "contract_version": "1.0",
+    "scenario_id": "income-variation",
+    "forecast": {
+      "minimum_balance_cents": 200000,
+      "minimum_balance_date": "2026-10-01",
+      "ending_balance_cents": 500000,
+      "first_negative_date": null
+    },
+    "risk": {
+      "negative_balance_probability_ppm": 0,
+      "minimum_balance_p10_cents": 200000,
+      "minimum_balance_p50_cents": 200000,
+      "minimum_balance_p90_cents": 200000,
+      "ending_balance_p10_cents": 473000,
+      "ending_balance_p50_cents": 501000,
+      "ending_balance_p90_cents": 527000,
+      "projected_low_point_cents": 200000,
+      "safe_to_spend_cents": 200000
+    }
+  }
+}
