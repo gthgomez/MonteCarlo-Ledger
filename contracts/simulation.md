@@ -55,17 +55,17 @@ next_ppm_hit(p):          # p in 0..1_000_000
 
 ### Reference test vectors (binding)
 
-These pin the PRNG across languages. `state` after construction is `seed`.
+These pin the PRNG across languages. `state` after construction is `seed`. Both columns are
+**alternatives computed from the freshly seeded state** (each consumes a single `next_u64()`), not
+sequential draws.
 
 | seed | first `next_u64()` (decimal) | first `next_int(0, 100)` |
 |---|---|---|
-| `42` | `13679457532755275413` | `` |
-| `0` | | |
+| `0` | `16294208416658607535` (`0xE220A8397B1DCDAF`) | `67` |
+| `42` | `13679457532755275413` | `23` |
 
-> The blank cells are filled by `tools/conformance/gen_vectors` in MC-02 from the Python reference
-> and MUST be copied back here by hand-review before Contract 1.0 is marked `released`. This is the
-> one place the contract depends on running code, and it is a *test vector*, not a semantic
-> definition.
+A conformant implementation must reproduce these. `tools/conformance` is extended in MC-03 to emit
+these vectors from the Python reference; Kotlin reproduces them in MC-06.
 
 ## Simulating one run
 
