@@ -28,8 +28,11 @@ def test_safe_to_spend_endpoint():
     data = response.json()
     assert 'safe_spend_cents' in data
 
-    # With no upcoming events, safe spend should be equal to current balance
-    assert data['safe_spend_cents'] == 50000
+    # Contract MCD-0008: the deterministic low point is reported separately from the
+    # quantile-based safe-to-spend. With no events the low point equals the balance;
+    # safe-to-spend is bounded by it (Monte Carlo surprises can only lower it).
+    assert data['projected_low_point_cents'] == 50000
+    assert data['safe_spend_cents'] <= 50000
 
 if __name__ == "__main__":
     test_safe_to_spend_endpoint()

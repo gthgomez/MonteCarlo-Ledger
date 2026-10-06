@@ -37,6 +37,12 @@ view_upcoming_30 = workflows.view_upcoming_30
 
 
 def main():
+    argv = sys.argv[1:]
+    from . import commands
+
+    if argv and argv[0] in commands.COMMANDS:
+        raise SystemExit(commands.main(argv))
+
     db_manager.init_db()
 
     if not db_manager.is_onboarded():
