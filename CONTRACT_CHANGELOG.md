@@ -4,6 +4,28 @@ All material changes to financial semantics are recorded here. A change that alt
 conclusion for an existing valid scenario requires a MAJOR version bump; a backward-compatible
 clarification requires a MINOR bump. Every entry links to an MCD where applicable.
 
+## 2.0 — 2026-10-07 (draft)
+
+MAJOR: adds a new liability/amortization conclusion domain and supersedes the deferred-liabilities
+clause of MCD-0012. No existing scenario's forecast, risk, or result changes.
+
+### Added
+
+- `contracts/debt.md` (component `debt` 1.0): scenario `liabilities`,
+  `debt_strategy` (`snowball` | `avalanche`), `extra_monthly_payment_cents`; result `debt` block
+  (schedule + summary). Deterministic amortization procedure with interest before payment, a 360-month
+  cap, and an overflow guard (MCD-0026).
+- Schemas: `liabilities`/`debt_strategy`/`extra_monthly_payment_cents` in `scenario.schema.json`;
+  `debt` in `result.schema.json`.
+- Fixtures `debt/installment-basic`, `debt/revolving-minimum`, `debt/snowball-order`,
+  `debt/avalanche-order`, `debt/extra-payment`, `debt/non-convergence`,
+  `invalid/duplicate-liability-id`.
+
+### Note
+
+- Liabilities are **not** injected into `forecast`; a caller that wants debt payments in the cash
+  projection adds them as ordinary `events`. Liabilities do not participate in `simulation`.
+
 ## 1.2 — 2026-10-07 (draft)
 
 Backward-compatible MINOR addition. No existing scenario's draw stream or result changes.

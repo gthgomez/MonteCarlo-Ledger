@@ -35,6 +35,7 @@ Every fixture is a JSON object with two keys:
 | `deterministic/` | explicit-event scenarios, forecast only |
 | `stochastic/` | scenarios that declare `simulation`, forecast + risk |
 | `boundary/` | horizon, month-end, leap-year, past-due, exact-zero, occurrence-exclusion edges |
+| `debt/` | liability amortization scenarios (contract 2.0) |
 | `invalid/` | schema or semantic errors |
 
 ## Authority

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from .debt import amortize, validate_liabilities
 from .engine import (
     CONTRACT_VERSION,
     SIMULATION_DEFAULTS,
@@ -31,6 +32,7 @@ __all__ = [
     "MIN_MONEY_CENTS",
     "ContractError",
     "SplitMix64",
+    "amortize",
     "checked_add",
     "event_rows",
     "expand",
@@ -42,4 +44,5 @@ __all__ = [
     "run_scenario_safe",
     "scale_cents_by_basis_points",
     "scale_cents_by_percent",
+    "validate_liabilities",
 ]

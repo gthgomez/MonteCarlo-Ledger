@@ -10,11 +10,12 @@ import calendar
 from datetime import date, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
+from .debt import amortize, validate_liabilities
 from .money import ContractError, checked_add, round_half_away, scale_cents_by_percent
 from .prng import SplitMix64
 
 CONTRACT_VERSION = "1.2"
-SUPPORTED_CONTRACT_VERSIONS = ("1.0", "1.1", "1.2")
+SUPPORTED_CONTRACT_VERSIONS = ("1.0", "1.1", "1.2", "2.0")
 _MAX_OCCURRENCES = 100_000
 _MONTH_STEPS = {"monthly": 1, "bimonthly": 2, "quarterly": 3, "semiannually": 6, "annually": 12}
 _FREQUENCIES = {
@@ -370,6 +371,17 @@ def run_scenario(scenario: Dict[str, Any]) -> Dict[str, Any]:
         "scenario_id": scenario.get("scenario_id", ""),
         "forecast": forecast(int(scenario["starting_balance_cents"]), as_of, base),
     }
+    # Contract 2.0: the deterministic debt block is present iff the scenario declares
+    # `liabilities` (an empty array yields a zeroed block). It is independent of forecast,
+    # risk and simulation, so it is emitted on both the simulation and no-simulation paths.
+    if "liabilities" in scenario:
+        validate_liabilities(scenario["liabilities"])
+        result["debt"] = amortize(
+            as_of,
+            scenario["liabilities"],
+            scenario.get("debt_strategy", "snowball"),
+            scenario.get("extra_monthly_payment_cents", 0),
+        )
     simulation = scenario.get("simulation")
     if simulation is None:
         return result

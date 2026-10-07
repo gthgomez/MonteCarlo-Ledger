@@ -1,12 +1,12 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://montecarlo.dev/schemas/scenario.schema.json",
-  "title": "MonteCarlo canonical scenario (contract 1.2)",
+  "title": "MonteCarlo canonical scenario (contract 2.0)",
   "type": "object",
   "additionalProperties": false,
   "required": ["contract_version", "scenario_id", "as_of", "starting_balance_cents", "horizon_days", "events"],
   "properties": {
-    "contract_version": { "enum": ["1.0", "1.1", "1.2"] },
+    "contract_version": { "enum": ["1.0", "1.1", "1.2", "2.0"] },
     "scenario_id": { "type": "string", "minLength": 1 },
     "as_of": { "type": "string", "format": "date" },
     "starting_balance_cents": { "type": "integer" },
@@ -23,9 +23,31 @@
       "type": "array",
       "items": { "$ref": "#/$defs/occurrence_exclusion" }
     },
+    "debt_strategy": { "enum": ["snowball", "avalanche"] },
+    "extra_monthly_payment_cents": { "type": "integer", "minimum": 0 },
+    "liabilities": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/liability" }
+    },
     "simulation": { "$ref": "#/$defs/simulation" }
   },
   "$defs": {
+    "liability": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "balance_cents", "apr_basis_points", "min_payment_cents"],
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "balance_cents": { "type": "integer", "minimum": 0 },
+        "apr_basis_points": { "type": "integer", "minimum": 0 },
+        "min_payment_cents": { "type": "integer", "minimum": 0 },
+        "kind": { "enum": ["installment", "revolving"] },
+        "min_payment_percent_bps": { "type": "integer", "minimum": 0 },
+        "min_payment_floor_cents": { "type": "integer", "minimum": 0 },
+        "due_day_of_month": { "type": "integer", "minimum": 1, "maximum": 31 }
+      }
+    },
     "occurrence_exclusion": {
       "type": "object",
       "additionalProperties": false,

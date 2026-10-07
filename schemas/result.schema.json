@@ -1,17 +1,54 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://montecarlo.dev/schemas/result.schema.json",
-  "title": "MonteCarlo canonical result (contract 1.2)",
+  "title": "MonteCarlo canonical result (contract 2.0)",
   "type": "object",
   "additionalProperties": false,
   "required": ["contract_version", "scenario_id", "forecast"],
   "properties": {
-    "contract_version": { "enum": ["1.0", "1.1", "1.2"] },
+    "contract_version": { "enum": ["1.0", "1.1", "1.2", "2.0"] },
     "scenario_id": { "type": "string" },
     "forecast": { "$ref": "#/$defs/forecast" },
-    "risk": { "$ref": "#/$defs/risk" }
+    "risk": { "$ref": "#/$defs/risk" },
+    "debt": { "$ref": "#/$defs/debt" }
   },
   "$defs": {
+    "debt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "strategy", "extra_monthly_payment_cents", "months_to_payoff", "payoff_date",
+        "total_interest_cents", "total_paid_cents", "did_not_converge", "schedule"
+      ],
+      "properties": {
+        "strategy": { "enum": ["snowball", "avalanche"] },
+        "extra_monthly_payment_cents": { "type": "integer", "minimum": 0 },
+        "months_to_payoff": { "type": "integer", "minimum": 0 },
+        "payoff_date": { "type": "string", "format": "date" },
+        "total_interest_cents": { "type": "integer" },
+        "total_paid_cents": { "type": "integer" },
+        "did_not_converge": { "type": "boolean" },
+        "schedule": { "type": "array", "items": { "$ref": "#/$defs/debt_step" } }
+      }
+    },
+    "debt_step": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "month", "date", "liability_id", "starting_balance_cents", "payment_cents",
+        "interest_cents", "principal_cents", "ending_balance_cents"
+      ],
+      "properties": {
+        "month": { "type": "integer", "minimum": 1 },
+        "date": { "type": "string", "format": "date" },
+        "liability_id": { "type": "string" },
+        "starting_balance_cents": { "type": "integer" },
+        "payment_cents": { "type": "integer" },
+        "interest_cents": { "type": "integer" },
+        "principal_cents": { "type": "integer" },
+        "ending_balance_cents": { "type": "integer" }
+      }
+    },
     "forecast": {
       "type": "object",
       "additionalProperties": false,
