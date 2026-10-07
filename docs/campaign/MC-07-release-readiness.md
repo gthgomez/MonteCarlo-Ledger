@@ -1,48 +1,42 @@
 # Contract Release Readiness
 
-**Decision: Contract 1.1 remains `draft`.**
+**Decision: Contract 2.0 remains `draft`, but every contract-level release condition is now met.**
 
-Updated after MC-08 (contract 1.1, occurrence exclusions). The product is behaviourally canonical,
-the evidence drift is fixed, and the MC-07 C5 double-count is resolved — but not every release
-condition is met. Marking 1.1 `released` here would assert a stability the repository cannot yet
-prove.
+Updated after MC-11 (contract 2.0, debt domain). The three previously-blocking items — the C5
+double-count, the unpublished pin, and the non-canonical debt conclusions — are all resolved.
+Promotion to `released` is deliberately left as the next explicit action.
 
 ## Condition checklist
 
-| Required release condition | Status | Evidence / blocker |
+| Required release condition | Status | Evidence |
 |---|---|---|
-| Metadata internally consistent | **PASS** | `contracts/version.json` `status: draft`, `created_at`/`updated_at`, `contract_version: 1.1`. |
-| Provenance exact | **PASS** | `MC-06-reconciliation-report.md` §Revision provenance; MC-08 pin `90ac33f`. |
-| Fixture corpus count exact | **PASS** | 27 fixtures; `fixtures/README.md`; cross-engine comparer. |
+| Metadata internally consistent | **PASS** | `contracts/version.json` `status: draft`, `contract_version: 2.0`, `created_at`/`updated_at`, component versions pinned. |
+| Provenance exact | **PASS** | `MC-06-reconciliation-report.md` §Revision provenance; MC-11 pin `c1dea8c`. |
+| Fixture corpus count exact | **PASS** | 38 fixtures; `fixtures/README.md`; cross-engine comparer. |
 | All golden fixtures green in both engines | **PASS** | Python conformance + Kotlin `ContractConformanceTest`. |
-| Zero unexplained divergences | **PASS** | `cross_engine.py`: 27 checked, 0 divergences. |
-| Current Python and Android product paths known | **PASS** | `docs/campaign/MC-07-adoption-map.md`. |
-| No user-visible Contract-1.x output on contradictory legacy semantics | **PASS** | Python migrated + legacy engines deleted; Android headlines/rows canonical, flag removed; C5 mid-window suppression resolved in contract 1.1 (MC-08, MCD-0024). |
-| Contract pin reproducible | **BLOCKED** | The Android pin names Ledger `90ac33f`, a commit **not yet on the default branch** (§Blocker 1). |
-| MCD index complete | **PASS** | MCD-0001…0024. |
-| Changelog correct | **PASS** | `CONTRACT_CHANGELOG.md` (1.0, 1.1 draft). |
+| Zero unexplained divergences | **PASS** | `cross_engine.py`: 38 checked, 0 divergences; Kotlin emitter byte-identical. |
+| Current product paths known | **PASS** | `docs/campaign/MC-07-adoption-map.md` + per-phase campaign docs. |
+| No user-visible output on contradictory legacy semantics | **PASS** | Python migrated (legacy engines deleted); Android headlines/rows canonical, flag persisted; C5 resolved (1.1); per-category variation canonical (1.2); **debt now canonical (2.0, MC-11)**. |
+| Contract pin reproducible | **PASS** | Android pins Ledger `c1dea8c`, which is on `master`. |
+| MCD index complete | **PASS** | MCD-0001…0026. |
+| Changelog correct | **PASS** | `CONTRACT_CHANGELOG.md` (1.0 … 2.0 draft). |
 | Contributor guide correct | **PASS** | `docs/contract-guide.md`. |
-| Release notes identify deferred 2.0 domains | **PASS** | `docs/campaign/MC-07-contract-2-candidates.md`. |
+| Release notes identify deferred domains | **PASS** | `docs/campaign/MC-07-contract-2-candidates.md`. |
 
-## Blockers (explicit)
+## Remaining before a deliberate `released` promotion
 
-1. **Pin is not yet published.** The Android contract pin references Ledger `90ac33f`, which exists
-   locally but is not on `master` (no trusted remote profile is registered for these remotes, so no
-   push/PR/merge is available in this environment — `STOP_REMOTE`). The pin becomes a valid,
-   fetchable provenance reference once the Ledger branch is pushed and merged.
-2. **Android verified by unit tests only.** `./gradlew :app:testDebugUnitTest` passes (339 tests),
-   but no device/instrumented verification was performed; numeric changes are asserted by unit
-   tests.
-3. **Naming hazard (documentation).** Android `CashFlowWindow.safeToSpendCents` /
-   `dailySafeSpendCents` are per-window deterministic figures distinct from the contract's quantile
-   `safe_to_spend_cents`. They are non-normative (the Planning screen uses them) and do not feed
-   headline values, but the name overlap should be resolved before release.
+1. **Device-level Android verification.** All Android evidence is unit tests
+   (`:app:testDebugUnitTest`, `:app:assembleDebug`); no instrumentation/device run.
+2. **Naming hazard.** Android `CashFlowWindow.safeToSpendCents` / `dailySafeSpendCents` are per-window
+   deterministic figures distinct from the contract's quantile `safe_to_spend_cents`; rename or
+   annotate before release.
+3. **The promotion itself** (deliberate): set `status: released` + a release date in
+   `contracts/version.json`, add the changelog/release note, re-pin Android to the exact released
+   snapshot, and rerun conformance end-to-end.
 
-## What would make it releasable
+## Deferred (not release blockers for 2.0)
 
-1. Land the Ledger 1.1 commit on the default branch and re-pin Android to that exact merged commit;
-   re-run cross-engine conformance.
-2. Device-level verification of the changed Android numbers.
-3. Rename/annotate the Android per-window heuristic.
+Multi-account / transfers, per-day stochastic path percentiles, calibration semantics,
+multi-currency, and the non-normative fan chart — see the candidate registry.
 
-Until then: `Contract 1.1 — STILL DRAFT`.
+Until the promotion action: `Contract 2.0 — STILL DRAFT`.
