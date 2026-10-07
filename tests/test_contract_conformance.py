@@ -149,8 +149,10 @@ def test_result_echoes_declared_version():
     v10 = _exclusion_scenario(contract_version="1.0")
     v10.pop("occurrence_exclusions")  # the field is a 1.1 addition; a 1.0 doc must not carry it
     assert run_scenario(v10)["contract_version"] == "1.0"
+    # Contract 2.0 is now released/supported (contracts/debt.md), so an unknown version
+    # (not 2.0) is what must be rejected.
     with pytest.raises(ContractError) as exc:
-        run_scenario(_exclusion_scenario(contract_version="2.0"))
+        run_scenario(_exclusion_scenario(contract_version="3.0"))
     assert exc.value.code == "SCHEMA_INVALID"
 
 

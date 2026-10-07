@@ -1,6 +1,6 @@
 # MonteCarlo Financial Contract
 
-**Contract version: 1.2** (see `version.json`)
+**Contract version: 2.0** (see `version.json`)
 
 This directory is the **normative** definition of MonteCarlo's financial semantics. It is
 language-neutral and implementation-independent. The Python `MonteCarlo-Ledger` engine and the
@@ -22,7 +22,7 @@ not sources of truth.
              │                       │
              └───────────┬───────────┘
                          │
-                 Contract version 1.2
+                 Contract version 2.0
                          │
               ┌──────────┴──────────┐
               │                     │
@@ -53,6 +53,7 @@ project; proprietary Kotlin *implementation* code must not be copied here.
 | [`forecast.md`](forecast.md) | deterministic projection metrics | forecast 1.0 |
 | [`simulation.md`](simulation.md) | PRNG, uncertainty model, aggregation, per-category variation | simulation 1.1 |
 | [`risk.md`](risk.md) | percentiles, probability of negative, safe-to-spend | risk 1.0 |
+| [`debt.md`](debt.md) | liabilities, amortization schedule, payoff strategy | debt 1.0 |
 
 Related artifacts:
 

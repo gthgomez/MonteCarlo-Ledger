@@ -1,0 +1,1 @@
+{"contract_version":"2.0","scenario_id":"non-convergence","forecast":{"minimum_balance_cents":0,"minimum_balance_date":"2026-10-01","ending_balance_cents":0,"first_negative_date":null},"debt":{"strategy":"snowball","extra_monthly_payment_cents":0,"months_to_payoff":1,"payoff_date":"2026-11-01","total_interest_cents":0,"total_paid_cents":0,"did_not_converge":true,"schedule":[]}}

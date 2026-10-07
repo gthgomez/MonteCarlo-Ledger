@@ -1,0 +1,92 @@
+{
+  "scenario": {
+    "contract_version": "2.0",
+    "scenario_id": "installment-basic",
+    "as_of": "2026-01-31",
+    "starting_balance_cents": 0,
+    "horizon_days": 30,
+    "events": [],
+    "liabilities": [
+      {
+        "id": "loan",
+        "name": "Loan",
+        "balance_cents": 50000,
+        "apr_basis_points": 0,
+        "min_payment_cents": 10000
+      }
+    ]
+  },
+  "expected_status": "frozen",
+  "notes": "MCD-0026: 0% installment, five payments; also exercises month-end clamping from Jan 31.",
+  "expected": {
+    "contract_version": "2.0",
+    "scenario_id": "installment-basic",
+    "forecast": {
+      "minimum_balance_cents": 0,
+      "minimum_balance_date": "2026-01-31",
+      "ending_balance_cents": 0,
+      "first_negative_date": null
+    },
+    "debt": {
+      "strategy": "snowball",
+      "extra_monthly_payment_cents": 0,
+      "months_to_payoff": 5,
+      "payoff_date": "2026-06-30",
+      "total_interest_cents": 0,
+      "total_paid_cents": 50000,
+      "did_not_converge": false,
+      "schedule": [
+        {
+          "month": 1,
+          "date": "2026-02-28",
+          "liability_id": "loan",
+          "starting_balance_cents": 50000,
+          "payment_cents": 10000,
+          "interest_cents": 0,
+          "principal_cents": 10000,
+          "ending_balance_cents": 40000
+        },
+        {
+          "month": 2,
+          "date": "2026-03-31",
+          "liability_id": "loan",
+          "starting_balance_cents": 40000,
+          "payment_cents": 10000,
+          "interest_cents": 0,
+          "principal_cents": 10000,
+          "ending_balance_cents": 30000
+        },
+        {
+          "month": 3,
+          "date": "2026-04-30",
+          "liability_id": "loan",
+          "starting_balance_cents": 30000,
+          "payment_cents": 10000,
+          "interest_cents": 0,
+          "principal_cents": 10000,
+          "ending_balance_cents": 20000
+        },
+        {
+          "month": 4,
+          "date": "2026-05-31",
+          "liability_id": "loan",
+          "starting_balance_cents": 20000,
+          "payment_cents": 10000,
+          "interest_cents": 0,
+          "principal_cents": 10000,
+          "ending_balance_cents": 10000
+        },
+        {
+          "month": 5,
+          "date": "2026-06-30",
+          "liability_id": "loan",
+          "starting_balance_cents": 10000,
+          "payment_cents": 10000,
+          "interest_cents": 0,
+          "principal_cents": 10000,
+          "ending_balance_cents": 0
+        }
+      ]
+    }
+  }
+}

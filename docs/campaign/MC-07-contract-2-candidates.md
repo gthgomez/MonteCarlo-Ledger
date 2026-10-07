@@ -29,7 +29,11 @@ Ranking is by user impact on the "one answer per financial question" goal.
 - **User impact.** Overstated bill burden and a wrong projected low point whenever a bill is moved
   or paid mid-window.
 
-## 2. Debt / amortization semantics — **HIGH**
+## 2. Debt / amortization semantics — **RESOLVED in Contract 2.0 (MC-11)**
+
+> Resolved by the `liabilities` scenario domain + `debt` result block (MCD-0026), delivered as the
+> MAJOR contract 2.0 — see `docs/campaign/MC-11-contract-2.0-debt.md`. The problem statement below is
+> kept for history.
 
 - **Problem.** The product shows debt payoff schedules, minimum payments, and snowball/avalanche
   strategies (`DebtPayoffEngine`) that Contract 1.x does not model.
@@ -40,7 +44,10 @@ Ranking is by user impact on the "one answer per financial question" goal.
 - **Note.** Only integrated into the contract if it can be modeled as deterministic ledger events;
   otherwise it needs a new contract domain.
 
-## 3. Per-category expense variation — **MEDIUM-HIGH**
+## 3. Per-category expense variation — **RESOLVED in Contract 1.2 (MC-10)**
+
+> Resolved by `expense_category_variation` + event `category` (MCD-0025), a backward-compatible MINOR
+> addition. The problem statement below is kept for history.
 
 - **Problem.** Users vary spending by category; Contract 1.x models one aggregate expense-variation
   scalar (MCD-0015).

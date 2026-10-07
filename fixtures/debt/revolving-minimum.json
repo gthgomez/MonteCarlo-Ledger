@@ -1,0 +1,645 @@
+{
+  "scenario": {
+    "contract_version": "2.0",
+    "scenario_id": "revolving-minimum",
+    "as_of": "2026-10-01",
+    "starting_balance_cents": 0,
+    "horizon_days": 30,
+    "events": [],
+    "liabilities": [
+      {
+        "id": "card",
+        "name": "Card",
+        "balance_cents": 100000,
+        "apr_basis_points": 1850,
+        "min_payment_cents": 0,
+        "kind": "revolving",
+        "min_payment_percent_bps": 300,
+        "min_payment_floor_cents": 2500
+      }
+    ]
+  },
+  "expected_status": "frozen",
+  "notes": "MCD-0026: revolving minimum = max(floor, 3% of balance); min_payment_cents is ignored.",
+  "expected": {
+    "contract_version": "2.0",
+    "scenario_id": "revolving-minimum",
+    "forecast": {
+      "minimum_balance_cents": 0,
+      "minimum_balance_date": "2026-10-01",
+      "ending_balance_cents": 0,
+      "first_negative_date": null
+    },
+    "debt": {
+      "strategy": "snowball",
+      "extra_monthly_payment_cents": 0,
+      "months_to_payoff": 60,
+      "payoff_date": "2031-10-01",
+      "total_interest_cents": 51576,
+      "total_paid_cents": 151576,
+      "did_not_converge": false,
+      "schedule": [
+        {
+          "month": 1,
+          "date": "2026-11-01",
+          "liability_id": "card",
+          "starting_balance_cents": 100000,
+          "payment_cents": 3046,
+          "interest_cents": 1542,
+          "principal_cents": 1504,
+          "ending_balance_cents": 98496
+        },
+        {
+          "month": 2,
+          "date": "2026-12-01",
+          "liability_id": "card",
+          "starting_balance_cents": 98496,
+          "payment_cents": 3000,
+          "interest_cents": 1518,
+          "principal_cents": 1482,
+          "ending_balance_cents": 97014
+        },
+        {
+          "month": 3,
+          "date": "2027-01-01",
+          "liability_id": "card",
+          "starting_balance_cents": 97014,
+          "payment_cents": 2955,
+          "interest_cents": 1496,
+          "principal_cents": 1459,
+          "ending_balance_cents": 95555
+        },
+        {
+          "month": 4,
+          "date": "2027-02-01",
+          "liability_id": "card",
+          "starting_balance_cents": 95555,
+          "payment_cents": 2911,
+          "interest_cents": 1473,
+          "principal_cents": 1438,
+          "ending_balance_cents": 94117
+        },
+        {
+          "month": 5,
+          "date": "2027-03-01",
+          "liability_id": "card",
+          "starting_balance_cents": 94117,
+          "payment_cents": 2867,
+          "interest_cents": 1451,
+          "principal_cents": 1416,
+          "ending_balance_cents": 92701
+        },
+        {
+          "month": 6,
+          "date": "2027-04-01",
+          "liability_id": "card",
+          "starting_balance_cents": 92701,
+          "payment_cents": 2824,
+          "interest_cents": 1429,
+          "principal_cents": 1395,
+          "ending_balance_cents": 91306
+        },
+        {
+          "month": 7,
+          "date": "2027-05-01",
+          "liability_id": "card",
+          "starting_balance_cents": 91306,
+          "payment_cents": 2781,
+          "interest_cents": 1408,
+          "principal_cents": 1373,
+          "ending_balance_cents": 89933
+        },
+        {
+          "month": 8,
+          "date": "2027-06-01",
+          "liability_id": "card",
+          "starting_balance_cents": 89933,
+          "payment_cents": 2740,
+          "interest_cents": 1386,
+          "principal_cents": 1354,
+          "ending_balance_cents": 88579
+        },
+        {
+          "month": 9,
+          "date": "2027-07-01",
+          "liability_id": "card",
+          "starting_balance_cents": 88579,
+          "payment_cents": 2698,
+          "interest_cents": 1366,
+          "principal_cents": 1332,
+          "ending_balance_cents": 87247
+        },
+        {
+          "month": 10,
+          "date": "2027-08-01",
+          "liability_id": "card",
+          "starting_balance_cents": 87247,
+          "payment_cents": 2658,
+          "interest_cents": 1345,
+          "principal_cents": 1313,
+          "ending_balance_cents": 85934
+        },
+        {
+          "month": 11,
+          "date": "2027-09-01",
+          "liability_id": "card",
+          "starting_balance_cents": 85934,
+          "payment_cents": 2618,
+          "interest_cents": 1325,
+          "principal_cents": 1293,
+          "ending_balance_cents": 84641
+        },
+        {
+          "month": 12,
+          "date": "2027-10-01",
+          "liability_id": "card",
+          "starting_balance_cents": 84641,
+          "payment_cents": 2578,
+          "interest_cents": 1305,
+          "principal_cents": 1273,
+          "ending_balance_cents": 83368
+        },
+        {
+          "month": 13,
+          "date": "2027-11-01",
+          "liability_id": "card",
+          "starting_balance_cents": 83368,
+          "payment_cents": 2540,
+          "interest_cents": 1285,
+          "principal_cents": 1255,
+          "ending_balance_cents": 82113
+        },
+        {
+          "month": 14,
+          "date": "2027-12-01",
+          "liability_id": "card",
+          "starting_balance_cents": 82113,
+          "payment_cents": 2501,
+          "interest_cents": 1266,
+          "principal_cents": 1235,
+          "ending_balance_cents": 80878
+        },
+        {
+          "month": 15,
+          "date": "2028-01-01",
+          "liability_id": "card",
+          "starting_balance_cents": 80878,
+          "payment_cents": 2500,
+          "interest_cents": 1247,
+          "principal_cents": 1253,
+          "ending_balance_cents": 79625
+        },
+        {
+          "month": 16,
+          "date": "2028-02-01",
+          "liability_id": "card",
+          "starting_balance_cents": 79625,
+          "payment_cents": 2500,
+          "interest_cents": 1228,
+          "principal_cents": 1272,
+          "ending_balance_cents": 78353
+        },
+        {
+          "month": 17,
+          "date": "2028-03-01",
+          "liability_id": "card",
+          "starting_balance_cents": 78353,
+          "payment_cents": 2500,
+          "interest_cents": 1208,
+          "principal_cents": 1292,
+          "ending_balance_cents": 77061
+        },
+        {
+          "month": 18,
+          "date": "2028-04-01",
+          "liability_id": "card",
+          "starting_balance_cents": 77061,
+          "payment_cents": 2500,
+          "interest_cents": 1188,
+          "principal_cents": 1312,
+          "ending_balance_cents": 75749
+        },
+        {
+          "month": 19,
+          "date": "2028-05-01",
+          "liability_id": "card",
+          "starting_balance_cents": 75749,
+          "payment_cents": 2500,
+          "interest_cents": 1168,
+          "principal_cents": 1332,
+          "ending_balance_cents": 74417
+        },
+        {
+          "month": 20,
+          "date": "2028-06-01",
+          "liability_id": "card",
+          "starting_balance_cents": 74417,
+          "payment_cents": 2500,
+          "interest_cents": 1147,
+          "principal_cents": 1353,
+          "ending_balance_cents": 73064
+        },
+        {
+          "month": 21,
+          "date": "2028-07-01",
+          "liability_id": "card",
+          "starting_balance_cents": 73064,
+          "payment_cents": 2500,
+          "interest_cents": 1126,
+          "principal_cents": 1374,
+          "ending_balance_cents": 71690
+        },
+        {
+          "month": 22,
+          "date": "2028-08-01",
+          "liability_id": "card",
+          "starting_balance_cents": 71690,
+          "payment_cents": 2500,
+          "interest_cents": 1105,
+          "principal_cents": 1395,
+          "ending_balance_cents": 70295
+        },
+        {
+          "month": 23,
+          "date": "2028-09-01",
+          "liability_id": "card",
+          "starting_balance_cents": 70295,
+          "payment_cents": 2500,
+          "interest_cents": 1084,
+          "principal_cents": 1416,
+          "ending_balance_cents": 68879
+        },
+        {
+          "month": 24,
+          "date": "2028-10-01",
+          "liability_id": "card",
+          "starting_balance_cents": 68879,
+          "payment_cents": 2500,
+          "interest_cents": 1062,
+          "principal_cents": 1438,
+          "ending_balance_cents": 67441
+        },
+        {
+          "month": 25,
+          "date": "2028-11-01",
+          "liability_id": "card",
+          "starting_balance_cents": 67441,
+          "payment_cents": 2500,
+          "interest_cents": 1040,
+          "principal_cents": 1460,
+          "ending_balance_cents": 65981
+        },
+        {
+          "month": 26,
+          "date": "2028-12-01",
+          "liability_id": "card",
+          "starting_balance_cents": 65981,
+          "payment_cents": 2500,
+          "interest_cents": 1017,
+          "principal_cents": 1483,
+          "ending_balance_cents": 64498
+        },
+        {
+          "month": 27,
+          "date": "2029-01-01",
+          "liability_id": "card",
+          "starting_balance_cents": 64498,
+          "payment_cents": 2500,
+          "interest_cents": 994,
+          "principal_cents": 1506,
+          "ending_balance_cents": 62992
+        },
+        {
+          "month": 28,
+          "date": "2029-02-01",
+          "liability_id": "card",
+          "starting_balance_cents": 62992,
+          "payment_cents": 2500,
+          "interest_cents": 971,
+          "principal_cents": 1529,
+          "ending_balance_cents": 61463
+        },
+        {
+          "month": 29,
+          "date": "2029-03-01",
+          "liability_id": "card",
+          "starting_balance_cents": 61463,
+          "payment_cents": 2500,
+          "interest_cents": 948,
+          "principal_cents": 1552,
+          "ending_balance_cents": 59911
+        },
+        {
+          "month": 30,
+          "date": "2029-04-01",
+          "liability_id": "card",
+          "starting_balance_cents": 59911,
+          "payment_cents": 2500,
+          "interest_cents": 924,
+          "principal_cents": 1576,
+          "ending_balance_cents": 58335
+        },
+        {
+          "month": 31,
+          "date": "2029-05-01",
+          "liability_id": "card",
+          "starting_balance_cents": 58335,
+          "payment_cents": 2500,
+          "interest_cents": 899,
+          "principal_cents": 1601,
+          "ending_balance_cents": 56734
+        },
+        {
+          "month": 32,
+          "date": "2029-06-01",
+          "liability_id": "card",
+          "starting_balance_cents": 56734,
+          "payment_cents": 2500,
+          "interest_cents": 875,
+          "principal_cents": 1625,
+          "ending_balance_cents": 55109
+        },
+        {
+          "month": 33,
+          "date": "2029-07-01",
+          "liability_id": "card",
+          "starting_balance_cents": 55109,
+          "payment_cents": 2500,
+          "interest_cents": 850,
+          "principal_cents": 1650,
+          "ending_balance_cents": 53459
+        },
+        {
+          "month": 34,
+          "date": "2029-08-01",
+          "liability_id": "card",
+          "starting_balance_cents": 53459,
+          "payment_cents": 2500,
+          "interest_cents": 824,
+          "principal_cents": 1676,
+          "ending_balance_cents": 51783
+        },
+        {
+          "month": 35,
+          "date": "2029-09-01",
+          "liability_id": "card",
+          "starting_balance_cents": 51783,
+          "payment_cents": 2500,
+          "interest_cents": 798,
+          "principal_cents": 1702,
+          "ending_balance_cents": 50081
+        },
+        {
+          "month": 36,
+          "date": "2029-10-01",
+          "liability_id": "card",
+          "starting_balance_cents": 50081,
+          "payment_cents": 2500,
+          "interest_cents": 772,
+          "principal_cents": 1728,
+          "ending_balance_cents": 48353
+        },
+        {
+          "month": 37,
+          "date": "2029-11-01",
+          "liability_id": "card",
+          "starting_balance_cents": 48353,
+          "payment_cents": 2500,
+          "interest_cents": 745,
+          "principal_cents": 1755,
+          "ending_balance_cents": 46598
+        },
+        {
+          "month": 38,
+          "date": "2029-12-01",
+          "liability_id": "card",
+          "starting_balance_cents": 46598,
+          "payment_cents": 2500,
+          "interest_cents": 718,
+          "principal_cents": 1782,
+          "ending_balance_cents": 44816
+        },
+        {
+          "month": 39,
+          "date": "2030-01-01",
+          "liability_id": "card",
+          "starting_balance_cents": 44816,
+          "payment_cents": 2500,
+          "interest_cents": 691,
+          "principal_cents": 1809,
+          "ending_balance_cents": 43007
+        },
+        {
+          "month": 40,
+          "date": "2030-02-01",
+          "liability_id": "card",
+          "starting_balance_cents": 43007,
+          "payment_cents": 2500,
+          "interest_cents": 663,
+          "principal_cents": 1837,
+          "ending_balance_cents": 41170
+        },
+        {
+          "month": 41,
+          "date": "2030-03-01",
+          "liability_id": "card",
+          "starting_balance_cents": 41170,
+          "payment_cents": 2500,
+          "interest_cents": 635,
+          "principal_cents": 1865,
+          "ending_balance_cents": 39305
+        },
+        {
+          "month": 42,
+          "date": "2030-04-01",
+          "liability_id": "card",
+          "starting_balance_cents": 39305,
+          "payment_cents": 2500,
+          "interest_cents": 606,
+          "principal_cents": 1894,
+          "ending_balance_cents": 37411
+        },
+        {
+          "month": 43,
+          "date": "2030-05-01",
+          "liability_id": "card",
+          "starting_balance_cents": 37411,
+          "payment_cents": 2500,
+          "interest_cents": 577,
+          "principal_cents": 1923,
+          "ending_balance_cents": 35488
+        },
+        {
+          "month": 44,
+          "date": "2030-06-01",
+          "liability_id": "card",
+          "starting_balance_cents": 35488,
+          "payment_cents": 2500,
+          "interest_cents": 547,
+          "principal_cents": 1953,
+          "ending_balance_cents": 33535
+        },
+        {
+          "month": 45,
+          "date": "2030-07-01",
+          "liability_id": "card",
+          "starting_balance_cents": 33535,
+          "payment_cents": 2500,
+          "interest_cents": 517,
+          "principal_cents": 1983,
+          "ending_balance_cents": 31552
+        },
+        {
+          "month": 46,
+          "date": "2030-08-01",
+          "liability_id": "card",
+          "starting_balance_cents": 31552,
+          "payment_cents": 2500,
+          "interest_cents": 486,
+          "principal_cents": 2014,
+          "ending_balance_cents": 29538
+        },
+        {
+          "month": 47,
+          "date": "2030-09-01",
+          "liability_id": "card",
+          "starting_balance_cents": 29538,
+          "payment_cents": 2500,
+          "interest_cents": 455,
+          "principal_cents": 2045,
+          "ending_balance_cents": 27493
+        },
+        {
+          "month": 48,
+          "date": "2030-10-01",
+          "liability_id": "card",
+          "starting_balance_cents": 27493,
+          "payment_cents": 2500,
+          "interest_cents": 424,
+          "principal_cents": 2076,
+          "ending_balance_cents": 25417
+        },
+        {
+          "month": 49,
+          "date": "2030-11-01",
+          "liability_id": "card",
+          "starting_balance_cents": 25417,
+          "payment_cents": 2500,
+          "interest_cents": 392,
+          "principal_cents": 2108,
+          "ending_balance_cents": 23309
+        },
+        {
+          "month": 50,
+          "date": "2030-12-01",
+          "liability_id": "card",
+          "starting_balance_cents": 23309,
+          "payment_cents": 2500,
+          "interest_cents": 359,
+          "principal_cents": 2141,
+          "ending_balance_cents": 21168
+        },
+        {
+          "month": 51,
+          "date": "2031-01-01",
+          "liability_id": "card",
+          "starting_balance_cents": 21168,
+          "payment_cents": 2500,
+          "interest_cents": 326,
+          "principal_cents": 2174,
+          "ending_balance_cents": 18994
+        },
+        {
+          "month": 52,
+          "date": "2031-02-01",
+          "liability_id": "card",
+          "starting_balance_cents": 18994,
+          "payment_cents": 2500,
+          "interest_cents": 293,
+          "principal_cents": 2207,
+          "ending_balance_cents": 16787
+        },
+        {
+          "month": 53,
+          "date": "2031-03-01",
+          "liability_id": "card",
+          "starting_balance_cents": 16787,
+          "payment_cents": 2500,
+          "interest_cents": 259,
+          "principal_cents": 2241,
+          "ending_balance_cents": 14546
+        },
+        {
+          "month": 54,
+          "date": "2031-04-01",
+          "liability_id": "card",
+          "starting_balance_cents": 14546,
+          "payment_cents": 2500,
+          "interest_cents": 224,
+          "principal_cents": 2276,
+          "ending_balance_cents": 12270
+        },
+        {
+          "month": 55,
+          "date": "2031-05-01",
+          "liability_id": "card",
+          "starting_balance_cents": 12270,
+          "payment_cents": 2500,
+          "interest_cents": 189,
+          "principal_cents": 2311,
+          "ending_balance_cents": 9959
+        },
+        {
+          "month": 56,
+          "date": "2031-06-01",
+          "liability_id": "card",
+          "starting_balance_cents": 9959,
+          "payment_cents": 2500,
+          "interest_cents": 154,
+          "principal_cents": 2346,
+          "ending_balance_cents": 7613
+        },
+        {
+          "month": 57,
+          "date": "2031-07-01",
+          "liability_id": "card",
+          "starting_balance_cents": 7613,
+          "payment_cents": 2500,
+          "interest_cents": 117,
+          "principal_cents": 2383,
+          "ending_balance_cents": 5230
+        },
+        {
+          "month": 58,
+          "date": "2031-08-01",
+          "liability_id": "card",
+          "starting_balance_cents": 5230,
+          "payment_cents": 2500,
+          "interest_cents": 81,
+          "principal_cents": 2419,
+          "ending_balance_cents": 2811
+        },
+        {
+          "month": 59,
+          "date": "2031-09-01",
+          "liability_id": "card",
+          "starting_balance_cents": 2811,
+          "payment_cents": 2500,
+          "interest_cents": 43,
+          "principal_cents": 2457,
+          "ending_balance_cents": 354
+        },
+        {
+          "month": 60,
+          "date": "2031-10-01",
+          "liability_id": "card",
+          "starting_balance_cents": 354,
+          "payment_cents": 359,
+          "interest_cents": 5,
+          "principal_cents": 354,
+          "ending_balance_cents": 0
+        }
+      ]
+    }
+  }
+}

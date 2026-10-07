@@ -1,0 +1,41 @@
+{
+  "scenario": {
+    "contract_version": "2.0",
+    "scenario_id": "non-convergence",
+    "as_of": "2026-10-01",
+    "starting_balance_cents": 0,
+    "horizon_days": 30,
+    "events": [],
+    "liabilities": [
+      {
+        "id": "huge",
+        "name": "Huge",
+        "balance_cents": 9000000000000000000,
+        "apr_basis_points": 1000000,
+        "min_payment_cents": 1
+      }
+    ]
+  },
+  "expected_status": "frozen",
+  "notes": "MCD-0026: the interest guard overflows MAX_MONEY_CENTS in month 1 -> did_not_converge, no rows.",
+  "expected": {
+    "contract_version": "2.0",
+    "scenario_id": "non-convergence",
+    "forecast": {
+      "minimum_balance_cents": 0,
+      "minimum_balance_date": "2026-10-01",
+      "ending_balance_cents": 0,
+      "first_negative_date": null
+    },
+    "debt": {
+      "strategy": "snowball",
+      "extra_monthly_payment_cents": 0,
+      "months_to_payoff": 1,
+      "payoff_date": "2026-11-01",
+      "total_interest_cents": 0,
+      "total_paid_cents": 0,
+      "did_not_converge": true,
+      "schedule": []
+    }
+  }
+}

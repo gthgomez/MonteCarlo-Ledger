@@ -1,0 +1,28 @@
+{
+  "scenario": {
+    "contract_version": "2.0",
+    "scenario_id": "duplicate-liability-id",
+    "as_of": "2026-10-01",
+    "starting_balance_cents": 0,
+    "horizon_days": 30,
+    "events": [],
+    "liabilities": [
+      {
+        "id": "x",
+        "balance_cents": 1000,
+        "apr_basis_points": 0,
+        "min_payment_cents": 100
+      },
+      {
+        "id": "x",
+        "balance_cents": 2000,
+        "apr_basis_points": 0,
+        "min_payment_cents": 100
+      }
+    ]
+  },
+  "expected": {
+    "error": "SCHEMA_INVALID"
+  },
+  "notes": "MCD-0026: duplicate liability id is SCHEMA_INVALID (schema-valid, engine-rejected)."
+}
