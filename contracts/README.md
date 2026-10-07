@@ -1,6 +1,6 @@
 # MonteCarlo Financial Contract
 
-**Contract version: 1.0** (see `version.json`)
+**Contract version: 1.1** (see `version.json`)
 
 This directory is the **normative** definition of MonteCarlo's financial semantics. It is
 language-neutral and implementation-independent. The Python `MonteCarlo-Ledger` engine and the
@@ -22,7 +22,7 @@ not sources of truth.
              │                       │
              └───────────┬───────────┘
                          │
-                 Contract version 1.0
+                 Contract version 1.1
                          │
               ┌──────────┴──────────┐
               │                     │
@@ -48,7 +48,7 @@ project; proprietary Kotlin *implementation* code must not be copied here.
 | File | Area | Version |
 |---|---|---|
 | [`money.md`](money.md) | integer money, rounding, overflow, currency | money 1.0 |
-| [`timeline.md`](timeline.md) | `as_of`, horizon boundaries, ordering, recurrence | timeline 1.0 |
+| [`timeline.md`](timeline.md) | `as_of`, horizon boundaries, ordering, recurrence, occurrence exclusions | timeline 1.1 |
 | [`ledger.md`](ledger.md) | entries, balances, accounts, pending/posted | ledger 1.0 |
 | [`forecast.md`](forecast.md) | deterministic projection metrics | forecast 1.0 |
 | [`simulation.md`](simulation.md) | PRNG, uncertainty model, aggregation | simulation 1.0 |
@@ -85,3 +85,7 @@ The contract uses `MAJOR.MINOR`:
 
 Each area has its own component version. A contract release pins all component versions together.
 Implementations declare which contract release they target.
+
+The canonical **result** echoes the `contract_version` declared by its scenario (`"1.0"` or `"1.1"`),
+so a 1.0 scenario is never silently reinterpreted as a later version. A MINOR addition keeps every
+prior version's scenarios valid; the schema enumerates the accepted values.

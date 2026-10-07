@@ -96,3 +96,55 @@ def test_percentile_examples():
     with pytest.raises(ContractError):
         run_scenario({"scenario_id": "x", "starting_balance_cents": 0, "events": [],
                       "horizon_days": -1, "as_of": "2026-10-01"})
+
+
+def _exclusion_scenario(**overrides):
+    base = {
+        "contract_version": "1.1",
+        "scenario_id": "x",
+        "as_of": "2026-10-01",
+        "starting_balance_cents": 0,
+        "horizon_days": 90,
+        "events": [],
+        "recurrences": [
+            {"id": "rent", "type": "expense", "amount_cents": -10000,
+             "frequency": "monthly", "anchor_day": 15, "start_date": "2026-10-15"}
+        ],
+        "occurrence_exclusions": [{"recurrence_id": "rent", "date": "2026-11-15"}],
+    }
+    base.update(overrides)
+    return base
+
+
+def test_exclusion_removes_only_the_named_occurrence():
+    result = run_scenario(_exclusion_scenario())
+    assert result["forecast"] == {
+        "minimum_balance_cents": -20000,
+        "minimum_balance_date": "2026-12-15",
+        "ending_balance_cents": -20000,
+        "first_negative_date": "2026-10-15",
+    }
+    assert result["contract_version"] == "1.1"
+
+
+def test_exclusion_matching_nothing_is_a_noop():
+    with_exclusion = run_scenario(
+        _exclusion_scenario(occurrence_exclusions=[{"recurrence_id": "nope", "date": "2026-11-15"}])
+    )
+    without = run_scenario(_exclusion_scenario(occurrence_exclusions=[]))
+    assert with_exclusion == without
+
+
+def test_malformed_exclusion_is_schema_invalid():
+    with pytest.raises(ContractError) as exc:
+        run_scenario(_exclusion_scenario(occurrence_exclusions=[{"recurrence_id": "rent"}]))
+    assert exc.value.code == "SCHEMA_INVALID"
+
+
+def test_result_echoes_declared_version():
+    assert run_scenario(
+        _exclusion_scenario(contract_version="1.0", occurrence_exclusions=[])
+    )["contract_version"] == "1.0"
+    with pytest.raises(ContractError) as exc:
+        run_scenario(_exclusion_scenario(contract_version="2.0"))
+    assert exc.value.code == "SCHEMA_INVALID"

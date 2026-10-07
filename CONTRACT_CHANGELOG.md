@@ -4,6 +4,26 @@ All material changes to financial semantics are recorded here. A change that alt
 conclusion for an existing valid scenario requires a MAJOR version bump; a backward-compatible
 clarification requires a MINOR bump. Every entry links to an MCD where applicable.
 
+## 1.1 — 2026-10-07 (draft)
+
+Backward-compatible MINOR addition. No existing 1.0 scenario or result changes.
+
+### Added
+
+- `occurrence_exclusions` scenario field and schema definition
+  (`schemas/scenario.schema.json`): `[{ "recurrence_id", "date" }]` removes a single generated
+  occurrence from the projection (MCD-0024). Motivated by MC-07/C5 — a paid or user-moved
+  occurrence in the *middle* of a recurrence window could not be suppressed, so the template
+  occurrence and the explicit moved event were both projected (a double count).
+- Fixtures `boundary/mid-window-exclusion`, `deterministic/moved-occurrence-override`,
+  `boundary/exclusion-first-income-expected-amount`.
+- Timeline component version 1.1.
+
+### Clarified
+
+- The canonical result echoes the scenario's declared `contract_version` (`"1.0"` or `"1.1"`), so a
+  1.0 scenario remains byte-identical; both engines accept every released version's scenarios.
+
 ## 1.0 — 2026-10-06 (draft)
 
 Initial semantic foundation. Derived from the MC-00 cross-engine inventory

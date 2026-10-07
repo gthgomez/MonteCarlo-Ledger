@@ -1,12 +1,12 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://montecarlo.dev/schemas/scenario.schema.json",
-  "title": "MonteCarlo canonical scenario (contract 1.0)",
+  "title": "MonteCarlo canonical scenario (contract 1.1)",
   "type": "object",
   "additionalProperties": false,
   "required": ["contract_version", "scenario_id", "as_of", "starting_balance_cents", "horizon_days", "events"],
   "properties": {
-    "contract_version": { "const": "1.0" },
+    "contract_version": { "enum": ["1.0", "1.1"] },
     "scenario_id": { "type": "string", "minLength": 1 },
     "as_of": { "type": "string", "format": "date" },
     "starting_balance_cents": { "type": "integer" },
@@ -19,9 +19,22 @@
       "type": "array",
       "items": { "$ref": "#/$defs/recurrence" }
     },
+    "occurrence_exclusions": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/occurrence_exclusion" }
+    },
     "simulation": { "$ref": "#/$defs/simulation" }
   },
   "$defs": {
+    "occurrence_exclusion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["recurrence_id", "date"],
+      "properties": {
+        "recurrence_id": { "type": "string" },
+        "date": { "type": "string", "format": "date" }
+      }
+    },
     "recurrence": {
       "type": "object",
       "additionalProperties": false,
