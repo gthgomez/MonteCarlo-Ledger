@@ -147,7 +147,8 @@ A canonical scenario may declare an optional top-level list:
   is projected *and* an explicit moved event is projected — a double count. Advancing `start_date`
   could only suppress a prefix.
 - This is a backward-compatible addition: a scenario with no `occurrence_exclusions` is unaffected,
-  and a `contract_version` of `"1.0"` remains valid.
+  and a `contract_version` of `"1.0"` remains valid. A `1.0` document that **does** carry the field
+  is `SCHEMA_INVALID` — it is a 1.1 addition and is not silently reinterpreted under 1.1 semantics.
 
 ## Result contract version
 

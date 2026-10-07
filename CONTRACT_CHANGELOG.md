@@ -23,6 +23,9 @@ Backward-compatible MINOR addition. No existing 1.0 scenario or result changes.
 
 - The canonical result echoes the scenario's declared `contract_version` (`"1.0"` or `"1.1"`), so a
   1.0 scenario remains byte-identical; both engines accept every released version's scenarios.
+- `occurrence_exclusions` is a 1.1 field: a `1.0` document that carries it is `SCHEMA_INVALID`
+  (engine-enforced, since a JSON-Schema `if/then` is not portable across both validators).
+  Fixture `invalid/exclusion-requires-1-1`.
 
 ## 1.0 — 2026-10-06 (draft)
 
