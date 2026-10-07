@@ -90,8 +90,9 @@ divergences=0` includes all 24 unchanged cases.
 
 ## Remaining / follow-ups
 
-- `occurrence_exclusions` is not *enforced* to require a 1.1 document (the field is honored whatever
-  the declared minor version). A JSON-Schema `if/then` could enforce it, but the test-side
-  mini-validator does not guarantee `if/then` support; documented as convention instead.
+- ~~`occurrence_exclusions` is not *enforced* to require a 1.1 document.~~ **Resolved in MC-09**: a
+  `1.0` document that carries the field is now `SCHEMA_INVALID`, enforced in both engines (not via a
+  JSON-Schema `if/then`, which the Kotlin test-side mini-validator does not implement). Fixture
+  `invalid/exclusion-requires-1-1`.
 - Pending: push/PR/merge are blocked by `STOP_REMOTE` (no trusted remote profile), and the pin
   names a commit not yet on the default branch. See `MC-07-release-readiness.md`.

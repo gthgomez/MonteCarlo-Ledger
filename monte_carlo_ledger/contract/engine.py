@@ -89,8 +89,14 @@ def _contract_version(scenario: Dict[str, Any]) -> str:
     return version
 
 
-def _exclusions(scenario: Dict[str, Any]) -> set:
-    """Set of (recurrence_id, ISO date) pairs to skip (contract 1.1)."""
+def _exclusions(scenario: Dict[str, Any], version: str) -> set:
+    """Set of (recurrence_id, ISO date) pairs to skip (contract 1.1).
+
+    The field is a 1.1 addition, so a `1.0` document that carries it is `SCHEMA_INVALID`
+    rather than being silently reinterpreted under 1.1 semantics.
+    """
+    if "occurrence_exclusions" in scenario and version == "1.0":
+        raise ContractError("SCHEMA_INVALID", "occurrence_exclusions requires contract_version 1.1")
     result = set()
     for item in scenario.get("occurrence_exclusions", []) or []:
         if not isinstance(item, dict):
@@ -165,8 +171,8 @@ def expand(scenario: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], date, int, d
     horizon = scenario.get("horizon_days")
     if not isinstance(horizon, int) or isinstance(horizon, bool) or horizon < 0:
         raise ContractError("INVALID_HORIZON", repr(horizon))
-    _contract_version(scenario)
-    exclusions = _exclusions(scenario)
+    version = _contract_version(scenario)
+    exclusions = _exclusions(scenario, version)
     window_end = as_of + timedelta(days=horizon)
 
     events: List[Dict[str, Any]] = []

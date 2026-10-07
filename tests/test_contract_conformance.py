@@ -52,7 +52,11 @@ def test_fixture(path: Path):
 
     if isinstance(expected, dict) and "error" in expected:
         if expected["error"] == "SCHEMA_INVALID":
-            assert _schema_errors(scenario), "expected schema failure but scenario validated"
+            # SCHEMA_INVALID may come from the schema (structural) or from the engine (e.g. a
+            # 1.1-only field carried in a 1.0 document); both are contract failures.
+            assert _schema_errors(scenario) or run_scenario_safe(scenario) == {
+                "error": "SCHEMA_INVALID"
+            }, "expected schema or engine rejection but scenario validated"
         else:
             result = run_scenario_safe(scenario)
             assert result == {"error": expected["error"]}, result
@@ -142,9 +146,16 @@ def test_malformed_exclusion_is_schema_invalid():
 
 
 def test_result_echoes_declared_version():
-    assert run_scenario(
-        _exclusion_scenario(contract_version="1.0", occurrence_exclusions=[])
-    )["contract_version"] == "1.0"
+    v10 = _exclusion_scenario(contract_version="1.0")
+    v10.pop("occurrence_exclusions")  # the field is a 1.1 addition; a 1.0 doc must not carry it
+    assert run_scenario(v10)["contract_version"] == "1.0"
     with pytest.raises(ContractError) as exc:
         run_scenario(_exclusion_scenario(contract_version="2.0"))
+    assert exc.value.code == "SCHEMA_INVALID"
+
+
+def test_exclusions_require_contract_1_1():
+    # MC-09: a 1.0 document that carries the 1.1-only field is rejected, not reinterpreted.
+    with pytest.raises(ContractError) as exc:
+        run_scenario(_exclusion_scenario(contract_version="1.0"))
     assert exc.value.code == "SCHEMA_INVALID"

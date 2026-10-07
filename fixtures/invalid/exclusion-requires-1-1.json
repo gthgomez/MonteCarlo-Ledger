@@ -1,0 +1,31 @@
+{
+  "scenario": {
+    "contract_version": "1.0",
+    "scenario_id": "exclusion-requires-1-1",
+    "as_of": "2026-10-01",
+    "starting_balance_cents": 0,
+    "horizon_days": 30,
+    "events": [],
+    "recurrences": [
+      {
+        "id": "rent",
+        "name": "rent",
+        "type": "expense",
+        "amount_cents": -10000,
+        "frequency": "monthly",
+        "anchor_day": 15,
+        "start_date": "2026-10-15"
+      }
+    ],
+    "occurrence_exclusions": [
+      {
+        "recurrence_id": "rent",
+        "date": "2026-10-15"
+      }
+    ]
+  },
+  "expected": {
+    "error": "SCHEMA_INVALID"
+  },
+  "notes": "occurrence_exclusions requires contract_version 1.1; the scenario is schema-valid, so this is an engine-level rejection (MC-09)."
+}
