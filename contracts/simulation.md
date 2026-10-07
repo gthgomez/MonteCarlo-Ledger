@@ -14,6 +14,7 @@ merely statistically similar ones.
 | `income_variation_max` | `8` | integer percent | inclusive, `>= min` |
 | `expense_variation_min` | `0` | integer percent | inclusive |
 | `expense_variation_max` | `0` | integer percent | inclusive; `0..0` disables expense variation |
+| `expense_category_variation` | `[]` | array of `{category, min, max}` | contract 1.2; a matching category overrides the scalar range (see below) |
 | `surprise_probability_ppm` | `150000` | parts-per-million | `0..1000000` |
 | `surprise_check_interval_days` | `14` | days | `>= 1` |
 | `surprise_amount_min` | `2000` | cents | inclusive |
@@ -74,12 +75,19 @@ Inputs: the canonical in-window base events (from `timeline.md`), the parameters
 ```text
 1. scenario = copy(base_events)                       # canonical order
 2. for event in canonical_order(scenario):
-       if event.type == income and (income_variation_min != 0 or income_variation_max != 0):
-           pct = next_int(income_variation_min, income_variation_max)
-           event.amount = max(0, scale_cents_by_percent(event.amount, pct))
-       else if event.type != income and (expense_variation_min != 0 or expense_variation_max != 0):
-           pct = next_int(expense_variation_min, expense_variation_max)
-           event.amount = min(0, scale_cents_by_percent(event.amount, pct))
+       if event.type == income:
+           if income_variation_min != 0 or income_variation_max != 0:
+               pct = next_int(income_variation_min, income_variation_max)
+               event.amount = max(0, scale_cents_by_percent(event.amount, pct))
+       else:
+           range = category_range(event.category)            # contract 1.2; null when no match
+           if range != null:
+               pct = next_int(range.min, range.max)          # category range wins
+               event.amount = min(0, scale_cents_by_percent(event.amount, pct))
+           else if expense_variation_min != 0 or expense_variation_max != 0:
+               pct = next_int(expense_variation_min, expense_variation_max)
+               event.amount = min(0, scale_cents_by_percent(event.amount, pct))
+           # else: no draw for this event
 3. checks = horizon_days // surprise_check_interval_days
    for i in 0 .. checks-1:
        if next_ppm_hit(surprise_probability_ppm):
@@ -97,6 +105,11 @@ Notes:
 - Draws happen **only** for the branches whose range is enabled. With the defaults
   (`income -8..8`, `expense 0..0`), each run draws once per income event and never for expenses.
   This keeps the default stream simple and identical across engines.
+- **Per-category variation (contract 1.2).** A non-income event's `category` selects an
+  `expense_category_variation` entry; on a match the draw comes from that entry's range and the
+  scalar range is ignored for that event. An event with no category, or a category with no entry,
+  falls back to the scalar range. An empty `expense_category_variation` (the default) leaves the
+  draw stream identical to 1.1.
 - **Step 3 is unconditional.** Surprise generation depends only on `horizon_days` and the surprise
   parameters, never on whether the scenario has scheduled events. A scenario with no events still
   produces a surprise-driven distribution over the starting balance (MCD-0023).
@@ -105,6 +118,19 @@ Notes:
 - The draw order is part of the contract: step 2 fully precedes step 3, events are visited in
   canonical order, and per-event branches are visited in that order.
 - Everything uses the integer functions from `money.md`; no floating point is involved.
+
+## Per-category expense variation (contract 1.2)
+
+`expense_category_variation` is an optional list of `{ "category", "min", "max" }` — integer percent,
+inclusive, `min <= max`. Matching is by exact `category` string on a **non-income** event:
+
+- a matching event draws from the entry's `[min, max]` (the scalar range is not used for it);
+- a non-matching or uncategorized event falls back to the scalar `expense_variation_min/max`
+  (if enabled), otherwise no draw occurs.
+
+`category` is an optional string on scenario `events` and `recurrences`; an expanded recurrence
+occurrence inherits its recurrence's `category`. Duplicate `category` entries are `SCHEMA_INVALID`.
+There is no normalization: `"Food"` and `"food"` are distinct.
 
 ## Aggregation
 

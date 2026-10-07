@@ -1,0 +1,30 @@
+{
+  "scenario": {
+    "contract_version": "1.2",
+    "scenario_id": "duplicate-category-variation",
+    "as_of": "2026-10-01",
+    "starting_balance_cents": 0,
+    "horizon_days": 30,
+    "events": [],
+    "simulation": {
+      "runs": 1,
+      "seed": 1,
+      "expense_category_variation": [
+        {
+          "category": "food",
+          "min": 1,
+          "max": 2
+        },
+        {
+          "category": "food",
+          "min": 3,
+          "max": 4
+        }
+      ]
+    }
+  },
+  "expected": {
+    "error": "SCHEMA_INVALID"
+  },
+  "notes": "MCD-0025: duplicate expense_category_variation categories are SCHEMA_INVALID (schema-valid, engine-rejected)."
+}

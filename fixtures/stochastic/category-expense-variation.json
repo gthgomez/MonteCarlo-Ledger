@@ -1,0 +1,61 @@
+{
+  "scenario": {
+    "contract_version": "1.2",
+    "scenario_id": "category-expense-variation",
+    "as_of": "2026-10-01",
+    "starting_balance_cents": 100000,
+    "horizon_days": 30,
+    "events": [
+      {
+        "date": "2026-10-05",
+        "amount_cents": -20000,
+        "type": "expense",
+        "name": "groceries",
+        "category": "food"
+      },
+      {
+        "date": "2026-10-06",
+        "amount_cents": -30000,
+        "type": "expense",
+        "name": "rent",
+        "category": "housing"
+      }
+    ],
+    "simulation": {
+      "runs": 50,
+      "seed": 42,
+      "expense_variation_min": -2,
+      "expense_variation_max": 2,
+      "expense_category_variation": [
+        {
+          "category": "food",
+          "min": 10,
+          "max": 20
+        }
+      ]
+    }
+  },
+  "expected_status": "frozen",
+  "notes": "MCD-0025: 'food' draws from its own 10..20 range; 'housing' falls back to the scalar -2..2.",
+  "expected": {
+    "contract_version": "1.2",
+    "scenario_id": "category-expense-variation",
+    "forecast": {
+      "minimum_balance_cents": 50000,
+      "minimum_balance_date": "2026-10-06",
+      "ending_balance_cents": 50000,
+      "first_negative_date": null
+    },
+    "risk": {
+      "negative_balance_probability_ppm": 0,
+      "minimum_balance_p10_cents": 34158,
+      "minimum_balance_p50_cents": 45700,
+      "minimum_balance_p90_cents": 47600,
+      "ending_balance_p10_cents": 34158,
+      "ending_balance_p50_cents": 45700,
+      "ending_balance_p90_cents": 47600,
+      "projected_low_point_cents": 50000,
+      "safe_to_spend_cents": 34158
+    }
+  }
+}
