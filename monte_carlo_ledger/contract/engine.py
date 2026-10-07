@@ -13,7 +13,8 @@ from typing import Any, Dict, List, Optional, Tuple
 from .money import ContractError, checked_add, round_half_away, scale_cents_by_percent
 from .prng import SplitMix64
 
-CONTRACT_VERSION = "1.0"
+CONTRACT_VERSION = "1.1"
+SUPPORTED_CONTRACT_VERSIONS = ("1.0", "1.1")
 _MAX_OCCURRENCES = 100_000
 _MONTH_STEPS = {"monthly": 1, "bimonthly": 2, "quarterly": 3, "semiannually": 6, "annually": 12}
 _FREQUENCIES = {
@@ -81,6 +82,27 @@ def _validate_recurrence(rec: Dict[str, Any]) -> None:
         raise ContractError("INVALID_FREQUENCY", repr(rec.get("frequency")))
 
 
+def _contract_version(scenario: Dict[str, Any]) -> str:
+    version = scenario.get("contract_version", CONTRACT_VERSION)
+    if version not in SUPPORTED_CONTRACT_VERSIONS:
+        raise ContractError("SCHEMA_INVALID", f"unsupported contract_version {version!r}")
+    return version
+
+
+def _exclusions(scenario: Dict[str, Any]) -> set:
+    """Set of (recurrence_id, ISO date) pairs to skip (contract 1.1)."""
+    result = set()
+    for item in scenario.get("occurrence_exclusions", []) or []:
+        if not isinstance(item, dict):
+            raise ContractError("SCHEMA_INVALID", "occurrence_exclusions item must be an object")
+        rid = item.get("recurrence_id")
+        raw = item.get("date")
+        if not isinstance(rid, str) or not isinstance(raw, str):
+            raise ContractError("SCHEMA_INVALID", "occurrence exclusion requires recurrence_id and date")
+        result.add((rid, _parse_date(raw).isoformat()))
+    return result
+
+
 def _occurrences(rec: Dict[str, Any], ceiling: date) -> List[date]:
     """Ascending occurrence dates from start_date up to (but excluding) ceiling."""
     freq = rec["frequency"]
@@ -143,6 +165,8 @@ def expand(scenario: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], date, int, d
     horizon = scenario.get("horizon_days")
     if not isinstance(horizon, int) or isinstance(horizon, bool) or horizon < 0:
         raise ContractError("INVALID_HORIZON", repr(horizon))
+    _contract_version(scenario)
+    exclusions = _exclusions(scenario)
     window_end = as_of + timedelta(days=horizon)
 
     events: List[Dict[str, Any]] = []
@@ -165,9 +189,15 @@ def expand(scenario: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], date, int, d
 
     for rec in scenario.get("recurrences", []):
         _validate_recurrence(rec)
+        rec_id = rec.get("id")
         first_in_window = True
         for d in _occurrences(rec, window_end):
             if d < as_of or d >= window_end:
+                continue
+            # Contract 1.1: a declared exclusion removes the occurrence before the
+            # expected-amount slot is decided, so it does not consume expected_amount_cents
+            # (the amount applies to the first *remaining* occurrence).
+            if (rec_id, d.isoformat()) in exclusions:
                 continue
             amount = rec["amount_cents"]
             if first_in_window and rec["type"] == "income" and "expected_amount_cents" in rec:
@@ -291,7 +321,9 @@ def run_scenario(scenario: Dict[str, Any]) -> Dict[str, Any]:
     events, as_of, horizon, window_end = expand(scenario)
     base = _ordered(events)
     result: Dict[str, Any] = {
-        "contract_version": CONTRACT_VERSION,
+        # Echo the scenario's declared version so a 1.0 scenario stays byte-identical
+        # (see contracts/timeline.md, "Result contract version").
+        "contract_version": scenario.get("contract_version", CONTRACT_VERSION),
         "scenario_id": scenario.get("scenario_id", ""),
         "forecast": forecast(int(scenario["starting_balance_cents"]), as_of, base),
     }

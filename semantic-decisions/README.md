@@ -29,6 +29,7 @@ decision, the reason, the affected fixtures, and the contract version that intro
 | [MCD-0021](MCD-0021-generated-entry-ordering.md) | Ordering index for generated entries | timeline |
 | [MCD-0022](MCD-0022-calendar-recurrence-anchor.md) | Calendar recurrence anchoring | timeline |
 | [MCD-0023](MCD-0023-simulation-empty-schedule.md) | Simulation defined for empty schedules | simulation |
+| [MCD-0024](MCD-0024-occurrence-exclusions.md) | Occurrence exclusions | timeline |
 
 ## How to add an MCD
 

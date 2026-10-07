@@ -1,4 +1,4 @@
-# Timeline — Contract 1.0
+# Timeline — Contract 1.1
 
 ## Explicit `as_of`
 
@@ -65,13 +65,16 @@ Expansion procedure (normative):
 1. Generate occurrences from `start_date` forward by the frequency rule below, in ascending order,
    stopping once the occurrence date is `>= as_of + horizon_days` (or past `end_date`).
 2. Keep only occurrences with `as_of <= date < as_of + horizon_days`.
-3. If `type == income` and `expected_amount_cents` is present, the **first kept occurrence** uses
-   `expected_amount_cents`; all others use `amount_cents`.
-4. Expanded income occurrences default to `sequence = 0`; expanded expenses to `sequence = 1`.
-5. Occurrences before `as_of` are not emitted (they are overdue state; see below).
-6. Occurrence ordering: all expanded recurrence occurrences use an `input_index` greater than every
+3. Remove any occurrence whose `(recurrence id, date)` is listed in `occurrence_exclusions`
+   (contract 1.1; see "Occurrence exclusions"). An excluded occurrence is not projected and does
+   **not** consume the `expected_amount_cents` slot.
+4. If `type == income` and `expected_amount_cents` is present, the **first remaining occurrence**
+   (after step 3) uses `expected_amount_cents`; all others use `amount_cents`.
+5. Expanded income occurrences default to `sequence = 0`; expanded expenses to `sequence = 1`.
+6. Occurrences before `as_of` are not emitted (they are overdue state; see below).
+7. Occurrence ordering: all expanded recurrence occurrences use an `input_index` greater than every
    explicit event's index, assigned in recurrence-array order and then ascending occurrence date.
-7. Schema precedence: a scenario that omits a schema-required field (for example `as_of`) is
+8. Schema precedence: a scenario that omits a schema-required field (for example `as_of`) is
    `SCHEMA_INVALID`. `MISSING_AS_OF` is reserved for an `as_of` that is present but empty or
    unparseable.
 
@@ -123,3 +126,31 @@ different implicit models. Both move to an explicit overdue concept.
   occurrence. Subsequent occurrences use the base `amount_cents`.
 - If no such occurrence exists in the window, the expected amount is not observable and does not
   error. This resolves audit D-17 (Python dropped it when the first payday preceded `as_of`).
+
+## Occurrence exclusions (contract 1.1)
+
+A canonical scenario may declare an optional top-level list:
+
+```text
+"occurrence_exclusions": [ { "recurrence_id": "<recurrence id>", "date": "YYYY-MM-DD" } ]
+```
+
+- An excluded `(recurrence_id, date)` pair removes that generated occurrence from the projection
+  (expansion step 3). Explicit `events` are unaffected.
+- `recurrence_id` must be a string and `date` an ISO date. A pair that matches no generated
+  occurrence is a **no-op**, not an error.
+- Matching is on the occurrence date the recurrence actually produces (after month anchoring and
+  clamping), not on `start_date`.
+- The list is a set: duplicate pairs have no additional effect.
+- Rationale: audit MC-07/C5. The product must express a user who **paid or moved a single
+  occurrence in the middle of the window**. Without an exclusion, the generated template occurrence
+  is projected *and* an explicit moved event is projected — a double count. Advancing `start_date`
+  could only suppress a prefix.
+- This is a backward-compatible addition: a scenario with no `occurrence_exclusions` is unaffected,
+  and a `contract_version` of `"1.0"` remains valid.
+
+## Result contract version
+
+The canonical result echoes the `contract_version` declared by the scenario (`"1.0"` or `"1.1"`).
+A 1.0 scenario therefore still produces a byte-identical 1.0 result; the version never widens
+silently, and the default (no declared version) is the implementation's latest (`1.1`).

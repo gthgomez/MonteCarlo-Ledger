@@ -1,0 +1,38 @@
+{
+  "scenario": {
+    "contract_version": "1.1",
+    "scenario_id": "exclusion-first-income-expected-amount",
+    "as_of": "2026-10-01",
+    "starting_balance_cents": 0,
+    "horizon_days": 40,
+    "events": [],
+    "recurrences": [
+      {
+        "id": "paycheck",
+        "name": "paycheck",
+        "type": "income",
+        "amount_cents": 100000,
+        "frequency": "biweekly",
+        "start_date": "2026-10-02",
+        "expected_amount_cents": 75000
+      }
+    ],
+    "occurrence_exclusions": [
+      {
+        "recurrence_id": "paycheck",
+        "date": "2026-10-02"
+      }
+    ]
+  },
+  "expected": {
+    "contract_version": "1.1",
+    "scenario_id": "exclusion-first-income-expected-amount",
+    "forecast": {
+      "minimum_balance_cents": 0,
+      "minimum_balance_date": "2026-10-01",
+      "ending_balance_cents": 175000,
+      "first_negative_date": null
+    }
+  },
+  "notes": "MCD-0024 + MCD-0017: an excluded occurrence does not consume the expected_amount slot; the first remaining occurrence (Oct 16) uses it."
+}
