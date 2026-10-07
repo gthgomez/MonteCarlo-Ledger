@@ -8,7 +8,11 @@ Ranking is by user impact on the "one answer per financial question" goal.
 
 ---
 
-## 1. Arbitrary occurrence exclusions / overrides — **HIGH**
+## 1. Arbitrary occurrence exclusions / overrides — **RESOLVED in Contract 1.1 (MC-08)**
+
+> Resolved by `occurrence_exclusions` (MCD-0024), delivered as the backward-compatible MINOR
+> contract 1.1 — see `MC-08-contract-1.1-occurrence-exclusions.md`. The problem statement below is
+> kept for history.
 
 - **Problem.** Contract 1.x has no per-occurrence exclusion. A user who marks a mid-window bill
   paid or moves it cannot suppress just that generated occurrence.
