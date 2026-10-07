@@ -1,10 +1,21 @@
 import sys
 from datetime import date
 
-from . import dashboards, db_manager, forecasting, monte_carlo_config, risk, workflows
+from . import (
+    dashboards,
+    db_manager,
+    forecasting,
+    monte_carlo_config,
+    risk,
+    timeline_service,
+    workflows,
+)
 from .ui import Theme, cprint, show_global_help, wait_for_user
 
-build_financial_timeline = dashboards.build_financial_timeline
+# Deprecated back-compat aliases: the interactive dashboards no longer read the
+# legacy timeline/forecasting/risk engines; these remain only for existing
+# importers and tests (see forecasting.py / risk.py / timeline_service.py).
+build_financial_timeline = timeline_service.build_financial_timeline
 render_forecast_dashboard = dashboards.render_forecast_dashboard
 render_monte_carlo_dashboard = dashboards.render_monte_carlo_dashboard
 render_timeline_dashboard = dashboards.render_timeline_dashboard
@@ -56,7 +67,7 @@ def main():
 
     while True:
         try:
-            render_timeline_dashboard()
+            render_timeline_dashboard(as_of=as_of)
             options = [
                 "1. Pay a Bill               (Subtract from balance)",
                 "2. Record Paycheck          (Add to balance)",
@@ -96,7 +107,7 @@ def main():
             elif choice == "6":
                 handle_reconcile()
             elif choice == "7":
-                handle_upcoming_schedule()
+                handle_upcoming_schedule(as_of=as_of)
             elif choice == "8":
                 handle_reporting()
             elif choice == "9":

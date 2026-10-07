@@ -1,22 +1,22 @@
-from datetime import datetime, timedelta
+from datetime import date, timedelta
 
 from . import budget_engine, db_manager
 from .dashboards import render_forecast_dashboard, render_monte_carlo_dashboard
 from .ui import format_currency, format_date_display
 
 
-def handle_forecast(*, as_of=None):
+def handle_forecast(*, as_of: date):
     render_forecast_dashboard(as_of=as_of)
     input("\nPress Enter...")
 
 
-def handle_risk_outlook(*, as_of):
+def handle_risk_outlook(*, as_of: date):
     render_monte_carlo_dashboard(as_of=as_of)
     input("\nPress Enter...")
 
 
-def handle_upcoming_schedule():
-    view_upcoming_30()
+def handle_upcoming_schedule(*, as_of: date):
+    view_upcoming_30(as_of=as_of)
     input("\nPress Enter...")
 
 
@@ -29,11 +29,11 @@ def handle_view_history():
     input("\nPress Enter...")
 
 
-def view_upcoming_30():
+def view_upcoming_30(*, as_of: date):
     print("\n--- Upcoming Bills Schedule (30 Days) ---")
     payments = [dict(vars(p)) for p in db_manager.get_all_payments()]
-    today_str = datetime.now().strftime("%Y-%m-%d")
-    end_str = (datetime.now() + timedelta(days=30)).strftime("%Y-%m-%d")
+    today_str = as_of.isoformat()
+    end_str = (as_of + timedelta(days=30)).isoformat()
     schedule = budget_engine.get_upcoming_schedule(payments, today_str, end_str)
     if not schedule:
         print("No bills found.")

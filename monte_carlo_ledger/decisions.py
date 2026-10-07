@@ -11,7 +11,7 @@ from datetime import date, timedelta
 from typing import Any, Dict, List, Optional
 
 from . import scenario as scenario_mod
-from .contract import run_scenario
+from .contract import run_scenario, scenario_rows
 
 DEFAULT_HORIZON_DAYS = 90
 DEFAULT_SIM: Dict[str, int] = {"runs": 500, "seed": 42}
@@ -27,6 +27,20 @@ def _sim(overrides: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
 def forecast(as_of: str, horizon_days: int = DEFAULT_HORIZON_DAYS) -> Dict[str, Any]:
     """Deterministic forecast only (no simulation)."""
     return run_scenario(scenario_mod.build_scenario(as_of, horizon_days))
+
+
+def forecast_detail(
+    as_of: str, horizon_days: int = DEFAULT_HORIZON_DAYS
+) -> Dict[str, Any]:
+    """Deterministic forecast plus per-event running-balance rows (display).
+
+    The aggregate ``forecast`` block is the contract result; ``rows`` is a
+    non-normative view produced by the contract engine's own walk, so a displayed
+    row can never disagree with the aggregate.
+    """
+    scenario = scenario_mod.build_scenario(as_of, horizon_days)
+    result = run_scenario(scenario)
+    return {"forecast": result["forecast"], "rows": scenario_rows(scenario)}
 
 
 def risk(

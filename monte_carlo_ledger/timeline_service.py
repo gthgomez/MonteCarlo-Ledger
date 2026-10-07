@@ -1,5 +1,17 @@
+"""DEPRECATED native timeline assembly.
+
+The interactive dashboards and the CLI/API decision surfaces no longer use this
+module; ``scenario.build_scenario`` is the single DB -> canonical-scenario bridge
+and the contract engine owns the projection. This module is retained only for
+existing importers and its regression tests.
+
+B-03 is fixed in place: ``expected_amount`` now applies to the first occurrence
+at or after ``as_of`` (MCD-0017), matching the contract, instead of being
+silently dropped when the first generated payday precedes the window.
+"""
+
 from datetime import date, datetime, timedelta
-from typing import Dict, List, Optional
+from typing import Dict, List
 
 from . import budget_engine, db_manager, domain_rules
 
@@ -62,17 +74,17 @@ def generate_income_events(start_date: str, end_date: str) -> List[Dict]:
     for inc in income_sources:
         current_payday = datetime.strptime(inc.next_payday, '%Y-%m-%d').date()
         
-        is_first_payday = True
+        is_first_in_window = True
         while current_payday <= end_dt:
-            # Handle is_first_payday: it's the VERY FIRST payday the generator encounters for this source,
-            # even if it's before start_date (i.e., we skip it in the visible window).
+            # MCD-0017: expected_amount applies to the first occurrence at or
+            # after start_date, even if earlier occurrences fell before it.
             if current_payday >= start_dt:
-                if is_first_payday and inc.expected_amount is not None:
+                if is_first_in_window and inc.expected_amount is not None:
                     domain_rules.validate_expected_amount_usage(inc, inc.expected_amount)
                     amount = inc.expected_amount
                 else:
                     amount = inc.amount
-                
+
                 events.append({
                     "date": current_payday.strftime('%Y-%m-%d'),
                     "name": inc.name,
@@ -80,9 +92,7 @@ def generate_income_events(start_date: str, end_date: str) -> List[Dict]:
                     "type": "income",
                     "priority": 0
                 })
-            
-            # expected_amount only affects the literal first occurrence calculated
-            is_first_payday = False
+                is_first_in_window = False
 
             # Jump to the next payday
             next_payday_str = budget_engine.get_next_payday(current_payday.strftime('%Y-%m-%d'), inc.frequency)
@@ -104,15 +114,15 @@ def merge_and_sort_events(bill_events: List[Dict], income_events: List[Dict]) ->
 def build_financial_timeline(
     days_ahead: int = 30,
     read_only: bool = False,
-    as_of: Optional[date] = None,
+    *,
+    as_of: date,
 ) -> List[Dict]:
     """Orchestrates the retrieval, prediction, and merging of financial events.
 
-    ``as_of`` is the explicit simulation date supplied by the CLI/API
-    boundary. When omitted, the legacy default (today) is retained for
-    display-only callers; risk/baseline paths pass it explicitly.
+    ``as_of`` is required (MCD-0001): the caller captures the date once at the
+    interactive/HTTP boundary. This deprecated shim never reads the wall clock.
     """
-    start = as_of if as_of is not None else date.today()
+    start = as_of
     start_date = start.strftime('%Y-%m-%d')
     end_date = (start + timedelta(days=days_ahead)).strftime('%Y-%m-%d')
     

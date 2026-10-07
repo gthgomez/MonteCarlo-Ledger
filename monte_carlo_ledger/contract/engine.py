@@ -186,14 +186,20 @@ def _ordered(events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return sorted(events, key=lambda e: (e["date"], e["sequence"], e["order"]))
 
 
-def forecast(start: int, as_of: date, ordered_events: List[Dict[str, Any]]) -> Dict[str, Any]:
+def _walk(start: int, ordered_events: List[Dict[str, Any]]):
+    """Yield ``(event, running_balance)`` in canonical order (the one forecast walk)."""
     balance = start
+    for ev in ordered_events:
+        balance = checked_add(balance, ev["amount"])
+        yield ev, balance
+
+
+def forecast(start: int, as_of: date, ordered_events: List[Dict[str, Any]]) -> Dict[str, Any]:
     minimum = start
     minimum_date = as_of
     first_negative: Optional[str] = as_of.isoformat() if start < 0 else None
     ending = start
-    for ev in ordered_events:
-        balance = checked_add(balance, ev["amount"])
+    for ev, balance in _walk(start, ordered_events):
         ending = balance
         if balance < minimum:
             minimum = balance
@@ -206,6 +212,32 @@ def forecast(start: int, as_of: date, ordered_events: List[Dict[str, Any]]) -> D
         "ending_balance_cents": ending,
         "first_negative_date": first_negative,
     }
+
+
+def forecast_rows(
+    start: int, as_of: date, ordered_events: List[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
+    """Non-normative per-event running balances, for display only.
+
+    Uses the exact same walk as :func:`forecast`, so a displayed row can never
+    disagree with the canonical aggregate. Not part of ``result.schema.json``.
+    """
+    return [
+        {
+            "date": ev["date"].isoformat(),
+            "name": ev.get("name", ""),
+            "type": ev["type"],
+            "amount_cents": ev["amount"],
+            "balance_after_cents": balance,
+        }
+        for ev, balance in _walk(start, ordered_events)
+    ]
+
+
+def scenario_rows(scenario: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Non-normative ordered in-window rows for a canonical scenario (display helper)."""
+    events, as_of, _, _ = expand(scenario)
+    return forecast_rows(int(scenario["starting_balance_cents"]), as_of, _ordered(events))
 
 
 def nearest_rank(sorted_values: List[int], num: int, den: int) -> int:

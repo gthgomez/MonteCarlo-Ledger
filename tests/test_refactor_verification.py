@@ -1,12 +1,19 @@
+"""DB -> contract-engine verification for representative scenarios.
+
+These tests used to read the legacy ``timeline_service`` / ``forecasting`` path.
+They now assert the contract meaning directly (MCD-0002 half-open window,
+MCD-0008 split low point vs safe-to-spend, MCD-0004 ppm), captured with an
+explicit ``as_of`` at the test boundary.
+"""
+
 import unittest
 import os
 from datetime import date, datetime, timedelta
 
-import monte_carlo_ledger.cli as main
-from monte_carlo_ledger import db_manager, timeline_service
-from monte_carlo_ledger.monte_carlo_config import MonteCarloConfig
+from monte_carlo_ledger import db_manager, decisions, scenario
 from fastapi.testclient import TestClient
 from monte_carlo_ledger.api import app
+
 
 class TestRefactorVerification(unittest.TestCase):
     def setUp(self):
@@ -17,130 +24,112 @@ class TestRefactorVerification(unittest.TestCase):
             os.remove(self.db_path)
         db_manager.init_db()
         self.api_client = TestClient(app)
+        # Clock boundary: capture "today" once for the whole test.
+        self.as_of = date.today()
+        self.as_of_str = self.as_of.isoformat()
 
     def tearDown(self):
         if os.path.exists(self.db_path):
             os.remove(self.db_path)
+
+    def _mark_past_occurrences_paid(self):
+        end_str = (self.as_of + timedelta(days=30)).isoformat()
+        db_manager.sync_bill_occurrences(self.as_of_str, end_str)
+        with db_manager.get_db_connection() as conn:
+            with conn:
+                conn.execute(
+                    "UPDATE bill_occurrences SET paid = 1 WHERE due_date < ?",
+                    (self.as_of_str,),
+                )
 
     def test_scenario_1_paycheck_then_rent(self):
         """
         Scenario: Start with 1000.
         Paycheck (2000) was 25 days ago, Monthly -> Next is in ~5 days.
         Rent (1500) is due in 10 days.
-        Sequence:
-        Day 0: 1000
-        Day 5: +2000 (3000)
-        Day 10: -1500 (1500)
-        Minima is 1000 (Today).
+        Day 0: 1000 -> Day 5: +2000 (3000) -> Day 10: -1500 (1500).
+        Contract low point is the starting balance.
         """
-        # 1. Setup Data
         db_manager.add_transaction(100000, 'System', 'Initial', t_type='Adjustment')
-        # Last pay 25 days ago means next is in 5-6 days
         last_pay = (datetime.now() - timedelta(days=25)).strftime('%Y-%m-%d')
         db_manager.add_income_source("Paycheck", 200000, "Monthly", last_pay)
-        
-        # Rent due on Day 28 (which is in 10 days if today is 18th)
+
         due_day = (datetime.now() + timedelta(days=10)).date().day
         db_manager.add_payment("Rent", 150000, "Monthly", due_day)
-        
-        # 2. Verify Timeline
-        today_str = datetime.now().strftime('%Y-%m-%d')
-        end_date_str = (datetime.now() + timedelta(days=30)).strftime('%Y-%m-%d')
-        
-        # We must sync FIRST so the occurrences exist, then mark them paid to isolate the test
-        db_manager.sync_bill_occurrences(today_str, end_date_str)
-        with db_manager.get_db_connection() as conn:
-            with conn:
-                conn.execute("UPDATE bill_occurrences SET paid = 1 WHERE due_date < ?", (today_str,))
-        
-        timeline = timeline_service.build_financial_timeline(30)
-        self.assertEqual(len(timeline), 2)
-        
-        # 3. Verify Safe Spend
-        safe_spend = main.calculate_safe_spend(100000, timeline)
-        self.assertEqual(safe_spend, 100000)
-        
-        # 4. API Consistency
+
+        self._mark_past_occurrences_paid()
+
+        # Contract forecast: the deterministic low point is the starting balance.
+        forecast = decisions.forecast(self.as_of_str, 30)["forecast"]
+        self.assertEqual(forecast["minimum_balance_cents"], 100000)
+        self.assertEqual(forecast["minimum_balance_date"], self.as_of_str)
+
+        # API: the deterministic low point is reported separately from the
+        # quantile-based safe-to-spend (MCD-0008).
         response = self.api_client.get("/safe-to-spend?days_ahead=30")
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()['safe_spend_cents'], 100000)
+        self.assertEqual(response.json()['projected_low_point_cents'], 100000)
+        self.assertLessEqual(
+            response.json()['safe_spend_cents'],
+            response.json()['projected_low_point_cents'],
+        )
 
     def test_scenario_2_multi_income_overlap(self):
         """
-        Scenario: Two income sources, bi-weekly and monthly.
-        Target: Ensure $300 safe spend (after accounting for a bill that drops us).
+        Two income sources plus a bill that drops the balance to the low point.
+        Day 0: 500 -> Day 2: +1000 (1500) -> Day 10: -1200 (300) -> ...
+        Contract low point is 300.
         """
         db_manager.add_transaction(50000, 'System', 'Initial', t_type='Adjustment')
-        # Job A: Paid 12 days ago -> next in 2 days
         last_a = (datetime.now() - timedelta(days=12)).strftime('%Y-%m-%d')
         db_manager.add_income_source("Job A", 100000, "Bi-weekly", last_a)
-        
-        # Job B: Paid 10 days ago -> next in 20/21 days
+
         last_b = (datetime.now() - timedelta(days=10)).strftime('%Y-%m-%d')
         db_manager.add_income_source("Job B", 50000, "Monthly", last_b)
-        
-        # Bill: 1200 on Day 10
+
         due_day = (datetime.now() + timedelta(days=10)).date().day
         db_manager.add_payment("Large Bill", 120000, "Monthly", due_day)
-        
-        today_str = datetime.now().strftime('%Y-%m-%d')
-        end_date_str = (datetime.now() + timedelta(days=30)).strftime('%Y-%m-%d')
-        
-        # Sync so they exist, then mark paid
-        db_manager.sync_bill_occurrences(today_str, end_date_str)
-        with db_manager.get_db_connection() as conn:
-            with conn:
-                conn.execute("UPDATE bill_occurrences SET paid = 1 WHERE due_date < ?", (today_str,))
-                
-        timeline = timeline_service.build_financial_timeline(30)
-        # Sequence:
-        # Day 0: 500
-        # Day 2: +1000 (1500)
-        # Day 10: -1200 (300)
-        # Day 16: +1000 (1300)
-        # ...
-        # Minima is 300 (Day 10).
-        safe_spend = main.calculate_safe_spend(50000, timeline)
-        self.assertEqual(safe_spend, 30000)
-        
-        # API Check: the contract endpoint reports the deterministic low point
-        # separately from the quantile-based safe-to-spend (MCD-0008).
+
+        self._mark_past_occurrences_paid()
+
+        forecast = decisions.forecast(self.as_of_str, 30)["forecast"]
+        self.assertEqual(forecast["minimum_balance_cents"], 30000)
+
         response = self.api_client.get("/safe-to-spend?days_ahead=30")
         self.assertEqual(response.json()['projected_low_point_cents'], 30000)
 
     def test_scenario_3_negative_balance_risk(self):
-        """
-        Scenario: Rent is more than current balance + next paycheck.
-        """
+        """Rent exceeds current balance plus the next paycheck -> negative low point."""
         db_manager.add_transaction(50000, 'System', 'Initial', t_type='Adjustment')
         last_pay = (datetime.now() - timedelta(days=26)).strftime('%Y-%m-%d')
         db_manager.add_income_source("Small Pay", 50000, "Monthly", last_pay)
-        
+
         due_day = (datetime.now() + timedelta(days=10)).date().day
         db_manager.add_payment("Giant Rent", 120000, "Monthly", due_day)
-        
-        today_str = datetime.now().strftime('%Y-%m-%d')
-        end_date_str = (datetime.now() + timedelta(days=30)).strftime('%Y-%m-%d')
-        
-        # Sync so they exist, then mark paid
-        db_manager.sync_bill_occurrences(today_str, end_date_str)
-        with db_manager.get_db_connection() as conn:
-            with conn:
-                conn.execute("UPDATE bill_occurrences SET paid = 1 WHERE due_date < ?", (today_str,))
-                
-        timeline = timeline_service.build_financial_timeline(30)
-        # Day 0: 500
-        # Day 5 (approx): +500 (1000)
-        # Day 10: -1200 (-200)
-        safe_spend = main.calculate_safe_spend(50000, timeline)
-        self.assertEqual(safe_spend, -20000)
-        
-        # Check Monte Carlo reproducibility
-        config = MonteCarloConfig(runs=100, seed=42)
-        res1 = main.run_monte_carlo(50000, timeline, config, as_of=date.today())
-        res2 = main.run_monte_carlo(50000, timeline, config, as_of=date.today())
-        self.assertEqual(res1['median_ending_balance'], res2['median_ending_balance'])
-        self.assertGreater(res1['probability_negative'], 0)
+
+        self._mark_past_occurrences_paid()
+
+        forecast = decisions.forecast(self.as_of_str, 30)["forecast"]
+        self.assertEqual(forecast["minimum_balance_cents"], -20000)
+
+        # Contract risk is reproducible and reports a non-zero overdraft chance.
+        first = decisions.risk(self.as_of_str, 30, {"runs": 100, "seed": 42})
+        second = decisions.risk(self.as_of_str, 30, {"runs": 100, "seed": 42})
+        self.assertEqual(first, second)
+        self.assertGreater(first["risk"]["negative_balance_probability_ppm"], 0)
+
+    def test_scenario_is_deterministic_and_half_open(self):
+        db_manager.add_transaction(50000, 'System', 'Initial', t_type='Adjustment')
+        db_manager.add_payment("Rent", 10000, "One-time", self.as_of_str)
+        first = scenario.build_scenario(self.as_of_str, 30)
+        second = scenario.build_scenario(self.as_of_str, 30)
+        self.assertEqual(first, second)
+        window_end = (self.as_of + timedelta(days=30)).isoformat()
+        self.assertTrue(first["events"])
+        self.assertTrue(
+            all(self.as_of_str <= e["date"] < window_end for e in first["events"])
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

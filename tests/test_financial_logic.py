@@ -1,7 +1,7 @@
 import unittest
 import os
 import sqlite3
-from monte_carlo_ledger import budget_engine, db_manager
+from monte_carlo_ledger import budget_engine, db_manager, decisions, scenario
 from datetime import date, datetime, timedelta
 
 class TestLedgerLogic(unittest.TestCase):
@@ -181,20 +181,18 @@ class TestTimelineLogic(unittest.TestCase):
             os.remove(self.test_db)
 
     def test_timeline_ordering(self):
-        import monte_carlo_ledger.cli as main
-        today = datetime.now()
-        day_str = today.strftime('%Y-%m-%d')
-        
-        # Setup income and bill on same day
+        # Contract ordering (MCD-0003): on the same date, income precedes expense.
+        day_str = date.today().isoformat()
+
         db_manager.add_income_source("Same Day Pay", 100000, "One-time", day_str)
-        # Update income to make sure next_payday is today
         db_manager.update_income_dates(1, day_str, day_str)
         db_manager.add_payment("Same Day Bill", 5000, "One-time", day_str)
-        
-        timeline = main.build_financial_timeline(30)
-        # First event should be income, second bill, because income must be processed first
-        self.assertEqual(timeline[0]["type"], "income")
-        self.assertEqual(timeline[1]["type"], "bill")
+
+        # The engine applies the canonical order (date, sequence, input_index).
+        rows = decisions.forecast_detail(day_str, 30)["rows"]
+        types = [row["type"] for row in rows]
+        self.assertEqual(types[0], "income")
+        self.assertEqual(types[1], "expense")
 
     def test_safe_spend_before_paycheck(self):
         import monte_carlo_ledger.cli as main
@@ -461,28 +459,28 @@ class TestProjectionBleed(unittest.TestCase):
             os.remove(self.test_db)
 
     def test_expected_amount_only_first_payday(self):
-        import monte_carlo_ledger.cli as main
-        today = datetime.now()
+        # MCD-0017: expected_amount applies to the first in-window occurrence only.
+        as_of = date.today()
+        as_of_str = as_of.isoformat()
         # Bi-weekly income: base $1000 (100000c), expected next paycheck $800 (80000c)
-        last_payday = (today - timedelta(days=14)).strftime('%Y-%m-%d')
+        last_payday = (as_of - timedelta(days=14)).isoformat()
         db_manager.add_income_source("TestJob", 100000, "Bi-weekly", last_payday)
-        sources = db_manager.get_all_income()
-        s = sources[0]
-        # Set expected_amount for next paycheck
+        s = db_manager.get_all_income()[0]
         db_manager.update_income_source(s.id, s.name, s.amount, s.frequency,
                                          s.last_payday, s.next_payday, 80000)
 
-        # Build timeline far enough to include 2+ paydays
-        timeline = main.build_financial_timeline(45)
-        income_events = [e for e in timeline if e['type'] == 'income' and e['name'] == 'TestJob']
+        # Build a scenario far enough to include 2+ paydays
+        built = scenario.build_scenario(as_of_str, 45)
+        income_events = [e for e in built["events"]
+                         if e["type"] == "income" and e["name"] == "TestJob"]
 
         self.assertGreaterEqual(len(income_events), 2, "Need at least 2 paydays in the window")
         # First payday uses expected_amount
-        self.assertEqual(income_events[0]['amount'], 80000)
+        self.assertEqual(income_events[0]["amount_cents"], 80000)
         # Second payday reverts to base amount
-        self.assertEqual(income_events[1]['amount'], 100000)
+        self.assertEqual(income_events[1]["amount_cents"], 100000)
         # expected_amount must appear exactly once across all paydays
-        self.assertEqual(sum(1 for e in income_events if e['amount'] == 80000), 1,
+        self.assertEqual(sum(1 for e in income_events if e["amount_cents"] == 80000), 1,
                          "expected_amount override must apply to exactly one payday")
 
 
@@ -501,17 +499,16 @@ class TestPaidStatusPhantom(unittest.TestCase):
             os.remove(self.test_db)
 
     def test_paid_bill_excluded_from_timeline(self):
-        import monte_carlo_ledger.cli as main
-        today = datetime.now()
-        bill_date = (today + timedelta(days=5)).strftime('%Y-%m-%d')
+        as_of = date.today()
+        as_of_str = as_of.isoformat()
+        bill_date = (as_of + timedelta(days=5)).isoformat()
         db_manager.add_payment("TestBill", 5000, "One-time", bill_date)
-        payments = db_manager.get_all_payments()
-        p = payments[0]
+        p = db_manager.get_all_payments()[0]
 
-        # Build timeline — bill should be present
-        timeline_before = main.build_financial_timeline(30)
-        bill_names_before = [e['name'] for e in timeline_before if e['type'] == 'bill']
-        self.assertIn("TestBill", bill_names_before)
+        # Scenario before payment — bill should be present
+        before = scenario.build_scenario(as_of_str, 30)
+        names_before = [e["name"] for e in before["events"] if e["type"] == "expense"]
+        self.assertIn("TestBill", names_before)
 
         # Mark it paid via a real transaction
         occ = db_manager.get_next_unpaid_occurrence(p.id)
@@ -520,10 +517,10 @@ class TestPaidStatusPhantom(unittest.TestCase):
                                              t_type='Expense', date_str=occ.due_date)
         db_manager.mark_occurrence_paid(occ.id, txn_id)
 
-        # Build timeline again — bill must be gone
-        timeline_after = main.build_financial_timeline(30)
-        bill_names_after = [e['name'] for e in timeline_after if e['type'] == 'bill']
-        self.assertNotIn("TestBill", bill_names_after)
+        # Scenario again — bill must be gone
+        after = scenario.build_scenario(as_of_str, 30)
+        names_after = [e["name"] for e in after["events"] if e["type"] == "expense"]
+        self.assertNotIn("TestBill", names_after)
 
 
 class TestOccurrenceLinkingIntegrity(unittest.TestCase):

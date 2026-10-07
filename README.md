@@ -38,7 +38,8 @@ reading like an intentional engineering project instead of a themed CRUD app.
 
 - Record income, bills, and reconciliation adjustments in a ledger-backed system.
 - Forecast the next 90 days of balance changes from scheduled obligations and income.
-- Calculate a "safe to spend" number from the lowest projected balance point.
+- Report the deterministic projected low point and a separate, quantile-based "safe to spend"
+  number (MCD-0008).
 - Run Monte Carlo scenarios to see how income variance and surprise expenses affect that answer.
 - Inspect the same logic through a local API without exposing financial data to a hosted service.
 
@@ -98,18 +99,20 @@ Example response:
 ```json
 {
   "safe_spend_cents": 45200,
-  "days_ahead": 30
+  "projected_low_point_cents": 50000,
+  "days_ahead": 30,
+  "as_of": "2026-10-01"
 }
 ```
 
 If the cached balance and ledger diverge, the API returns `409 Conflict` instead of serving a
 potentially misleading number.
 
-Note that `/safe-to-spend` is baseline-derived: it walks the deterministic cash-flow timeline and
-returns the lowest projected balance point. It does not run the Monte Carlo simulation and is not a
-worst-case guarantee. The Monte Carlo layer (see `monte_carlo_ledger/risk.py`) models uncertainty
-around that baseline and reports percentile outcomes, which are simulated estimates, not guarantees.
-See the [calculation contract](./docs/engineering/calculation-contract.md) for the exact semantics.
+`/safe-to-spend` is produced by the contract engine (`monte_carlo_ledger/contract/`, via
+`scenario.py` and `decisions.py`). `projected_low_point_cents` is the deterministic lowest balance
+in the half-open window; `safe_spend_cents` is the lower-tail quantile of the simulated trough
+distribution (default P10 minus a reserve) and is **signed** (MCD-0008). It is a simulated estimate,
+not a worst-case guarantee. See the [contract](./contracts/risk.md) for the exact semantics.
 
 ## Example Scenario
 

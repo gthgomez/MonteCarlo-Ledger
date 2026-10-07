@@ -1,10 +1,22 @@
+"""DEPRECATED deterministic projection helpers.
+
+The interactive dashboards and the CLI/API decision surfaces no longer use this
+module; they delegate to the contract engine (``decisions.forecast`` /
+``decisions.forecast_detail``). Retained only for existing importers and tests.
+
+Note the terminology fix from MCD-0008: ``calculate_safe_spend`` returns the
+projected low point, which is *not* a spendable amount. The contract names it
+``projected_low_point_cents``; ``safe_to_spend_cents`` is quantile-based and
+lives in the contract risk block.
+"""
+
 from typing import Dict, List
 
 
 def calculate_safe_spend(balance_cents: int, timeline_events: List[Dict]) -> int:
     """
-    Implements running balance simulation to find the minimum point.
-    This represents the maximum safe-spend money before the next income hits.
+    Running-balance minimum. DEPRECATED alias of the projected low point; this is
+    not a spendable amount (MCD-0008).
     """
     running_balance = balance_cents
     lowest_balance = balance_cents

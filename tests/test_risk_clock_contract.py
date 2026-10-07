@@ -131,17 +131,16 @@ class TestNoWallClockBelowBoundary(unittest.TestCase):
     """(c) AST scan: no datetime.now / date.today below the CLI/API boundary."""
 
     # Modules allowed to read the wall clock. cli.py and api.py are the
-    # MC02 boundary (they capture today once and pass it down). The others
-    # are pre-existing display/persistence defaults outside this slice's
-    # file list; narrowing them is deferred, not silently ignored.
+    # interactive/HTTP boundary (they capture today once and pass it down).
+    # budget_engine/db_manager retain pre-existing date-default helpers, and the
+    # onboarding/payment workflows read the clock only for interactive input
+    # defaults. The forecast/risk display modules were removed from this list in
+    # the interactive-adoption campaign: they now receive ``as_of`` explicitly.
     ALLOWED_WALL_CLOCK_MODULES = {
         "cli.py",
         "api.py",
-        "timeline_service.py",
-        "dashboards.py",
         "budget_engine.py",
         "db_manager.py",
-        "workflow_reporting.py",
         "workflow_onboarding.py",
         "workflow_payments.py",
     }

@@ -1,9 +1,26 @@
+"""DEPRECATED native risk overlay.
+
+The interactive dashboards and the CLI/API decision surfaces no longer use this
+module; they delegate to the contract engine (``decisions.risk``). This module is
+retained only for existing importers and its regression tests, and its financial
+bugs are fixed in place so it can no longer emit a different convention than the
+contract:
+
+- B-02: percentage variation now uses the contract's round-half-away scaling
+  (MCD-0007) instead of floor division.
+- B-04: the median now uses the contract's single nearest-rank percentile
+  convention (MCD-0005) instead of a floored average.
+
+The contract engine remains the single source of truth; do not add new callers.
+"""
+
 import math
 import random
 from collections import Counter
 from datetime import date, timedelta
 from typing import Dict, List, Optional
 
+from .contract import nearest_rank, scale_cents_by_percent
 from .forecasting import build_balance_forecast, calculate_forecast_summary
 from .monte_carlo_config import MonteCarloConfig
 
@@ -35,9 +52,10 @@ def generate_scenario_timeline(
             variation_percent = rng.randint(
                 config.income_variation_min, config.income_variation_max
             )
-            delta = (new_event["amount"] * variation_percent) // 100
-            new_event["amount"] += delta
-            new_event["amount"] = max(0, new_event["amount"])
+            # MCD-0007: scale by (100 + percent) with round-half-away, never floor.
+            new_event["amount"] = max(
+                0, scale_cents_by_percent(new_event["amount"], variation_percent)
+            )
 
         scenario.append(new_event)
 
@@ -76,6 +94,13 @@ def simulate_scenario(balance_cents: int, scenario_timeline: List[Dict]) -> Dict
     return calculate_forecast_summary(balance_cents, forecast_rows)
 
 
+def _median(sorted_list: List[int]) -> int:
+    """B-04: P50 via the contract's single nearest-rank convention (MCD-0005)."""
+    if not sorted_list:
+        return 0
+    return nearest_rank(sorted_list, 1, 2)
+
+
 def run_monte_carlo(
     balance_cents: int,
     base_timeline: List[Dict],
@@ -112,16 +137,8 @@ def run_monte_carlo(
     ending_balances.sort()
     lowest_balances.sort()
 
-    def get_median(sorted_list: List[int]) -> int:
-        if not sorted_list:
-            return 0
-        n = len(sorted_list)
-        if n % 2 == 1:
-            return sorted_list[n // 2]
-        return (sorted_list[n // 2 - 1] + sorted_list[n // 2]) // 2
-
-    median_ending = get_median(ending_balances)
-    median_lowest = get_median(lowest_balances)
+    median_ending = _median(ending_balances)
+    median_lowest = _median(lowest_balances)
 
     # Low-percentile order statistic at the configured (normalized, 0 < p <= 1)
     # percentile of the simulated ending balances. This is a simulated estimate,

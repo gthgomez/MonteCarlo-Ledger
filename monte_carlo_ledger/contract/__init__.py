@@ -7,9 +7,11 @@ from .engine import (
     SIMULATION_DEFAULTS,
     expand,
     forecast,
+    forecast_rows,
     nearest_rank,
     run_scenario,
     run_scenario_safe,
+    scenario_rows,
 )
 from .money import (
     MAX_MONEY_CENTS,
@@ -32,10 +34,12 @@ __all__ = [
     "checked_add",
     "expand",
     "forecast",
+    "forecast_rows",
     "nearest_rank",
     "round_half_away",
     "run_scenario",
     "run_scenario_safe",
+    "scenario_rows",
     "scale_cents_by_basis_points",
     "scale_cents_by_percent",
 ]
