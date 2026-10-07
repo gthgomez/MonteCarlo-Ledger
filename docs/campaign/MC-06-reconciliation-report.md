@@ -1,13 +1,29 @@
 # MC-06 — Final Semantic Reconciliation Report
 
 **Campaign:** MonteCarlo semantic foundation
-**Contract:** 1.0 (draft), pinned at `a233614`
+**Contract:** 1.0 (draft), pinned at `d2e621c`
 **Engines reconciled:**
 
 | Engine | Revision | Domain | Status |
 |---|---|---|---|
 | Python `monte_carlo_ledger/contract` (reference) | `d2e621c` | CLI/API/MCP/Site (later) | passes 24/24 fixtures |
 | Kotlin `com.montecarlo.ledger.contract` | `002dabc` (pin `d2e621c`) | Android | passes 24/24 fixtures |
+
+### Revision provenance (exact)
+
+Four different hashes appear across the campaign documents; they are distinct facts, not a
+contradiction once the chain is written down:
+
+| Role | Revision | Repository | What it is |
+|---|---|---|---|
+| Contract authoring (pre-comparer) | `a233614` | `MonteCarlo-Ledger` | "clarify recurrence/ordering, add cross-engine comparer" — first commit where the comparer and the clarified text existed. Superseded. |
+| **Contract 1.0 snapshot consumed by Android** | **`d2e621c`** | `MonteCarlo-Ledger` | "simulation is defined for empty schedules (MCD-0023)" — the exact contract revision vendored into Android and hashed in `contract-pin.json`. |
+| Kotlin implementation revision that pinned `d2e621c` | `002dabc` | `MonteCarloLedger-Android` | "re-pin to d2e621c; stop fabricating 0% risk on empty ledger". |
+| Merged defaults at MC-06 close | `cb95280` (Ledger `master`), `bd79284` (Android `main`) | both | Post-merge state. |
+
+`a233614` was the pin before MCD-0023 existed; an earlier draft of this report still named it.
+`d2e621c` is the authoring commit that defines the exact Contract 1.0 snapshot Android consumes.
+No history was rewritten to reconcile these; the documents were corrected to name the true pin.
 
 **Cross-engine result (dumb comparer, `tools/conformance/cross_engine.py`):** 24 fixtures checked,
 **0 divergences**. Python and Kotlin emit byte-identical canonical results, and both match the
@@ -81,7 +97,7 @@ fixture `expected`.
 - [x] Android remains native (contract engine is Kotlin-native, no Python runtime).
 - [~] Android product adoption — **partially done in MC-06b**: dashboard/widget headline forecast, Monte Carlo and safe-to-spend run the contract engine behind `FeatureFlags.contractForecastEnabled`; the fan chart, `ForecastEngine` cash-flow rows, and `DebtPayoffEngine` remain native (non-normative / follow-on).
 
-> Note: Python and Kotlin both pass all 23 fixtures. Python additionally has unit tests for the
+> Note: Python and Kotlin both pass all 24 fixtures. Python additionally has unit tests for the
 > PRNG, rounding, and percentile vectors.
 
 ## Recommended next campaign
@@ -100,3 +116,17 @@ fixture `expected`.
    TypeScript finance engine.
 5. **Contract 2.0 candidates** — multiple accounts/transfers (D-12), per-category variation (D-15),
    calibration, multi-currency.
+
+## Post-merge evidence (captured during the MC-07 re-audit)
+
+Recorded on the merged default branch `cb95280`, not on the campaign branch.
+
+| Check | Exact command | Result |
+|---|---|---|
+| Python unit + conformance | `python -m pytest` | **165 passed in 180.17s** |
+| Fixture corpus | `dir /s /b fixtures\*.json` | **24 fixtures** (boundary 6, deterministic 9, invalid 4, stochastic 5) |
+
+Earlier fragments recorded smaller numbers (MC-03: 75; MC-04/05: 82; the PR #8 body: 83). Those were
+true snapshots at the time and are superseded; the reproducible current count is 165 with the
+command above. Note `pyproject.toml` sets `addopts = "-q"`, so passing an extra `-q` suppresses
+pytest's summary line — use the command exactly as written to reproduce the count.

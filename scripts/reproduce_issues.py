@@ -2,7 +2,7 @@ import unittest
 import os
 import sqlite3
 from datetime import datetime, timedelta
-from monte_carlo_ledger import db_manager, domain_rules, timeline_service
+from monte_carlo_ledger import db_manager, domain_rules, scenario
 from fastapi.testclient import TestClient
 from monte_carlo_ledger.api import app
 
@@ -107,22 +107,24 @@ class TestReproduction(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "already linked"):
             db_manager.mark_occurrence_paid(occ2_id, txn_id)
 
-    def test_issue_6_timeline_boundary_bug(self):
-        """Fix the timeline/income bug causing behavioral equivalence failure."""
+    def test_issue_6_half_open_horizon(self):
+        """Contract 1.0 (MCD-0002): the horizon is half-open [start, start + days).
+
+        The legacy timeline included an event on ``end_date``; the canonical scenario
+        excludes it. This script now asserts the canonical rule.
+        """
         today = datetime.now()
-        # End date exactly on payday
         start_date = today.strftime('%Y-%m-%d')
         end_date = (today + timedelta(days=14)).strftime('%Y-%m-%d')
-        
-        # Bi-weekly income due exactly on end_date
+
+        # Bi-weekly income: next_payday is today, the following is today + 14 (end_date).
         db_manager.add_income_source("WindowTest", 200000, "Bi-weekly", (today - timedelta(days=14)).strftime('%Y-%m-%d'))
-        # next_payday will be today. Next-next will be today + 14 (end_date).
-        
-        events = timeline_service.generate_income_events(start_date, end_date)
-        dates = [e['date'] for e in events]
-        
-        # With the fix (<= end_dt), it should include end_date
-        self.assertIn(end_date, dates, "Expected end_date income to be included after fix")
+
+        built = scenario.build_scenario(start_date, 14, read_only=True)
+        dates = [e['date'] for e in built['events'] if e['type'] == 'income']
+
+        self.assertIn(start_date, dates, "the as_of payday belongs to the window")
+        self.assertNotIn(end_date, dates, "the end date is excluded (half-open, MCD-0002)")
 
 if __name__ == '__main__':
     unittest.main()

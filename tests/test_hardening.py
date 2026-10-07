@@ -1,10 +1,9 @@
 import unittest
-import sqlite3
 import os
-from datetime import datetime, date, timedelta
+from datetime import date, timedelta
 from unittest.mock import patch
 
-from monte_carlo_ledger import db_manager, timeline_service
+from monte_carlo_ledger import db_manager, scenario
 
 DB_PATH = 'test_ledger_hardening.db'
 
@@ -31,69 +30,54 @@ class TestHardening(unittest.TestCase):
         # Setup: 1000 in ledger, 1000 in stored
         db_manager.add_transaction(1000, "Category", "Desc", t_type='Income')
         # Note: add_transaction updates stored balance automatically in db_manager
-        
+
         is_sync, ledger, stored = db_manager.validate_balance_consistency()
         self.assertTrue(is_sync)
         self.assertEqual(ledger, 1000)
         self.assertEqual(stored, 1000)
-        
+
         # Force desync
         with db_manager.get_db_connection() as conn:
             with conn:
                 conn.execute("UPDATE settings SET value = '500' WHERE key = 'current_balance'")
-        
+
         is_sync, ledger, stored = db_manager.validate_balance_consistency()
         self.assertFalse(is_sync)
         self.assertEqual(ledger, 1000)
         self.assertEqual(stored, 500)
 
-    def test_past_due_lookback(self):
-        """Verify that unpaid bills from the past are included in the timeline."""
-        today = date.today()
-        past_due_date = (today - timedelta(days=5)).strftime('%Y-%m-%d')
-        today_str = today.strftime('%Y-%m-%d')
-        end_date_str = (today + timedelta(days=30)).strftime('%Y-%m-%d')
-        
-        # Add a one-time bill due 5 days ago
+    def test_overdue_bills_are_excluded_from_canonical_scenario(self):
+        """MCD-0014: occurrences dated before ``as_of`` are not projected.
+
+        The legacy ``timeline_service`` hoisted a 30-day past-due lookback into the
+        forecast window; that behaviour contradicted the contract and has been removed.
+        """
+        as_of = date.today()
+        past_due = (as_of - timedelta(days=5)).strftime('%Y-%m-%d')
+        end_date = (as_of + timedelta(days=30)).strftime('%Y-%m-%d')
+
         with db_manager.get_db_connection() as conn:
             with conn:
-                conn.execute("INSERT INTO payments (name, amount, recurrence, due_date) VALUES ('Past Due Bill', 5000, 'One-time', ?)", (past_due_date,))
-                p_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-                # Note: schema.sql has idx_occurrences_unique(payment_id, due_date)
-                # sync_bill_occurrences will generate it if we use lookback
-        
-        # Run sync and get events
-        events = timeline_service.get_unpaid_bill_events(today_str, end_date_str, read_only=False)
-        
-        # Verify past due bill is present
-        found = False
-        for e in events:
-            if e['name'] == 'Past Due Bill':
-                found = True
-                self.assertEqual(e['date'], past_due_date)
-        
-        self.assertTrue(found, "Past due bill should be found in timeline even if it's before start_date")
+                conn.execute(
+                    "INSERT INTO payments (name, amount, recurrence, due_date) VALUES ('Past Due Bill', 5000, 'One-time', ?)",
+                    (past_due,),
+                )
 
-    def test_past_due_projection_lookback(self):
-        """Verify that read_only=True path also catches past-due bills."""
-        today = date.today()
-        past_due_date = (today - timedelta(days=10)).strftime('%Y-%m-%d')
-        today_str = today.strftime('%Y-%m-%d')
-        end_date_str = (today + timedelta(days=30)).strftime('%Y-%m-%d')
-        
-        # Add a payment rule (not an occurrence)
-        db_manager.add_payment('Missed Utility', 7500, 'One-time', past_due_date)
-        
-        # Projection (read_only=True) should catch it if lookback works
-        events = timeline_service.get_unpaid_bill_events(today_str, end_date_str, read_only=True)
-        
-        found = False
-        for e in events:
-            if e['name'] == 'Missed Utility':
-                found = True
-                self.assertEqual(e['date'], past_due_date)
-        
-        self.assertTrue(found, "Read-only projection should find past-due payment rules via lookback")
+        built = scenario.build_scenario(as_of.strftime('%Y-%m-%d'), 30, read_only=False)
+        names = [e["name"] for e in built["events"]]
+        self.assertNotIn('Past Due Bill', names, "overdue bills must not be projected (MCD-0014)")
+        self.assertGreaterEqual(all(e["date"] >= as_of.strftime('%Y-%m-%d') for e in built["events"]), True)
+
+    def test_future_bill_is_projected(self):
+        """A bill inside the half-open window is projected."""
+        as_of = date.today()
+        future = (as_of + timedelta(days=10)).strftime('%Y-%m-%d')
+
+        db_manager.add_payment('Future Bill', 7500, 'One-time', future)
+        built = scenario.build_scenario(as_of.strftime('%Y-%m-%d'), 30, read_only=True)
+        names = [e["name"] for e in built["events"]]
+        self.assertIn('Future Bill', names)
+
 
 if __name__ == '__main__':
     unittest.main()

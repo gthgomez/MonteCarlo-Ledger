@@ -1,16 +1,16 @@
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 from . import budget_engine, db_manager
 from .dashboards import render_forecast_dashboard, render_monte_carlo_dashboard
 from .ui import format_currency, format_date_display
 
 
-def handle_forecast(*, as_of=None):
+def handle_forecast(*, as_of: date):
     render_forecast_dashboard(as_of=as_of)
     input("\nPress Enter...")
 
 
-def handle_risk_outlook(*, as_of):
+def handle_risk_outlook(*, as_of: date):
     render_monte_carlo_dashboard(as_of=as_of)
     input("\nPress Enter...")
 

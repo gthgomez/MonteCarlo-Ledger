@@ -44,10 +44,10 @@ is ppm (MCD-0004); the low-point date is never null (MCD-0018).
 
 ## Remaining risks
 
-- The **interactive dashboards** (`dashboards.py`, `workflows.py`) still call the legacy
-  `forecasting`/`risk`/`timeline_service` functions and therefore still expose the old semantics and
-  the `datetime.now()` dependency (B-01…B-04). The new JSON/API surfaces do not use them. Migrating
-  the interactive menus is the remaining Python adoption work.
+- ~~The **interactive dashboards** still call the legacy `forecasting`/`risk`/`timeline_service`
+  functions.~~ **Resolved in MC-07** (`docs/campaign/MC-07-legacy-retirement.md`): the interactive
+  dashboards now render from the canonical engine via `dashboard_view.py`, and the four duplicate
+  modules were deleted (clearing B-01…B-04).
 - `simulate_purchase` forces expense variation off to keep the two runs paired; if expense variation
   is later enabled there, the comparison must control for RNG-stream shifts.
 - Recurrence materialization for the DB path uses `budget_engine`; its month-end/anchor behavior is

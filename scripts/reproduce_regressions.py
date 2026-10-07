@@ -2,7 +2,7 @@ import sqlite3
 import os
 import unittest
 from datetime import datetime, date, timedelta
-from monte_carlo_ledger import budget_engine, db_manager, timeline_service
+from monte_carlo_ledger import budget_engine, db_manager, scenario
 
 DB_PATH = 'test_regressions.db'
 
@@ -85,28 +85,23 @@ class TestRegressions(unittest.TestCase):
             pmt_rows = conn.execute("SELECT * FROM payments").fetchall()
             print(f"DEBUG: Payments in DB: {len(pmt_rows)}")
         
-        # Build timeline manually to avoid datetime.now() issues
+        # Build the canonical scenario with an explicit as_of (no wall clock).
         start_date_str = fixed_today.strftime('%Y-%m-%d')
-        bill_events = timeline_service.get_unpaid_bill_events(start_date_str, end_date_str)
-        income_events = timeline_service.generate_income_events(start_date_str, end_date_str)
-        timeline = timeline_service.merge_and_sort_events(bill_events, income_events)
-        
-        print(f"DEBUG: Bill events: {len(bill_events)}")
-        print(f"DEBUG: Income events: {len(income_events)}")
-        
-        # Final balance simulation
+        built = scenario.build_scenario(start_date_str, 30)
+        events = built['events']
+
+        print(f"DEBUG: canonical events: {len(events)}")
+
+        # Final balance simulation over the canonical in-window events.
         # Start: 1000.00
         balance = 100000
-        for event in timeline:
-            print(f"  Event: {event['date']} {event['name']} {event['amount']}")
-            if event['type'] == 'income':
-                balance += event['amount']
-            else:
-                balance += event['amount'] # event['amount'] for bills is already negative in timeline
-        
-        # Expected: 1000 + 2000 - 1500 = 1500
-        # If income <= but bill <, bill will be missing -> 3000
-        self.assertEqual(balance, 150000, f"Expected 1500.00, got {balance/100:.2f}. Boundary is likely asymmetrical.")
+        for event in events:
+            print(f"  Event: {event['date']} {event['name']} {event['amount_cents']}")
+            balance += event['amount_cents']
+
+        # Contract 1.0 (MCD-0002): the horizon is half-open [2024-01-01, 2024-01-31),
+        # so the income and bill dated exactly on end_date (2024-01-31) are excluded.
+        self.assertEqual(balance, 100000, f"Expected 1000.00 (end_date excluded), got {balance/100:.2f}.")
 
 if __name__ == '__main__':
     unittest.main()
