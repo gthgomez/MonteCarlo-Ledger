@@ -13,8 +13,8 @@ from typing import Any, Dict, List, Optional, Tuple
 from .money import ContractError, checked_add, round_half_away, scale_cents_by_percent
 from .prng import SplitMix64
 
-CONTRACT_VERSION = "1.1"
-SUPPORTED_CONTRACT_VERSIONS = ("1.0", "1.1")
+CONTRACT_VERSION = "1.2"
+SUPPORTED_CONTRACT_VERSIONS = ("1.0", "1.1", "1.2")
 _MAX_OCCURRENCES = 100_000
 _MONTH_STEPS = {"monthly": 1, "bimonthly": 2, "quarterly": 3, "semiannually": 6, "annually": 12}
 _FREQUENCIES = {
@@ -189,7 +189,8 @@ def expand(scenario: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], date, int, d
             continue
         events.append(
             {"date": d, "amount": ev["amount_cents"], "type": ev["type"],
-             "sequence": seq, "order": index, "name": ev.get("name", "")}
+             "sequence": seq, "order": index, "name": ev.get("name", ""),
+             "category": ev.get("category")}
         )
         order = index + 1
 
@@ -212,7 +213,8 @@ def expand(scenario: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], date, int, d
             events.append(
                 {"date": d, "amount": amount, "type": rec["type"],
                  "sequence": 0 if rec["type"] == "income" else 1,
-                 "order": order, "name": rec.get("name", rec.get("id", ""))}
+                 "order": order, "name": rec.get("name", rec.get("id", "")),
+                 "category": rec.get("category")}
             )
             order += 1
     return events, as_of, horizon, window_end
@@ -281,31 +283,66 @@ def nearest_rank(sorted_values: List[int], num: int, den: int) -> int:
     return sorted_values[idx]
 
 
-def _params(simulation: Dict[str, Any]) -> Dict[str, int]:
-    params = dict(SIMULATION_DEFAULTS)
+def _category_ranges(raw: Any) -> Dict[str, Tuple[int, int]]:
+    """Normalized `{category: (min, max)}` map (contract 1.2), rejecting duplicate keys."""
+    result: Dict[str, Tuple[int, int]] = {}
+    if raw is None:
+        return result
+    if not isinstance(raw, list):
+        raise ContractError("SCHEMA_INVALID", "expense_category_variation must be an array")
+    for item in raw:
+        if not isinstance(item, dict):
+            raise ContractError("SCHEMA_INVALID", "expense_category_variation item must be an object")
+        category = item.get("category")
+        lo = item.get("min")
+        hi = item.get("max")
+        if not isinstance(category, str):
+            raise ContractError("SCHEMA_INVALID", "expense_category_variation.category must be a string")
+        if not isinstance(lo, int) or isinstance(lo, bool) or not isinstance(hi, int) or isinstance(hi, bool):
+            raise ContractError("SCHEMA_INVALID", "expense_category_variation min/max must be integers")
+        if lo > hi:
+            raise ContractError("SCHEMA_INVALID", f"expense_category_variation {category!r}: min > max")
+        if category in result:
+            raise ContractError("SCHEMA_INVALID", f"duplicate expense_category_variation category {category!r}")
+        result[category] = (lo, hi)
+    return result
+
+
+def _params(simulation: Dict[str, Any]) -> Dict[str, Any]:
+    params: Dict[str, Any] = dict(SIMULATION_DEFAULTS)
     for key, value in simulation.items():
         params[key] = value
     if not isinstance(params["runs"], int) or params["runs"] < 1:
         raise ContractError("INVALID_RUNS", repr(params["runs"]))
     if params["surprise_check_interval_days"] < 1:
         raise ContractError("INVALID_HORIZON", "check interval")
-    return params  # type: ignore[return-value]
+    params["expense_category_variation"] = _category_ranges(params.get("expense_category_variation"))
+    return params
 
 
 def _simulate_once(
     base: List[Dict[str, Any]], start: int, as_of: date, horizon: int,
-    window_end: date, p: Dict[str, int], rng: SplitMix64,
+    window_end: date, p: Dict[str, Any], rng: SplitMix64,
 ) -> Dict[str, Any]:
     scenario = [dict(e) for e in base]
     imin, imax = p["income_variation_min"], p["income_variation_max"]
     emin, emax = p["expense_variation_min"], p["expense_variation_max"]
+    category_ranges: Dict[str, Tuple[int, int]] = p["expense_category_variation"]
     for ev in scenario:
-        if ev["type"] == "income" and (imin != 0 or imax != 0):
-            pct = rng.next_int(imin, imax)
-            ev["amount"] = max(0, scale_cents_by_percent(ev["amount"], pct))
-        elif ev["type"] != "income" and (emin != 0 or emax != 0):
-            pct = rng.next_int(emin, emax)
-            ev["amount"] = min(0, scale_cents_by_percent(ev["amount"], pct))
+        if ev["type"] == "income":
+            if imin != 0 or imax != 0:
+                pct = rng.next_int(imin, imax)
+                ev["amount"] = max(0, scale_cents_by_percent(ev["amount"], pct))
+        else:
+            # Contract 1.2: a matching category range overrides the scalar expense range.
+            category = ev.get("category")
+            matched = category_ranges.get(category) if isinstance(category, str) else None
+            if matched is not None:
+                pct = rng.next_int(matched[0], matched[1])
+                ev["amount"] = min(0, scale_cents_by_percent(ev["amount"], pct))
+            elif emin != 0 or emax != 0:
+                pct = rng.next_int(emin, emax)
+                ev["amount"] = min(0, scale_cents_by_percent(ev["amount"], pct))
 
     interval = p["surprise_check_interval_days"]
     checks = horizon // interval

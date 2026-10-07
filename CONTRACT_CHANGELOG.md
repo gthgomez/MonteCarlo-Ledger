@@ -4,6 +4,21 @@ All material changes to financial semantics are recorded here. A change that alt
 conclusion for an existing valid scenario requires a MAJOR version bump; a backward-compatible
 clarification requires a MINOR bump. Every entry links to an MCD where applicable.
 
+## 1.2 — 2026-10-07 (draft)
+
+Backward-compatible MINOR addition. No existing scenario's draw stream or result changes.
+
+### Added
+
+- `expense_category_variation` simulation parameter and an optional `category` on scenario `events`
+  and `recurrences` (MCD-0025). A non-income event whose `category` matches an entry draws from that
+  entry's `[min, max]` (the scalar range is ignored for it); otherwise it falls back to the scalar
+  `expense_variation_min/max`. Duplicate category entries are `SCHEMA_INVALID`.
+- Fixtures `stochastic/expense-variation` (scalar enablement; the fixture MCD-0015 referenced but
+  which had never landed), `stochastic/category-expense-variation`,
+  `invalid/duplicate-category-variation`.
+- Simulation component version 1.1.
+
 ## 1.1 — 2026-10-07 (draft)
 
 Backward-compatible MINOR addition. No existing 1.0 scenario or result changes.

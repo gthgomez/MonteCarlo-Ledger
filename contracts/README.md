@@ -1,6 +1,6 @@
 # MonteCarlo Financial Contract
 
-**Contract version: 1.1** (see `version.json`)
+**Contract version: 1.2** (see `version.json`)
 
 This directory is the **normative** definition of MonteCarlo's financial semantics. It is
 language-neutral and implementation-independent. The Python `MonteCarlo-Ledger` engine and the
@@ -22,7 +22,7 @@ not sources of truth.
              │                       │
              └───────────┬───────────┘
                          │
-                 Contract version 1.1
+                 Contract version 1.2
                          │
               ┌──────────┴──────────┐
               │                     │
@@ -51,7 +51,7 @@ project; proprietary Kotlin *implementation* code must not be copied here.
 | [`timeline.md`](timeline.md) | `as_of`, horizon boundaries, ordering, recurrence, occurrence exclusions | timeline 1.1 |
 | [`ledger.md`](ledger.md) | entries, balances, accounts, pending/posted | ledger 1.0 |
 | [`forecast.md`](forecast.md) | deterministic projection metrics | forecast 1.0 |
-| [`simulation.md`](simulation.md) | PRNG, uncertainty model, aggregation | simulation 1.0 |
+| [`simulation.md`](simulation.md) | PRNG, uncertainty model, aggregation, per-category variation | simulation 1.1 |
 | [`risk.md`](risk.md) | percentiles, probability of negative, safe-to-spend | risk 1.0 |
 
 Related artifacts:

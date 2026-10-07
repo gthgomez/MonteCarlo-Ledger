@@ -1,12 +1,12 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://montecarlo.dev/schemas/result.schema.json",
-  "title": "MonteCarlo canonical result (contract 1.1)",
+  "title": "MonteCarlo canonical result (contract 1.2)",
   "type": "object",
   "additionalProperties": false,
   "required": ["contract_version", "scenario_id", "forecast"],
   "properties": {
-    "contract_version": { "enum": ["1.0", "1.1"] },
+    "contract_version": { "enum": ["1.0", "1.1", "1.2"] },
     "scenario_id": { "type": "string" },
     "forecast": { "$ref": "#/$defs/forecast" },
     "risk": { "$ref": "#/$defs/risk" }

@@ -30,6 +30,7 @@ decision, the reason, the affected fixtures, and the contract version that intro
 | [MCD-0022](MCD-0022-calendar-recurrence-anchor.md) | Calendar recurrence anchoring | timeline |
 | [MCD-0023](MCD-0023-simulation-empty-schedule.md) | Simulation defined for empty schedules | simulation |
 | [MCD-0024](MCD-0024-occurrence-exclusions.md) | Occurrence exclusions | timeline |
+| [MCD-0025](MCD-0025-per-category-expense-variation.md) | Per-category expense variation | simulation |
 
 ## How to add an MCD
 

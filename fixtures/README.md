@@ -19,9 +19,11 @@ Every fixture is a JSON object with two keys:
   `risk` block is present when the scenario declares `simulation`).
 - `expected` for an **error** fixture is `{ "error": "CODE" }`. Codes: `SCHEMA_INVALID`,
   `MONEY_OVERFLOW`, `INVALID_AMOUNT`, `MISSING_AS_OF`, `INVALID_HORIZON`, `INVALID_RUNS`.
-- Scenario `contract_version` may be `"1.0"` or `"1.1"`. Contract 1.1 added the optional
-  `occurrence_exclusions` field (`[{ "recurrence_id", "date" }]`, MCD-0024). The canonical result
-  echoes the scenario's declared version, so every 1.0 fixture is byte-identical before and after.
+- Scenario `contract_version` may be `"1.0"`, `"1.1"`, or `"1.2"`. Contract 1.1 added the optional
+  `occurrence_exclusions` field (`[{ "recurrence_id", "date" }]`, MCD-0024); contract 1.2 added an
+  optional `category` on events/recurrences and the `expense_category_variation` simulation
+  parameter (MCD-0025). The canonical result echoes the scenario's declared version, so every prior
+  fixture is byte-identical.
 - `expected_status: "pending-generation"` marks a scenario whose expected value is produced by the
   reference engine in MC-03 and then frozen and independently reproduced in MC-06. Until frozen, the
   comparer reports it as `PENDING`, never `PASS`.
