@@ -175,8 +175,24 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+      # `android-actions/setup-android@v3` was deliberately DROPPED here. It shells out to
+      # `sdkmanager`, which fails on cmdline-tools 16.0 with "Failed to find package 'tools'" —
+      # the legacy `tools` package no longer exists, so the action can never install it. The
+      # GitHub `ubuntu-latest` image already ships an Android SDK at /usr/local/lib/android/sdk
+      # with ANDROID_HOME/ANDROID_SDK_ROOT exported, which is all the Gradle `ContractEmitTest`
+      # JVM run needs. Do NOT reintroduce a step that invokes sdkmanager.
+      - name: Locate the preinstalled Android SDK
+        run: |
+          set -euo pipefail
+          sdk="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          if [ ! -d "$sdk" ]; then
+            echo "::error::No Android SDK at '$sdk' — expected the runner's preinstalled SDK (ubuntu-latest)."
+            exit 1
+          fi
+          # Normalise both variable names for the Gradle steps below; never run sdkmanager.
+          echo "ANDROID_HOME=$sdk" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$sdk" >> "$GITHUB_ENV"
+          echo "Using preinstalled Android SDK: $sdk"
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
