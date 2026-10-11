@@ -45,7 +45,25 @@ Both satisfy the requirements:
 - no financial math in the comparer (it stays `compare.deep_diff`),
 - explicit engine revision provenance (pin SHA + emitting run SHA printed in the report).
 
-## Why not implemented in MC-07
+## Implementation status (WS7)
+
+Option A is now implemented in `.github/workflows/contract-conformance.yml` as a second, path-gated
+job `conformance-live`, beside the retained pinned-baseline job:
+
+- `live-scope` gates the heavyweight job to changes touching `fixtures/`, `schemas/`, `contracts/`,
+  `tools/conformance/`, `monte_carlo_ledger/contract/`, or this workflow (or a manual
+  `workflow_dispatch`).
+- `conformance-live` checks out `gthgomez/MonteCarloLedger-Android` at the pinned `ANDROID_PIN_SHA`
+  (workflow-level `env`), runs `:app:testDebugUnitTest --tests
+  com.montecarlo.ledger.contract.ContractEmitTest --no-daemon` under JDK 17, and feeds the fresh
+  `app/build/contract-results/` to the comparer as `--kotlin-dir`.
+- `cross_engine.py` now prints engine provenance (the Android emitting commit and the contract pin
+  `source_commit`) in its report; provenance never feeds the comparison.
+- The Android repo is **public**, so no cross-repo token is required. A documented precondition
+  skips the job with a clear message — rather than failing red — if it ever becomes private without
+  an `ANDROID_REPO_TOKEN` secret.
+
+## Why not implemented in MC-07 (superseded by WS7)
 
 The Ledger and Android remotes have **no registered trusted remote profile** in this workspace
 (`docs/agent-policy/REMOTE_PROFILES.md`), so remote mutation — including adding cross-repo CI

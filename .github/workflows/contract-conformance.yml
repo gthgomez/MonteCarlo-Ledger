@@ -4,8 +4,22 @@ on:
   push:
     branches: ["master", "campaign/**"]
   pull_request:
+  workflow_dispatch:
+
+env:
+  # Live cross-engine qualification (WS7): the Python reference is compared against a FRESH Kotlin
+  # run, not only the checked-in baseline. The Android engine is pinned to one commit so its
+  # regressions cannot silently ride in on `main`.
+  #
+  # ANDROID_PIN_SHA = the `main` tip of gthgomez/MonteCarloLedger-Android when this job was written
+  # (verified PUBLIC, default branch `main`). Bump it deliberately, in the same change that
+  # re-pins the vendored contract snapshot (`app/src/test/resources/contract/contract-pin.json`).
+  ANDROID_REPO: gthgomez/MonteCarloLedger-Android
+  ANDROID_PIN_SHA: 6cadf72c50ca6466f342a7263bacacf9145b28d3
 
 jobs:
+  # Fast, always-on path: Python against the checked-in, hash-pinned Kotlin baseline. Runs on
+  # every push/PR with no cross-repo toolchain, so it must never be weakened or gated.
   conformance:
     runs-on: ubuntu-latest
     steps:
@@ -30,3 +44,156 @@ jobs:
             --fixtures fixtures \
             --python-dir build/python-results \
             --kotlin-dir tools/conformance/kotlin-baseline
+
+  # Path gate for the heavyweight live job: only run the Android toolchain when a change can move
+  # the contract surface, or when a human forces it with workflow_dispatch.
+  live-scope:
+    name: Detect conformance-relevant changes
+    runs-on: ubuntu-latest
+    outputs:
+      conformance: ${{ steps.scope.outputs.conformance }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - id: scope
+        name: Decide whether the live job should run
+        run: |
+          set -euo pipefail
+          event="${GITHUB_EVENT_NAME}"
+          if [ "$event" = "workflow_dispatch" ]; then
+            echo "manual dispatch — live conformance enabled"
+            echo "conformance=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "$event" = "pull_request" ]; then
+            base="${{ github.event.pull_request.base.sha }}"
+          else
+            base="${{ github.event.before }}"
+          fi
+          head="${{ github.sha }}"
+          if [ -z "$base" ] || ! git cat-file -e "${base}^{commit}" 2>/dev/null; then
+            # New branch, first push, or force-push: fall back to the previous commit.
+            if git rev-parse --verify -q HEAD~1 >/dev/null 2>&1; then
+              base="HEAD~1"
+            else
+              base="HEAD"
+            fi
+            head="HEAD"
+          fi
+          changed="$(git diff --name-only "$base" "$head")"
+          echo "Changed files ($base..$head):"
+          printf '%s\n' "$changed" | sed 's/^/  /'
+          if printf '%s\n' "$changed" | grep -Eq '^(fixtures/|schemas/|contracts/|tools/conformance/|monte_carlo_ledger/contract/|\.github/workflows/contract-conformance\.yml)'; then
+            echo "conformance=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "conformance=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  # Live path: fresh Python output vs a fresh Kotlin execution at a pinned Android commit. Any
+  # divergence between the two engines — or against the fixture `expected` — fails the build.
+  conformance-live:
+    needs: live-scope
+    if: needs.live-scope.outputs.conformance == 'true'
+    runs-on: ubuntu-latest
+    env:
+      # The Android repo is PUBLIC (verified with `gh repo view`), so a plain cross-repo checkout
+      # works with the default GITHUB_TOKEN and needs no extra secret. If it ever becomes private,
+      # set ANDROID_REPO_IS_PRIVATE to "true" and provide an `ANDROID_REPO_TOKEN` secret; the
+      # precondition below then skips this job with a clear message instead of a broken red run.
+      ANDROID_REPO_IS_PRIVATE: "false"
+      ANDROID_REPO_TOKEN: ${{ secrets.ANDROID_REPO_TOKEN }}
+    steps:
+      - name: Precondition — cross-repo access to the Android engine
+        id: precheck
+        run: |
+          set -euo pipefail
+          if [ "${ANDROID_REPO_IS_PRIVATE}" = "true" ] && [ -z "${ANDROID_REPO_TOKEN}" ]; then
+            echo "::warning::Android repo is private and ANDROID_REPO_TOKEN is absent — skipping live conformance."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Skip notice
+        if: steps.precheck.outputs.ready != 'true'
+        run: |
+          echo "Live cross-engine conformance skipped: no cross-repo credential for a private Android repo."
+          echo "The pinned-baseline job above still ran; this is a documented precondition, not a failure."
+
+      - uses: actions/checkout@v4
+        if: steps.precheck.outputs.ready == 'true'
+
+      - uses: actions/setup-python@v5
+        if: steps.precheck.outputs.ready == 'true'
+        with:
+          python-version: "3.12"
+
+      - name: Install package and dev dependencies
+        if: steps.precheck.outputs.ready == 'true'
+        run: python -m pip install --upgrade pip && pip install -e .[dev] jsonschema
+
+      - name: Emit fresh Python canonical results
+        if: steps.precheck.outputs.ready == 'true'
+        run: python tools/conformance/run_python.py --out build/python-results
+
+      - name: Check out the pinned Android engine
+        if: steps.precheck.outputs.ready == 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.ANDROID_REPO }}
+          ref: ${{ env.ANDROID_PIN_SHA }}
+          path: android
+          token: ${{ env.ANDROID_REPO_TOKEN || github.token }}
+          persist-credentials: false
+
+      - name: Set up JDK 17
+        if: steps.precheck.outputs.ready == 'true'
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        if: steps.precheck.outputs.ready == 'true'
+        uses: android-actions/setup-android@v3
+
+      - name: Set up Gradle
+        if: steps.precheck.outputs.ready == 'true'
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Run the Kotlin contract emitter
+        if: steps.precheck.outputs.ready == 'true'
+        working-directory: android
+        run: ./gradlew :app:testDebugUnitTest --tests "com.montecarlo.ledger.contract.ContractEmitTest" --no-daemon
+
+      - name: Stage fresh Kotlin results
+        if: steps.precheck.outputs.ready == 'true'
+        run: |
+          set -euo pipefail
+          rm -rf build/kotlin-live-results
+          mkdir -p build/kotlin-live-results
+          cp -v android/app/build/contract-results/*.json build/kotlin-live-results/
+          count="$(find build/kotlin-live-results -maxdepth 1 -name '*.json' | wc -l)"
+          echo "staged ${count} fresh Kotlin result files"
+          test "${count}" -ge 20
+
+      - name: Cross-engine comparison against fresh Kotlin output
+        if: steps.precheck.outputs.ready == 'true'
+        run: |
+          python tools/conformance/cross_engine.py \
+            --fixtures fixtures \
+            --python-dir build/python-results \
+            --kotlin-dir build/kotlin-live-results \
+            --kotlin-sha "${ANDROID_PIN_SHA}" \
+            --contract-pin android/app/src/test/resources/contract/contract-pin.json \
+            --report build/cross-engine-live-report.md
+
+      - name: Upload live cross-engine report
+        if: always() && steps.precheck.outputs.ready == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: cross-engine-live-report
+          path: build/cross-engine-live-report.md
+          if-no-files-found: ignore
