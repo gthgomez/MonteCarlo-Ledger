@@ -4,8 +4,32 @@ on:
   push:
     branches: ["master", "campaign/**"]
   pull_request:
+  workflow_dispatch:
+
+env:
+  # Live cross-engine qualification (WS7): the Python reference is compared against a FRESH Kotlin
+  # run, not only the checked-in baseline. The Android engine is pinned to one commit so its
+  # regressions cannot silently ride in on `main`.
+  #
+  # ANDROID_PIN_SHA = the `main` tip of gthgomez/MonteCarloLedger-Android when this job was written
+  # (verified PUBLIC, default branch `main`).
+  #
+  # CROSS-REPO COUPLING (read before touching fixtures): the live job compares two independent
+  # corpora — this repo's `fixtures/` and the fixture corpus vendored in the pinned Android commit.
+  # Adding or renaming a fixture here without bumping the Android pin makes that scenario MISSING
+  # from the Kotlin results, and MISSING is a hard failure (by design: no evidence, no green).
+  # The coupling is a deliberate TWO-STEP bump, in one coordinated pair of changes:
+  #   1. vendor the new fixtures in MonteCarloLedger-Android, push, take the new `main` SHA;
+  #   2. set ANDROID_PIN_SHA to that SHA here AND re-pin the vendored contract snapshot
+  #      (`app/src/test/resources/contract/contract-pin.json` at the same Android commit).
+  # Until both halves land, expect a deliberate red `conformance-live` plus a "corpus skew"
+  # warning naming the unsynchronised scenario ids (see docs/campaign/MC-07-*.md).
+  ANDROID_REPO: gthgomez/MonteCarloLedger-Android
+  ANDROID_PIN_SHA: 6cadf72c50ca6466f342a7263bacacf9145b28d3
 
 jobs:
+  # Fast, always-on path: Python against the checked-in, hash-pinned Kotlin baseline. Runs on
+  # every push/PR with no cross-repo toolchain, so it must never be weakened or gated.
   conformance:
     runs-on: ubuntu-latest
     steps:
@@ -30,3 +54,178 @@ jobs:
             --fixtures fixtures \
             --python-dir build/python-results \
             --kotlin-dir tools/conformance/kotlin-baseline
+
+  # Path gate for the heavyweight live job: only run the Android toolchain when a change can move
+  # the contract surface, or when a human forces it with workflow_dispatch.
+  #
+  # This job also owns the cross-repo access precondition, because a job-level `if` cannot read a
+  # step output of the job it gates. Keeping `ready` here lets `conformance-live` be gated at the
+  # JOB level, so a missing credential reports the job as SKIPPED — distinguishable from green —
+  # instead of a successful run that produced no evidence.
+  live-scope:
+    name: Detect conformance-relevant changes
+    runs-on: ubuntu-latest
+    outputs:
+      conformance: ${{ steps.scope.outputs.conformance }}
+      ready: ${{ steps.precheck.outputs.ready }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - id: precheck
+        name: Precondition — cross-repo access to the Android engine
+        env:
+          # Driven by a repo variable (Settings → Variables: ANDROID_REPO_IS_PRIVATE=true) instead
+          # of a hardcoded constant, so visibility can be flipped without editing this file.
+          # Unset → "false": the Android repo is PUBLIC (verified with `gh repo view`), so a plain
+          # cross-repo checkout works with the default GITHUB_TOKEN and needs no extra secret.
+          ANDROID_REPO_IS_PRIVATE: ${{ vars.ANDROID_REPO_IS_PRIVATE || 'false' }}
+          ANDROID_REPO_TOKEN: ${{ secrets.ANDROID_REPO_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ "${ANDROID_REPO_IS_PRIVATE}" = "true" ] && [ -z "${ANDROID_REPO_TOKEN}" ]; then
+            echo "::warning::Android repo is private and ANDROID_REPO_TOKEN is absent — conformance-live will be SKIPPED, so this run contains NO live cross-engine evidence. Set the ANDROID_REPO_TOKEN secret (read-only cross-repo) to qualify live."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - id: scope
+        name: Decide whether the live job should run
+        run: |
+          set -euo pipefail
+          event="${GITHUB_EVENT_NAME}"
+          if [ "$event" = "workflow_dispatch" ]; then
+            echo "manual dispatch — live conformance enabled"
+            echo "conformance=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "$event" = "pull_request" ]; then
+            base="${{ github.event.pull_request.base.sha }}"
+          else
+            base="${{ github.event.before }}"
+          fi
+          head="${{ github.sha }}"
+          if [ -z "$base" ] || ! git cat-file -e "${base}^{commit}" 2>/dev/null; then
+            # New branch, first push, or force-push: fall back to the previous commit.
+            if git rev-parse --verify -q HEAD~1 >/dev/null 2>&1; then
+              base="HEAD~1"
+            else
+              base="HEAD"
+            fi
+            head="HEAD"
+          fi
+          changed="$(git diff --name-only "$base" "$head")"
+          echo "Changed files ($base..$head):"
+          printf '%s\n' "$changed" | sed 's/^/  /'
+          if printf '%s\n' "$changed" | grep -Eq '^(fixtures/|schemas/|contracts/|tools/conformance/|monte_carlo_ledger/contract/|\.github/workflows/contract-conformance\.yml)'; then
+            echo "conformance=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "conformance=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  # Live path: fresh Python output vs a fresh Kotlin execution at a pinned Android commit. Any
+  # divergence between the two engines — or against the fixture `expected` — fails the build.
+  #
+  # Gated at the JOB level on both the path scope and the cross-repo precondition: a job that does
+  # not run is reported as `skipped`, which is visibly different from a green check. There must be
+  # no configuration in which this job "succeeds" without having compared two real engines.
+  conformance-live:
+    needs: live-scope
+    if: needs.live-scope.outputs.conformance == 'true' && needs.live-scope.outputs.ready == 'true'
+    runs-on: ubuntu-latest
+    # Android toolchain + Gradle + full corpus: bound the run so a wedged daemon cannot burn the
+    # default 6h budget.
+    timeout-minutes: 45
+    concurrency:
+      # One live qualification per ref, and never cancel an in-flight verification (a cancelled run
+      # is not evidence either): a newer run queues rather than replacing evidence already coming.
+      group: conformance-live-${{ github.ref }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install package and dev dependencies
+        run: python -m pip install --upgrade pip && pip install -e .[dev] jsonschema
+
+      - name: Emit fresh Python canonical results
+        run: python tools/conformance/run_python.py --out build/python-results
+
+      - name: Check out the pinned Android engine
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.ANDROID_REPO }}
+          ref: ${{ env.ANDROID_PIN_SHA }}
+          path: android
+          # The credential is scoped to THIS step only. It is deliberately not a job-level env var:
+          # a cross-repo token exported into every step would also leak into the Gradle and Python
+          # steps, which have no business seeing it. Falls back to the workflow token when the
+          # Android repo is public / the secret is unset.
+          token: ${{ secrets.ANDROID_REPO_TOKEN || github.token }}
+          persist-credentials: false
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      # `android-actions/setup-android@v3` was deliberately DROPPED here. It shells out to
+      # `sdkmanager`, which fails on cmdline-tools 16.0 with "Failed to find package 'tools'" —
+      # the legacy `tools` package no longer exists, so the action can never install it. The
+      # GitHub `ubuntu-latest` image already ships an Android SDK at /usr/local/lib/android/sdk
+      # with ANDROID_HOME/ANDROID_SDK_ROOT exported, which is all the Gradle `ContractEmitTest`
+      # JVM run needs. Do NOT reintroduce a step that invokes sdkmanager.
+      - name: Locate the preinstalled Android SDK
+        run: |
+          set -euo pipefail
+          sdk="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          if [ ! -d "$sdk" ]; then
+            echo "::error::No Android SDK at '$sdk' — expected the runner's preinstalled SDK (ubuntu-latest)."
+            exit 1
+          fi
+          # Normalise both variable names for the Gradle steps below; never run sdkmanager.
+          echo "ANDROID_HOME=$sdk" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$sdk" >> "$GITHUB_ENV"
+          echo "Using preinstalled Android SDK: $sdk"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Run the Kotlin contract emitter
+        working-directory: android
+        run: ./gradlew :app:testDebugUnitTest --tests "com.montecarlo.ledger.contract.ContractEmitTest" --no-daemon
+
+      - name: Stage fresh Kotlin results
+        run: |
+          set -euo pipefail
+          rm -rf build/kotlin-live-results
+          mkdir -p build/kotlin-live-results
+          cp -v android/app/build/contract-results/*.json build/kotlin-live-results/
+          count="$(find build/kotlin-live-results -maxdepth 1 -name '*.json' | wc -l)"
+          echo "staged ${count} fresh Kotlin result files"
+          test "${count}" -ge 20
+
+      - name: Cross-engine comparison against fresh Kotlin output
+        run: |
+          python tools/conformance/cross_engine.py \
+            --fixtures fixtures \
+            --python-dir build/python-results \
+            --kotlin-dir build/kotlin-live-results \
+            --kotlin-sha "${ANDROID_PIN_SHA}" \
+            --contract-pin android/app/src/test/resources/contract/contract-pin.json \
+            --strict \
+            --report build/cross-engine-live-report.md
+
+      - name: Upload live cross-engine report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cross-engine-live-report
+          path: build/cross-engine-live-report.md
+          if-no-files-found: ignore
