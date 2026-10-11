@@ -38,7 +38,8 @@ reading like an intentional engineering project instead of a themed CRUD app.
 
 - Record income, bills, and reconciliation adjustments in a ledger-backed system.
 - Forecast the next 90 days of balance changes from scheduled obligations and income.
-- Calculate a "safe to spend" number from the lowest projected balance point.
+- Calculate a "safe to spend" number from the simulated trough distribution (a configurable
+  quantile of the Monte Carlo minimum-balance outcomes).
 - Run Monte Carlo scenarios to see how income variance and surprise expenses affect that answer.
 - Inspect the same logic through a local API without exposing financial data to a hosted service.
 
@@ -98,18 +99,21 @@ Example response:
 ```json
 {
   "safe_spend_cents": 45200,
-  "days_ahead": 30
+  "projected_low_point_cents": 51800,
+  "days_ahead": 30,
+  "as_of": "2026-10-11"
 }
 ```
 
 If the cached balance and ledger diverge, the API returns `409 Conflict` instead of serving a
 potentially misleading number.
 
-Note that `/safe-to-spend` is baseline-derived: it walks the deterministic cash-flow timeline and
-returns the lowest projected balance point. It does not run the Monte Carlo simulation and is not a
-worst-case guarantee. The Monte Carlo layer (see `monte_carlo_ledger/risk.py`) models uncertainty
-around that baseline and reports percentile outcomes, which are simulated estimates, not guarantees.
-See the [calculation contract](./docs/engineering/calculation-contract.md) for the exact semantics.
+`/safe-to-spend` is quantile-based (MCD-0008): it runs the seeded Monte Carlo simulation and
+returns the configured quantile of the simulated trough distribution minus any reserve — not the
+deterministic low point. The deterministic low point is returned separately as
+`projected_low_point_cents`. The default quantile is 1/10. Simulated quantiles are estimates, not
+guarantees. See the [calculation contract](./docs/engineering/calculation-contract.md) for the
+exact semantics.
 
 ## Example Scenario
 
@@ -152,17 +156,22 @@ These checks also run in GitHub Actions.
 │   ├── workflow_income.py
 │   ├── workflow_account.py
 │   ├── workflow_reporting.py
-│   ├── forecasting.py
-│   ├── risk.py
-│   ├── timeline_service.py
 │   ├── db_manager.py
 │   ├── budget_engine.py
 │   ├── domain_rules.py
-│   ├── monte_carlo_config.py
+│   ├── scenario.py
+│   ├── decisions.py
+│   ├── contract/
+│   │   ├── engine.py
+│   │   ├── prng.py
+│   │   ├── money.py
+│   │   └── debt.py
 │   └── schema.sql
 ├── docs/
 │   ├── ARCHITECTURE.md
 │   ├── engineering-walkthrough.md
+│   ├── engineering/
+│   │   └── calculation-contract.md
 │   ├── archive/
 │   │   └── upgrade-plan-2026-04-09.md
 │   └── assets/
