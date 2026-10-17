@@ -65,3 +65,4 @@ web/node_modules/
 web/.next/
 web/dist-test/
 *.tsbuildinfo
+*.bak

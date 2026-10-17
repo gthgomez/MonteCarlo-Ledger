@@ -89,6 +89,24 @@ This API is intentionally local-only. It has no authentication and should not be
 python -m uvicorn monte_carlo_ledger.api:app --reload --host 127.0.0.1 --port 8000
 ```
 
+### Web Dashboard & Cloud Sync
+
+A zero-knowledge, end-to-end encrypted web companion is deployed at:
+👉 **[https://montecarlo-ledger.vercel.app](https://montecarlo-ledger.vercel.app)**
+
+The web app runs Contract 2.0 TypeScript simulations client-side with zero data egress. You can synchronize your local CLI ledger with the edge vault (backed by Turso libSQL):
+
+```bash
+# 1. Initialize a private vault (derives local PBKDF2 keys, never sent to server)
+python -m monte_carlo_ledger sync init <vault_id> <passphrase>
+
+# 2. Push encrypted ledger snapshot to the cloud vault
+python -m monte_carlo_ledger sync push
+
+# 3. Pull and decrypt vault state on another machine
+python -m monte_carlo_ledger sync pull
+```
+
 ### Example Endpoint
 
 `GET /safe-to-spend?days_ahead=30`

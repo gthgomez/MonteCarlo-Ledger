@@ -7,8 +7,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint",
-    "test": "node --test --test-reporter=spec dist-test/**/*.test.js"
+    "lint": "tsc --noEmit",
+    "test": "tsc src/contract/__tests__/conformance.test.ts src/contract/engine.ts src/contract/debt.ts src/contract/money.ts src/contract/prng.ts --noEmit false --outDir dist-test --module commonjs --target es2022 --moduleResolution node --skipLibCheck --esModuleInterop && node --test dist-test/__tests__/conformance.test.js"
   },
   "dependencies": {
     "@libsql/client": "^0.14.0",
