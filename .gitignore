@@ -61,3 +61,7 @@ AGENTS_README.md
 
 .vercel
 .env*.local
+web/node_modules/
+web/.next/
+web/dist-test/
+*.tsbuildinfo
