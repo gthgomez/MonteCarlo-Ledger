@@ -21,6 +21,8 @@ COMMANDS = {
     "simulate-purchase",
     "simulate-paycheck-delay",
     "overdraft",
+    "sync",
+    "export-snapshot",
 }
 
 
@@ -83,7 +85,20 @@ def _build_parser() -> argparse.ArgumentParser:
     p_overdraft.add_argument("--seed", type=int, default=42)
     p_overdraft.add_argument("--runs", type=int, default=500)
 
-    for p in (p_forecast, p_risk, p_safe, p_purchase, p_delay, p_overdraft):
+    p_sync = sub.add_parser("sync", help="encrypted cloud vault synchronization")
+    sync_sub = p_sync.add_subparsers(dest="sync_action")
+    p_sync_init = sync_sub.add_parser("init", help="initialize a new cloud vault")
+    p_sync_init.add_argument("vault_id")
+    p_sync_init.add_argument("passphrase")
+    p_sync_init.add_argument("--server", default=None)
+    p_sync_push = sync_sub.add_parser("push", help="push encrypted snapshot to cloud vault")
+    p_sync_push.add_argument("--server", default=None)
+    p_sync_pull = sync_sub.add_parser("pull", help="pull and decrypt snapshot from cloud vault")
+    p_sync_pull.add_argument("--server", default=None)
+
+    p_snap = sub.add_parser("export-snapshot", help="export canonical ledger snapshot JSON")
+
+    for p in (p_forecast, p_risk, p_safe, p_purchase, p_delay, p_overdraft, p_snap):
         p.add_argument("--json", action="store_true", help="emit stable canonical JSON")
     return parser
 
@@ -167,7 +182,27 @@ def main(argv: List[str]) -> int:
             f"Overdraft chance:    {result['negative_balance_probability_ppm'] / 10000:.2f}%",
             f"Safe to spend:       {_format_money(result['safe_to_spend_cents'])}",
         ])
+    if args.command == "export-snapshot":
+        from . import sync
+        snap = sync.export_ledger_snapshot()
+        _emit(snap, args.json)
         return 0
+
+    if args.command == "sync":
+        from . import sync
+        if args.sync_action == "init":
+            res = sync.sync_init(args.vault_id, args.passphrase, args.server or sync.DEFAULT_SERVER_URL)
+            print(f"Vault initialized: {res['vault_id']} (rev {res['revision']})")
+            return 0
+        elif args.sync_action == "push":
+            res = sync.sync_push(args.server)
+            print(f"Pushed to vault: rev {res.get('revision')}")
+            return 0
+        elif args.sync_action == "pull":
+            res = sync.sync_pull(args.server)
+            print(f"Pulled from vault: restored {res['transactions_count']} transactions, balance: {_format_money(res['balance_cents'])}")
+            return 0
+        return 2
 
     return 2
 
