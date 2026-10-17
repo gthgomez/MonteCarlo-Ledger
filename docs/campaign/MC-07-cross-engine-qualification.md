@@ -1,14 +1,11 @@
-# MC-07 — Cross-Engine Qualification (design + current state)
+# MC-07 — Cross-Engine Qualification (design + implementation)
 
-## Current state (retained)
+## Dual-track qualification model
 
-Ledger CI (`.github/workflows/contract-conformance.yml`) runs the Python golden corpus and then the
-dumb comparer (`tools/conformance/cross_engine.py`) against a **checked-in, hash-pinned Kotlin
-baseline** (`tools/conformance/kotlin-baseline/*.json`, produced by the Kotlin `ContractEmitTest`).
+Ledger CI (`.github/workflows/contract-conformance.yml`) implements a dual-track strategy:
 
-This is real evidence (both engines' *outputs* are compared, byte-for-byte, with no math in the
-comparer), but it is not the strongest possible proof: the Kotlin side is a snapshot emitted at
-pin time, not a live Kotlin execution on every Ledger run.
+1. **Fast pinned path (`conformance`):** Runs on every push and PR against a **checked-in, hash-pinned Kotlin baseline** (`tools/conformance/kotlin-baseline/*.json`, produced by the Kotlin `ContractEmitTest`). This guarantees instant, offline, deterministic verification with zero external dependencies.
+2. **Live cross-engine path (`conformance-live`):** A path-gated job (WS7 / PR #16) that executes a fresh Kotlin emission on `MonteCarloLedger-Android` at a pinned commit and compares fresh Python output directly against fresh Kotlin output, detecting any cross-engine discrepancies.
 
 ## Goal — live cross-engine qualification
 
@@ -96,25 +93,18 @@ Until both halves land, expect a deliberate red `conformance-live` plus the corp
 Comparing only the intersection of `scenario_id`s was considered and rejected: it would silently drop
 missing scenarios and turn absence of evidence into green.
 
-## Why not implemented in MC-07 (superseded by WS7)
+## Resolution History
 
-The Ledger and Android remotes have **no registered trusted remote profile** in this workspace
-(`docs/agent-policy/REMOTE_PROFILES.md`), so remote mutation — including adding cross-repo CI
-tokens, push, and PRs — returns `STOP_REMOTE`. Building a workflow that depends on a cross-repo
-token that cannot be provisioned would be speculative infrastructure.
+- **MC-07 Initial Milestone:** Option A was deferred during the initial campaign run while cross-repo workflow automation was being evaluated. The repository retained the pinned-baseline mechanism (`tools/conformance/kotlin-baseline`) as a fast offline gate while documenting the target live architecture.
+- **WS7 Resolution (PR #16):** Option A was implemented as `conformance-live` in `.github/workflows/contract-conformance.yml`. Because `gthgomez/MonteCarloLedger-Android` is public, cross-repo checkout operates under standard checkout permissions with no custom token required. The pinned baseline is preserved alongside it for fast, offline, zero-network verification.
 
-**Decision:** document the design and **retain the pinned-baseline mechanism** for now. When the
-remotes are re-enabled, implement Option A in a follow-up CI PR and keep the pinned baseline as a
-fast, offline fallback.
-
-## Minimum artifact contract (for Option A/B)
+## Minimum artifact contract (satisfied in WS7)
 
 The Kotlin emitter (`ContractEmitTest`) writes one canonical result JSON per fixture to
-`build/contract-results/<scenario_id>.json` and computes no financial value. A cross-repo
-qualification job needs only:
+`build/contract-results/<scenario_id>.json` and computes no financial value. The cross-repo
+qualification job satisfies all four requirements:
 
-1. the contract pin (`source_commit` in `contract-pin.json`),
-2. the emitter run provenance (Android commit SHA),
-3. the emitted `build/contract-results/`,
-4. `tools/conformance/cross_engine.py` run against live `python tools/conformance/run_python.py`
-   output.
+1. the contract pin (`source_commit` in `contract-pin.json`), passed via `--contract-pin`;
+2. the emitter run provenance (Android commit SHA), passed via `--kotlin-sha`;
+3. the emitted `build/contract-results/`, staged to `build/kotlin-live-results/` and passed via `--kotlin-dir`;
+4. `tools/conformance/cross_engine.py` run against live `python tools/conformance/run_python.py` output with `--strict`.
