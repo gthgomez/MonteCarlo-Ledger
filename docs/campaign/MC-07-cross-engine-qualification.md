@@ -1,14 +1,11 @@
-# MC-07 — Cross-Engine Qualification (design + current state)
+# MC-07 — Cross-Engine Qualification (design + implementation)
 
-## Current state (retained)
+## Dual-track qualification model
 
-Ledger CI (`.github/workflows/contract-conformance.yml`) runs the Python golden corpus and then the
-dumb comparer (`tools/conformance/cross_engine.py`) against a **checked-in, hash-pinned Kotlin
-baseline** (`tools/conformance/kotlin-baseline/*.json`, produced by the Kotlin `ContractEmitTest`).
+Ledger CI (`.github/workflows/contract-conformance.yml`) implements a dual-track strategy:
 
-This is real evidence (both engines' *outputs* are compared, byte-for-byte, with no math in the
-comparer), but it is not the strongest possible proof: the Kotlin side is a snapshot emitted at
-pin time, not a live Kotlin execution on every Ledger run.
+1. **Fast pinned path (`conformance`):** Runs on every push and PR against a **checked-in, hash-pinned Kotlin baseline** (`tools/conformance/kotlin-baseline/*.json`, produced by the Kotlin `ContractEmitTest`). This guarantees instant, offline, deterministic verification with zero external dependencies.
+2. **Live cross-engine path (`conformance-live`):** A path-gated job (WS7 / PR #16) that executes a fresh Kotlin emission on `MonteCarloLedger-Android` at a pinned commit and compares fresh Python output directly against fresh Kotlin output, detecting any cross-engine discrepancies.
 
 ## Goal — live cross-engine qualification
 
@@ -45,25 +42,69 @@ Both satisfy the requirements:
 - no financial math in the comparer (it stays `compare.deep_diff`),
 - explicit engine revision provenance (pin SHA + emitting run SHA printed in the report).
 
-## Why not implemented in MC-07
+## Implementation status (WS7)
 
-The Ledger and Android remotes have **no registered trusted remote profile** in this workspace
-(`docs/agent-policy/REMOTE_PROFILES.md`), so remote mutation — including adding cross-repo CI
-tokens, push, and PRs — returns `STOP_REMOTE`. Building a workflow that depends on a cross-repo
-token that cannot be provisioned would be speculative infrastructure.
+Option A is now implemented in `.github/workflows/contract-conformance.yml` as a second, path-gated
+job `conformance-live`, beside the retained pinned-baseline job:
 
-**Decision:** document the design and **retain the pinned-baseline mechanism** for now. When the
-remotes are re-enabled, implement Option A in a follow-up CI PR and keep the pinned baseline as a
-fast, offline fallback.
+- `live-scope` gates the heavyweight job to changes touching `fixtures/`, `schemas/`, `contracts/`,
+  `tools/conformance/`, `monte_carlo_ledger/contract/`, or this workflow (or a manual
+  `workflow_dispatch`). It also resolves the cross-repo access precondition and exports it as the
+  `ready` output, because a job-level `if` cannot read a step output of the job it gates.
+- `conformance-live` is gated at the **job** level
+  (`needs.live-scope.outputs.conformance == 'true' && needs.live-scope.outputs.ready == 'true'`).
+  When the precondition fails, the job is reported **skipped**, not successful: a missing
+  credential can no longer leave a green check that carries no evidence. The job also carries
+  `timeout-minutes: 45` and a per-ref `concurrency` group with `cancel-in-progress: false`, and the
+  cross-repo `ANDROID_REPO_TOKEN` is scoped to the single Android checkout step (never exported into
+  the Gradle/Python steps).
+- `conformance-live` checks out `gthgomez/MonteCarloLedger-Android` at the pinned `ANDROID_PIN_SHA`
+  (workflow-level `env`), runs `:app:testDebugUnitTest --tests
+  com.montecarlo.ledger.contract.ContractEmitTest --no-daemon` under JDK 17, and feeds the fresh
+  `app/build/contract-results/` to the comparer as `--kotlin-dir`.
+- `cross_engine.py` prints engine provenance (the Android emitting commit and the contract pin
+  `source_commit`) in its report; provenance never feeds the comparison. Provenance is also never
+  invented: passing `--contract-pin` that is unreadable, malformed, or carries no `source_commit`
+  exits `2` with a clear message instead of reporting `unavailable` beside a green comparison, and
+  the live job adds `--strict` so a passing report can never lack engine/contract revisions.
+- The Android repo is **public**, so no cross-repo token is required; visibility is read from the
+  repository variable `ANDROID_REPO_IS_PRIVATE` (default `"false"`) rather than hardcoded. If it ever
+  becomes private without an `ANDROID_REPO_TOKEN` secret, `conformance-live` is **skipped** (with an
+  annotation saying the run holds no live evidence) rather than reporting success.
+- Coverage: `tests/test_cross_engine.py` pins provenance sourcing, the clear-error exits, the
+  `--contract-sha` precedence, and that adding provenance arguments never changes the verdict.
 
-## Minimum artifact contract (for Option A/B)
+## Cross-repo corpus coupling (operational caveat)
+
+The live job compares **two independent corpora**: this repo's `fixtures/` and the fixtures vendored
+in the pinned Android commit. They are synchronised by hand, so a fixture added here without an
+Android bump is `MISSING` from the Kotlin results, and `MISSING` is a hard failure — deliberately,
+because a missing scenario is absence of evidence, not agreement. `cross_engine.py` therefore reports
+a **corpus skew** section (and a `::warning::`-style stderr warning) naming the scenario ids only one
+engine emitted, while still failing the run.
+
+The coupling is a **two-step bump**, landed as one coordinated pair of changes:
+
+1. vendor the new/renamed fixtures in `MonteCarloLedger-Android`, push, take the new `main` SHA;
+2. set `ANDROID_PIN_SHA` in this workflow to that SHA **and** re-pin the vendored contract snapshot
+   `app/src/test/resources/contract/contract-pin.json` at the same Android commit.
+
+Until both halves land, expect a deliberate red `conformance-live` plus the corpus-skew warning.
+Comparing only the intersection of `scenario_id`s was considered and rejected: it would silently drop
+missing scenarios and turn absence of evidence into green.
+
+## Resolution History
+
+- **MC-07 Initial Milestone:** Option A was deferred during the initial campaign run while cross-repo workflow automation was being evaluated. The repository retained the pinned-baseline mechanism (`tools/conformance/kotlin-baseline`) as a fast offline gate while documenting the target live architecture.
+- **WS7 Resolution (PR #16):** Option A was implemented as `conformance-live` in `.github/workflows/contract-conformance.yml`. Because `gthgomez/MonteCarloLedger-Android` is public, cross-repo checkout operates under standard checkout permissions with no custom token required. The pinned baseline is preserved alongside it for fast, offline, zero-network verification.
+
+## Minimum artifact contract (satisfied in WS7)
 
 The Kotlin emitter (`ContractEmitTest`) writes one canonical result JSON per fixture to
-`build/contract-results/<scenario_id>.json` and computes no financial value. A cross-repo
-qualification job needs only:
+`build/contract-results/<scenario_id>.json` and computes no financial value. The cross-repo
+qualification job satisfies all four requirements:
 
-1. the contract pin (`source_commit` in `contract-pin.json`),
-2. the emitter run provenance (Android commit SHA),
-3. the emitted `build/contract-results/`,
-4. `tools/conformance/cross_engine.py` run against live `python tools/conformance/run_python.py`
-   output.
+1. the contract pin (`source_commit` in `contract-pin.json`), passed via `--contract-pin`;
+2. the emitter run provenance (Android commit SHA), passed via `--kotlin-sha`;
+3. the emitted `build/contract-results/`, staged to `build/kotlin-live-results/` and passed via `--kotlin-dir`;
+4. `tools/conformance/cross_engine.py` run against live `python tools/conformance/run_python.py` output with `--strict`.
