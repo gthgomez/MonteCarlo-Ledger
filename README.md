@@ -11,6 +11,31 @@ reading like an intentional engineering project instead of a themed CRUD app.
 
 > **Companion app:** [MonteCarloLedger-Android](https://github.com/gthgomez/MonteCarloLedger-Android) — deterministic bill pacing and AES-GCM encrypted backups on Android.
 
+## See it in action
+
+Follow a synthetic household from its 90-day cash-flow forecast into a $650 purchase scenario, a late-paycheck comparison, and a new recurring bill.
+
+<a href="docs/showcase/media/workflow.mp4"><img src="docs/showcase/media/preview.gif" alt="Recorded local workflow: Follow a synthetic household from its 90-day cash-flow forecast into a $650 purchase scenario, a late-paycheck comparison, and a new recurring bill." width="900"></a>
+
+[Watch or download the MP4](docs/showcase/media/workflow.mp4) · [Capture notes and reproduction](docs/showcase/README.md)
+
+**What you are seeing:** All amounts and obligations shown are synthetic sample data. Forecasts and what-if results are computed by the real client-side Contract 2.0 engine; no bank account, private ledger, or cloud vault was accessed.
+
+**Demo status:** [Open web companion](https://montecarlo-ledger.vercel.app/). The public URL returned HTTP 200 on 2026-10-30; cloud synchronization was not exercised. The local Python CLI/API and browser companion are distinct surfaces.
+
+<table>
+<tr>
+<td width="50%"><img src="docs/showcase/media/01-forecast.jpg" alt="Synthetic household dashboard: computed safe-to-spend and cash-flow timeline." width="100%"><br><strong>1. Synthetic forecast</strong><br>Synthetic household dashboard: computed safe-to-spend and cash-flow timeline.</td>
+<td width="50%"><img src="docs/showcase/media/02-decisions.jpg" alt="Decision Studio: local hypothetical-purchase scenario and comparison." width="100%"><br><strong>2. Hypothetical purchase</strong><br>Decision Studio: local hypothetical-purchase scenario and comparison.</td>
+</tr>
+<tr>
+<td width="50%"><img src="docs/showcase/media/03-income-delay.jpg" alt="Delayed-income scenario; client-side Contract 2.0 calculations on sample data." width="100%"><br><strong>3. Late paycheck</strong><br>Delayed-income scenario; client-side Contract 2.0 calculations on sample data.</td>
+<td width="50%"><img src="docs/showcase/media/04-sample-ledger.jpg" alt="Added Demo Bike Maintenance to the synthetic household recurring bills." width="100%"><br><strong>4. Sample recurring bill</strong><br>Added Demo Bike Maintenance to the synthetic household recurring bills.</td>
+</tr>
+</table>
+
+Captured from [`41b190b58730`](https://github.com/gthgomez/MonteCarlo-Ledger/tree/41b190b5873041f75651055f925a5bf38219ea8a) on 2026-10-30. The GIF is a compact preview; the MP4 preserves the recorded workflow timing.
+
 ![Monte Carlo Ledger architecture overview](./docs/assets/architecture-overview.svg)
 
 ## At a Glance

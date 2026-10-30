@@ -1,0 +1,62 @@
+{
+  "sourceRevision": "41b190b5873041f75651055f925a5bf38219ea8a",
+  "capturedAt": "2026-10-30T12:09:00.675Z",
+  "dateInBrowser": "2026-10-30T12:00:00Z",
+  "browser": "154.0.8037.57",
+  "viewport": {
+    "width": 1280,
+    "height": 900
+  },
+  "origin": "http://127.0.0.1:4312",
+  "externalRequestsBlocked": true,
+  "blockedHosts": [],
+  "sampleData": "Shipped SAMPLE_LEDGER_STATE only, clean browser storage; synthetic household figures. Date fixed to 2026-10-30; no sync/vault/real account accessed.",
+  "workflow": "Inspect forecast; test a hypothetical purchase and delayed income; add a synthetic recurring bill.",
+  "videoSeconds": 11.8,
+  "gifPlaybackSpeed": 1,
+  "pageErrors": [],
+  "screenshots": [
+    {
+      "file": "01-forecast.jpg",
+      "description": "Synthetic household dashboard: computed safe-to-spend and cash-flow timeline."
+    },
+    {
+      "file": "02-decisions.jpg",
+      "description": "Decision Studio: local hypothetical-purchase scenario and comparison."
+    },
+    {
+      "file": "03-income-delay.jpg",
+      "description": "Delayed-income scenario; client-side Contract 2.0 calculations on sample data."
+    },
+    {
+      "file": "04-sample-ledger.jpg",
+      "description": "Added Demo Bike Maintenance to the synthetic household recurring bills."
+    }
+  ],
+  "files": {
+    "01-forecast.jpg": {
+      "bytes": 109043,
+      "sha256": "8f608e8a275b2cce34687354defbdcf67f2eca852b6cea56aafcde3ca52e6f1d"
+    },
+    "02-decisions.jpg": {
+      "bytes": 114590,
+      "sha256": "1fc634cb9315d32edda03d572422ae248bdae46afc0540d602ab25e9b8ebe896"
+    },
+    "03-income-delay.jpg": {
+      "bytes": 115105,
+      "sha256": "954703a962ff8bc98ed59b6ba6dbb8f2e782814ab1676108b5da87e2157d0b17"
+    },
+    "04-sample-ledger.jpg": {
+      "bytes": 119694,
+      "sha256": "8c8688f7da8241ffaee6f646b333769a0b230649a4149aa2f3b5829ff2a7bc1f"
+    },
+    "workflow.mp4": {
+      "bytes": 70725,
+      "sha256": "dce522266db4ba15ae80c7709b9003154bc00a683d288e49cf03eee2118f9759"
+    },
+    "preview.gif": {
+      "bytes": 252902,
+      "sha256": "8b507073dbdc8ca85241d52b88fd7a0f5079e32e6b007713493198967d9b6357"
+    }
+  }
+}
