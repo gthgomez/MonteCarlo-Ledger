@@ -1,0 +1,11 @@
+{
+  "name": "readme-showcase-capture",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "playwright": "1.63.0"
+  },
+  "scripts": {
+    "test": "node --test capture-cleanup.check.mjs"
+  }
+}
