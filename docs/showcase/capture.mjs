@@ -14,31 +14,32 @@ if (!['localhost', '127.0.0.1', '[::1]'].includes(origin.hostname)) throw new Er
 const out = join(here, 'media');
 await mkdir(out, { recursive: true });
 const temp = await mkdtemp(join(tmpdir(), 'readme-showcase-'));
-const browser = await chromium.launch({executablePath: process.env.CHROMIUM_PATH || '/usr/bin/chromium', args: ['--no-sandbox']});
-const context = await browser.newContext({viewport: {width: 1280, height: 900}, deviceScaleFactor: 1, locale: 'en-US', timezoneId: 'UTC', colorScheme: 'dark', reducedMotion: 'reduce', recordVideo: {dir: temp, size: {width: 1280, height: 900}}});
-const blockedHosts = new Set();
-await context.route('**/*', route => {
-  const url = new URL(route.request().url());
-  if (['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)) return route.continue();
-  blockedHosts.add(url.hostname);
-  return route.abort('blockedbyclient');
-});
-const page = await context.newPage();
-page.setDefaultTimeout(20000);
-await page.clock.setFixedTime(new Date('2026-10-30T12:00:00Z'));
-const screenshots = [];
-const errors = [];
-page.on('pageerror', error => errors.push(error.message));
-const pause = ms => page.waitForTimeout(ms);
-const shot = async (name, description) => {
-  await pause(700);
-  await page.screenshot({path: join(out, `${name}.jpg`), type: 'jpeg', quality: 88});
-  screenshots.push({file: `${name}.jpg`, description});
-  await pause(1800);
-};
-const recordingStarted = Date.now();
-let trimSeconds;
+let browser;
 try {
+  browser = await chromium.launch({executablePath: process.env.CHROMIUM_PATH || '/usr/bin/chromium', args: ['--no-sandbox']});
+  const context = await browser.newContext({viewport: {width: 1280, height: 900}, deviceScaleFactor: 1, locale: 'en-US', timezoneId: 'UTC', colorScheme: 'dark', reducedMotion: 'reduce', recordVideo: {dir: temp, size: {width: 1280, height: 900}}});
+  const blockedHosts = new Set();
+  await context.route('**/*', route => {
+    const url = new URL(route.request().url());
+    if (['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)) return route.continue();
+    blockedHosts.add(url.hostname);
+    return route.abort('blockedbyclient');
+  });
+  const page = await context.newPage();
+  page.setDefaultTimeout(20000);
+  await page.clock.setFixedTime(new Date('2026-10-30T12:00:00Z'));
+  const screenshots = [];
+  const errors = [];
+  page.on('pageerror', error => errors.push(error.message));
+  const pause = ms => page.waitForTimeout(ms);
+  const shot = async (name, description) => {
+    await pause(700);
+    await page.screenshot({path: join(out, `${name}.jpg`), type: 'jpeg', quality: 88});
+    screenshots.push({file: `${name}.jpg`, description});
+    await pause(1800);
+  };
+  const recordingStarted = Date.now();
+  let trimSeconds;
   await page.goto(new URL('/', origin).href, {waitUntil: 'networkidle', timeout: 90000});
   trimSeconds = (Date.now() - recordingStarted) / 1000;
   // SCENARIO
@@ -77,6 +78,9 @@ try {
   if (errors.length) throw new Error(`UI emitted ${errors.length} page error(s); inspect capture.json before publishing.`);
   console.log(`Captured ${screenshots.length} screenshots and ${duration.toFixed(1)}s real UI video at ${revision}`);
 } finally {
-  await browser.close();
-  await rm(temp,{recursive:true,force:true});
+  try {
+    await browser?.close();
+  } finally {
+    await rm(temp,{recursive:true,force:true});
+  }
 }
