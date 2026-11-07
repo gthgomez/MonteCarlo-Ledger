@@ -54,3 +54,33 @@ test("Contract 2.0 Conformance Suite against golden fixtures", () => {
   }
   console.log(`\n🎉 [PASS] Passed ${passed} golden Contract 2.0 fixtures bit-for-bit in TypeScript!\n`);
 });
+
+test("contract_version boundary policy (MCD-0027)", () => {
+  const base = {
+    scenario_id: "version-boundary",
+    as_of: "2026-11-09",
+    starting_balance_cents: 0,
+    horizon_days: 1,
+    events: [],
+  };
+
+  // Key absent → documented default = latest released version.
+  assert.equal(runScenario({ ...base }).contract_version, "2.0");
+
+  // Every supported explicit version is honoured and echoed.
+  for (const version of ["1.0", "1.1", "1.2", "2.0"]) {
+    assert.equal(
+      runScenario({ ...base, contract_version: version }).contract_version,
+      version
+    );
+  }
+
+  // Explicitly malformed values are rejected, never silently replaced by the default.
+  for (const bad of [null, 2.0, 2, {}, [], "", "3.0", "not-a-version"]) {
+    assert.throws(
+      () => runScenario({ ...base, contract_version: bad }),
+      /SCHEMA_INVALID|unsupported contract_version/,
+      `contract_version ${JSON.stringify(bad)} must be rejected`
+    );
+  }
+});

@@ -10,8 +10,26 @@ import { SyncModal } from "@/components/SyncModal";
 import { LedgerState, SAMPLE_LEDGER_STATE } from "@/lib/types";
 import { buildScenarioFromLedger } from "@/lib/scenario-builder";
 import { runScenario } from "@/contract/engine";
+import { ContractError } from "@/contract/money";
 
 const STORAGE_KEY = "montecarlo_ledger_state_v2";
+
+// Date-only "today" in the user's local timezone. toISOString() would silently use the
+// UTC date, which can differ from the user's calendar day (and shift every forecast).
+function localDateIso(): string {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(
+    d.getDate()
+  ).padStart(2, "0")}`;
+}
+
+export type SimulatePurchaseResult =
+  | { status: "ok"; safeSpendCents: number; overdraftPpm: number; minBalP10Cents: number }
+  | { status: "error"; code: string };
+
+export type SimulateDelayResult =
+  | { status: "ok"; overdraftPpm: number; minBalP10Cents: number }
+  | { status: "error"; code: string };
 
 export default function Home() {
   const [state, setState] = useState<LedgerState>(SAMPLE_LEDGER_STATE);
@@ -77,7 +95,7 @@ export default function Home() {
   };
 
   const asOf = useMemo(() => {
-    return new Date().toISOString().split("T")[0];
+    return localDateIso();
   }, []);
 
   // Canonical Contract 2.0 Evaluation (100% Client-Side)
@@ -90,12 +108,16 @@ export default function Home() {
     });
   }, [state, asOf]);
 
-  const contractResult = useMemo(() => {
+  // Fail closed: a failed evaluation is a first-class state, never null-then-loading and
+  // never zero-filled numbers. The UI must show what broke and let the user recover.
+  const contractEval = useMemo(() => {
     try {
-      return runScenario(canonicalScenario);
+      return { status: "ok" as const, result: runScenario(canonicalScenario) };
     } catch (err) {
-      console.error("Contract evaluation error:", err);
-      return null;
+      const code = err instanceof ContractError ? err.code : "UNKNOWN_ERROR";
+      const message = err instanceof Error ? err.message : String(err);
+      console.error("Contract evaluation error:", code, message);
+      return { status: "error" as const, code, message };
     }
   }, [canonicalScenario]);
 
@@ -117,8 +139,8 @@ export default function Home() {
     });
   }, [canonicalScenario, state.current_balance_cents]);
 
-  // Decision Simulator Hooks
-  const handleSimulatePurchase = (amountCents: number, date: string) => {
+  // Decision Simulator Hooks — typed results; failures are surfaced, never zero-filled.
+  const handleSimulatePurchase = (amountCents: number, date: string): SimulatePurchaseResult => {
     const cloned = JSON.parse(JSON.stringify(canonicalScenario));
     cloned.events.push({
       date,
@@ -129,20 +151,19 @@ export default function Home() {
     try {
       const res = runScenario(cloned);
       return {
+        status: "ok",
         safeSpendCents: res.risk.safe_to_spend_cents,
         overdraftPpm: res.risk.negative_balance_probability_ppm,
         minBalP10Cents: res.risk.minimum_balance_p10_cents,
       };
-    } catch {
-      return {
-        safeSpendCents: 0,
-        overdraftPpm: 0,
-        minBalP10Cents: 0,
-      };
+    } catch (err) {
+      const code = err instanceof ContractError ? err.code : "UNKNOWN_ERROR";
+      console.error("Purchase simulation failed:", code, err);
+      return { status: "error", code };
     }
   };
 
-  const handleSimulateDelay = (delayDays: number) => {
+  const handleSimulateDelay = (delayDays: number): SimulateDelayResult => {
     const cloned = JSON.parse(JSON.stringify(canonicalScenario));
     const incomes = cloned.events.filter((e: any) => e.type === "income");
     if (incomes.length > 0) {
@@ -153,18 +174,18 @@ export default function Home() {
     try {
       const res = runScenario(cloned);
       return {
+        status: "ok",
         overdraftPpm: res.risk.negative_balance_probability_ppm,
         minBalP10Cents: res.risk.minimum_balance_p10_cents,
       };
-    } catch {
-      return {
-        overdraftPpm: 0,
-        minBalP10Cents: 0,
-      };
+    } catch (err) {
+      const code = err instanceof ContractError ? err.code : "UNKNOWN_ERROR";
+      console.error("Paycheck-delay simulation failed:", code, err);
+      return { status: "error", code };
     }
   };
 
-  if (!isLoaded || !contractResult) {
+  if (!isLoaded) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-slate-950 text-slate-400 text-sm">
         Loading Monte Carlo Contract Engine...
@@ -172,6 +193,51 @@ export default function Home() {
     );
   }
 
+  if (contractEval.status === "error") {
+    return (
+      <div className="min-h-screen flex flex-col items-center justify-center bg-slate-950 text-slate-200 p-6">
+        <div className="max-w-lg w-full rounded-2xl border border-rose-800/60 bg-rose-950/30 p-6 space-y-4">
+          <h1 className="text-base font-bold text-rose-300 uppercase tracking-wider">
+            Calculation Failed
+          </h1>
+          <p className="text-sm text-slate-300">
+            The financial engine could not evaluate this ledger, so no forecast, risk estimate,
+            or safe-to-spend number is shown. Nothing was invented to fill its place.
+          </p>
+          <div className="rounded-lg bg-slate-900/60 border border-slate-800 p-3 text-xs space-y-1">
+            <div>
+              <span className="text-slate-500">Error code: </span>
+              <code className="text-rose-300">{contractEval.code}</code>
+            </div>
+            <div>
+              <span className="text-slate-500">Detail: </span>
+              <span className="text-slate-400 break-words">{contractEval.message}</span>
+            </div>
+          </div>
+          <p className="text-xs text-slate-400">
+            This is usually caused by an edited ledger entry (a zero/negative income, a positive
+            expense, or an amount outside the supported range) or an out-of-range date.
+          </p>
+          <div className="flex gap-3 pt-1">
+            <button
+              onClick={() => handleResetDemo()}
+              className="px-4 py-2 rounded-lg bg-rose-600 hover:bg-rose-500 text-white text-xs font-semibold"
+            >
+              Reset to sample data
+            </button>
+            <a
+              href="/"
+              className="px-4 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold"
+            >
+              Retry
+            </a>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  const contractResult = contractEval.result;
   const forecast = contractResult.forecast;
   const risk = contractResult.risk;
 

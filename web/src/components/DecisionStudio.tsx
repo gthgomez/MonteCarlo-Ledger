@@ -11,15 +11,33 @@ interface DecisionStudioProps {
   baseOverdraftPpm: number;
   baseMinBalP10Cents: number;
   liabilities: any[];
-  onSimulatePurchase: (amountCents: number, date: string) => {
-    safeSpendCents: number;
-    overdraftPpm: number;
-    minBalP10Cents: number;
-  };
-  onSimulateDelay: (delayDays: number) => {
-    overdraftPpm: number;
-    minBalP10Cents: number;
-  };
+  onSimulatePurchase: (
+    amountCents: number,
+    date: string
+  ) =>
+    | { status: "ok"; safeSpendCents: number; overdraftPpm: number; minBalP10Cents: number }
+    | { status: "error"; code: string };
+  onSimulateDelay: (
+    delayDays: number
+  ) =>
+    | { status: "ok"; overdraftPpm: number; minBalP10Cents: number }
+    | { status: "error"; code: string };
+}
+
+function SimulationError({ code }: { code: string }) {
+  return (
+    <div className="rounded-xl border border-rose-800/60 bg-rose-950/30 p-4 space-y-2">
+      <div className="text-xs font-bold text-rose-300 uppercase tracking-wider">
+        Calculation Failed
+      </div>
+      <p className="text-xs text-slate-300">
+        The engine could not complete this simulation
+        (<code className="text-rose-300">{code}</code>), so no numbers are shown for it. Nothing
+        is presented rather than a wrong zero &mdash; adjust the input or fix the ledger and try
+        again.
+      </p>
+    </div>
+  );
 }
 
 export function DecisionStudio({
@@ -46,20 +64,27 @@ export function DecisionStudio({
 
   // Computed Purchase Outcome
   const purchaseResult = onSimulatePurchase(purchaseAmount * 100, purchaseDate);
-  const deltaOverdraft = (purchaseResult.overdraftPpm - baseOverdraftPpm) / 10000;
-  const deltaSafeSpend = purchaseResult.safeSpendCents - baseSafeSpendCents;
+  const purchaseOk = purchaseResult.status === "ok" ? purchaseResult : null;
+  const deltaOverdraft = purchaseOk
+    ? (purchaseOk.overdraftPpm - baseOverdraftPpm) / 10000
+    : 0;
+  const deltaSafeSpend = purchaseOk ? purchaseOk.safeSpendCents - baseSafeSpendCents : 0;
 
   // Computed Delay Outcome
   const delayResult = onSimulateDelay(delayDays);
-  const delayDeltaOverdraft = (delayResult.overdraftPpm - baseOverdraftPpm) / 10000;
+  const delayOk = delayResult.status === "ok" ? delayResult : null;
+  const delayDeltaOverdraft = delayOk
+    ? (delayOk.overdraftPpm - baseOverdraftPpm) / 10000
+    : 0;
 
-  // Computed Debt Amortization Outcome
+  // Computed Debt Amortization Outcome — failures are explicit, not an empty tab.
   let debtResult: any = null;
+  let debtError: string | null = null;
   if (liabilities && liabilities.length > 0) {
     try {
       debtResult = amortize(asOf, liabilities, debtStrategy, extraPayment * 100);
-    } catch {
-      debtResult = null;
+    } catch (err: any) {
+      debtError = err?.code ?? "UNKNOWN_ERROR";
     }
   }
 
@@ -153,43 +178,49 @@ export function DecisionStudio({
                 Impact On Your Fragility Floor
               </div>
 
-              <div className="flex items-center justify-between text-xs">
-                <span className="text-slate-400">Safe to Spend:</span>
-                <div className="flex items-center gap-2">
-                  <span className="text-slate-400 line-through">
-                    {formatMoney(baseSafeSpendCents)}
-                  </span>
-                  <ArrowRight className="w-3 h-3 text-slate-500" />
-                  <span className="font-bold text-indigo-300">
-                    {formatMoney(purchaseResult.safeSpendCents)}
-                  </span>
-                </div>
-              </div>
+              {!purchaseOk ? (
+                <SimulationError code={purchaseResult.status === "error" ? purchaseResult.code : "UNKNOWN_ERROR"} />
+              ) : (
+                <>
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="text-slate-400">Safe to Spend:</span>
+                    <div className="flex items-center gap-2">
+                      <span className="text-slate-400 line-through">
+                        {formatMoney(baseSafeSpendCents)}
+                      </span>
+                      <ArrowRight className="w-3 h-3 text-slate-500" />
+                      <span className="font-bold text-indigo-300">
+                        {formatMoney(purchaseOk.safeSpendCents)}
+                      </span>
+                    </div>
+                  </div>
 
-              <div className="flex items-center justify-between text-xs">
-                <span className="text-slate-400">Overdraft Risk:</span>
-                <div className="flex items-center gap-2">
-                  <span className="text-slate-400">
-                    {(baseOverdraftPpm / 10000).toFixed(1)}%
-                  </span>
-                  <ArrowRight className="w-3 h-3 text-slate-500" />
-                  <span
-                    className={`font-bold ${
-                      deltaOverdraft > 0 ? "text-rose-400" : "text-emerald-400"
-                    }`}
-                  >
-                    {(purchaseResult.overdraftPpm / 10000).toFixed(1)}% (
-                    {deltaOverdraft > 0 ? "+" : ""}
-                    {deltaOverdraft.toFixed(1)} pp)
-                  </span>
-                </div>
-              </div>
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="text-slate-400">Overdraft Risk:</span>
+                    <div className="flex items-center gap-2">
+                      <span className="text-slate-400">
+                        {(baseOverdraftPpm / 10000).toFixed(1)}%
+                      </span>
+                      <ArrowRight className="w-3 h-3 text-slate-500" />
+                      <span
+                        className={`font-bold ${
+                          deltaOverdraft > 0 ? "text-rose-400" : "text-emerald-400"
+                        }`}
+                      >
+                        {(purchaseOk.overdraftPpm / 10000).toFixed(1)}% (
+                        {deltaOverdraft > 0 ? "+" : ""}
+                        {deltaOverdraft.toFixed(1)} pp)
+                      </span>
+                    </div>
+                  </div>
 
-              <p className="text-[11px] text-slate-400 pt-1 border-t border-slate-700/60">
-                {purchaseResult.safeSpendCents >= 0
-                  ? "This purchase remains safely above your P10 floor without risking negative balance."
-                  : "Caution: This purchase drives your conservative trough negative before the next income event."}
-              </p>
+                  <p className="text-[11px] text-slate-400 pt-1 border-t border-slate-700/60">
+                    {purchaseOk.safeSpendCents >= 0
+                      ? `In this simulation the conservative (P10) trough stays above $0 after the purchase. That is a model estimate, not a guarantee.`
+                      : `Caution: in this simulation the conservative (P10) trough goes below $0 before the next income event.`}
+                  </p>
+                </>
+              )}
             </div>
           </div>
         </div>
@@ -224,37 +255,53 @@ export function DecisionStudio({
                 Fragility Under Payroll Variance
               </div>
 
-              <div className="flex items-center justify-between text-xs">
-                <span className="text-slate-400">Overdraft Risk:</span>
-                <div className="flex items-center gap-2">
-                  <span className="text-slate-400">
-                    {(baseOverdraftPpm / 10000).toFixed(1)}%
-                  </span>
-                  <ArrowRight className="w-3 h-3 text-slate-500" />
-                  <span
-                    className={`font-bold ${
-                      delayDeltaOverdraft > 0 ? "text-rose-400" : "text-emerald-400"
-                    }`}
-                  >
-                    {(delayResult.overdraftPpm / 10000).toFixed(1)}% (
-                    {delayDeltaOverdraft > 0 ? "+" : ""}
-                    {delayDeltaOverdraft.toFixed(1)} pp)
-                  </span>
-                </div>
-              </div>
+              {!delayOk ? (
+                <SimulationError code={delayResult.status === "error" ? delayResult.code : "UNKNOWN_ERROR"} />
+              ) : (
+                <>
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="text-slate-400">Overdraft Risk:</span>
+                    <div className="flex items-center gap-2">
+                      <span className="text-slate-400">
+                        {(baseOverdraftPpm / 10000).toFixed(1)}%
+                      </span>
+                      <ArrowRight className="w-3 h-3 text-slate-500" />
+                      <span
+                        className={`font-bold ${
+                          delayDeltaOverdraft > 0 ? "text-rose-400" : "text-emerald-400"
+                        }`}
+                      >
+                        {(delayOk.overdraftPpm / 10000).toFixed(1)}% (
+                        {delayDeltaOverdraft > 0 ? "+" : ""}
+                        {delayDeltaOverdraft.toFixed(1)} pp)
+                      </span>
+                    </div>
+                  </div>
 
-              <p className="text-[11px] text-slate-400 pt-1 border-t border-slate-700/60">
-                Tests whether scheduled auto-withdraw bills will bounce if your employer or bank
-                clears payroll late.
-              </p>
+                  <p className="text-[11px] text-slate-400 pt-1 border-t border-slate-700/60">
+                    Tests whether scheduled auto-withdraw bills will bounce if your employer or bank
+                    clears payroll late.
+                  </p>
+                </>
+              )}
             </div>
           </div>
         </div>
       )}
 
       {/* Tab 3: Debt Payoff Engine */}
-      {activeTab === "debt" && debtResult && (
+      {activeTab === "debt" && (
         <div className="space-y-4">
+          {!debtResult ? (
+            liabilities && liabilities.length > 0 ? (
+              <SimulationError code={debtError ?? "UNKNOWN_ERROR"} />
+            ) : (
+              <p className="text-xs text-slate-400 py-4 text-center">
+                No liabilities in this ledger yet &mdash; add one under Ledger to compare payoff
+                strategies.
+              </p>
+            )
+          ) : (
           <div className="grid grid-cols-1 md:grid-cols-3 gap-6 items-center">
             <div className="space-y-4">
               <div>
@@ -327,6 +374,16 @@ export function DecisionStudio({
               </div>
             </div>
           </div>
+          )}
+          <p className="text-[11px] text-slate-400 border-t border-slate-800 pt-3">
+            Deterministic payoff schedule only. These payments are <span className="text-slate-300">not</span>{" "}
+            automatically included in the cash-flow forecast or overdraft estimate &mdash; an extra
+            payment that shortens the schedule is not by itself affordable. Check the Simulate
+            Purchase tab (or your monthly budget) for the cash-flow impact of the higher payment.
+            {debtResult.did_not_converge
+              ? " Note: this schedule did not converge within the 360-month cap — the balance likely grows faster than payments."
+              : ""}
+          </p>
         </div>
       )}
     </div>
