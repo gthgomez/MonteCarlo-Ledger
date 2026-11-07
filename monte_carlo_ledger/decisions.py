@@ -13,18 +13,66 @@ from typing import Any, Dict, List, Optional
 
 from . import db_manager
 from . import scenario as scenario_mod
-from .contract import ContractError, run_scenario
-from .contract.engine import SUPPORTED_CONTRACT_VERSIONS
+from .contract import CONTRACT_VERSION, ContractError, run_scenario
+from .contract.engine import SIMULATION_DEFAULTS, SUPPORTED_CONTRACT_VERSIONS
+from .contract.money import MAX_MONEY_CENTS
 
 DEFAULT_HORIZON_DAYS = 90
 DEFAULT_SIM: Dict[str, int] = {"runs": 500, "seed": 42}
 
+# Central execution bounds shared by the MCP-ready surface and the local HTTP API.
+# Programmatic callers get the same protection as unauthenticated HTTP clients.
+MAX_HORIZON_DAYS = 3650
+MAX_RUNS = 100_000
+MAX_QUANTILE = 1_000
+MAX_RESERVE_CENTS = 10**12
+MAX_AMOUNT_CENTS = 10**12
+
 
 def _sim(overrides: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    merged: Dict[str, Any] = dict(DEFAULT_SIM)
+    merged: Dict[str, Any] = dict(SIMULATION_DEFAULTS)
+    merged.update(DEFAULT_SIM)
     if overrides:
         merged.update(overrides)
+    _validate_sim(merged)
     return merged
+
+
+def _require_int_field(value: Any, field: str, code: str, *, minimum: int, maximum: int) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or value < minimum or value > maximum:
+        raise ContractError(code, f"{field} must be an integer in [{minimum}, {maximum}], got {value!r}")
+    return value
+
+
+def _validate_sim(params: Dict[str, Any]) -> None:
+    """Validate simulation parameters before they reach the engine or a PRNG."""
+    _require_int_field(params.get("runs"), "runs", "INVALID_RUNS", minimum=1, maximum=MAX_RUNS)
+    _require_int_field(params.get("seed"), "seed", "INVALID_SEED", minimum=0, maximum=2**63 - 1)
+    num = _require_int_field(
+        params.get("quantile_num"), "quantile_num", "INVALID_QUANTILE", minimum=1, maximum=MAX_QUANTILE
+    )
+    den = _require_int_field(
+        params.get("quantile_den"), "quantile_den", "INVALID_QUANTILE", minimum=1, maximum=MAX_QUANTILE
+    )
+    if num > den:
+        raise ContractError("INVALID_QUANTILE", f"quantile_num {num} exceeds quantile_den {den}")
+    _require_int_field(
+        params.get("reserve_cents"),
+        "reserve_cents",
+        "INVALID_AMOUNT",
+        minimum=0,
+        maximum=MAX_RESERVE_CENTS,
+    )
+
+
+def _require_horizon(horizon_days: Any) -> int:
+    return _require_int_field(
+        horizon_days,
+        "horizon_days",
+        "INVALID_HORIZON",
+        minimum=0,
+        maximum=MAX_HORIZON_DAYS,
+    )
 
 
 def _require_date(value: Any, field: str) -> str:
@@ -50,58 +98,136 @@ def _require_non_negative_int(value: Any, field: str) -> int:
     return value
 
 
+def _view_for(as_of: str, horizon_days: int) -> Dict[str, Any]:
+    """One consistent read snapshot for both calculation and provenance."""
+    start = date.fromisoformat(as_of)
+    window_end = start + timedelta(days=horizon_days)
+    return db_manager.read_ledger_view(start.isoformat(), window_end.isoformat())
+
+
 def _build(
     as_of: str,
     horizon_days: int,
     sim: Optional[Dict[str, Any]] = None,
+    ledger: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Build a canonical scenario for a decision operation.
 
     Deliberately ``read_only=True``: every operation on this surface is read-only or
     purely hypothetical, so it must not generate or mutate bill occurrences in the
-    database as a side effect of being asked a question.
+    database as a side effect of being asked a question. ``ledger`` is a consistent
+    read view shared by the baseline and comparison runs of one operation.
     """
+    if ledger is None:
+        ledger = _view_for(as_of, horizon_days)
     if sim is None:
-        return scenario_mod.build_scenario(as_of, horizon_days, read_only=True)
+        return scenario_mod.build_scenario(as_of, horizon_days, read_only=True, ledger=ledger)
     return scenario_mod.build_scenario(
-        as_of, horizon_days, include_simulation=sim, read_only=True
+        as_of, horizon_days, include_simulation=sim, read_only=True, ledger=ledger
     )
 
 
-def _ledger_status() -> Dict[str, Any]:
+def _ledger_status(
+    view: Optional[Dict[str, Any]] = None,
+    *,
+    as_of: Optional[str] = None,
+    horizon_days: Optional[int] = None,
+    sim: Optional[Dict[str, Any]] = None,
+    hypothetical: bool = True,
+) -> Dict[str, Any]:
     """Provenance for every decision result: source, consistency and reconciliation.
 
     The forecast itself always uses the authoritative transaction sum; this block
     tells a caller whether the stored cache and the optional bank balance agree, so
     an unexplained difference is visible rather than presented as spendable cash.
+    When ``view`` is supplied, every value here comes from the same read snapshot as
+    the calculation.
     """
-    is_sync, ledger, stored = db_manager.validate_balance_consistency()
-    with db_manager.get_db_connection() as conn:
-        row = conn.execute(
-            "SELECT value FROM settings WHERE key = 'bank_balance_cents'"
-        ).fetchone()
-    bank = int(row["value"]) if row and row["value"] is not None else None
-    return {
+    if view is None:
+        is_sync, ledger, stored = db_manager.validate_balance_consistency()
+        stats = db_manager.get_ledger_stats()
+        with db_manager.get_db_connection() as conn:
+            row = conn.execute(
+                "SELECT value FROM settings WHERE key = 'bank_balance_cents'"
+            ).fetchone()
+        bank = int(row["value"]) if row and row["value"] is not None else None
+        counts = {
+            "transaction_count": stats["transaction_count"],
+            "income_source_count": stats["income_source_count"],
+            "payment_count": stats["payment_count"],
+            "newest_transaction_date": stats["newest_date"],
+        }
+    else:
+        ledger = view["ledger_balance_cents"]
+        stored = view["stored_balance_cents"]
+        bank = view["bank_balance_cents"]
+        is_sync = ledger == stored
+        counts = {
+            "transaction_count": view["counts"]["transaction_count"],
+            "income_source_count": view["counts"]["income_source_count"],
+            "payment_count": view["counts"]["payment_count"],
+            "newest_transaction_date": view["counts"]["newest_date"],
+        }
+
+    status: Dict[str, Any] = {
         "source": "local sqlite ledger",
+        "contract_version": CONTRACT_VERSION,
         "read_only": True,
+        "hypothetical": hypothetical,
         "balance_consistent": bool(is_sync),
         "ledger_balance_cents": ledger,
         "stored_balance_cents": stored,
+        # The cache is what older clients display; it is exposed separately so a
+        # discrepancy is never mistaken for spendable cash.
+        "cached_balance_cents": stored,
         "bank_balance_cents": bank,
         "reconciled_with_bank": bool(bank is not None and bank == ledger),
+        "snapshot": counts,
+        "model": {
+            "basis": "canonical Contract 2.0 deterministic projection + SplitMix64 Monte Carlo",
+            "assumptions": (
+                "Synthetic scenario derived from persisted ledger data; no historical "
+                "calibration is applied and probabilities are model estimates, not forecasts."
+            ),
+        },
     }
+    if as_of is not None:
+        status["as_of"] = as_of
+    if horizon_days is not None:
+        status["horizon_days"] = horizon_days
+    if sim is not None:
+        status["simulation"] = {"runs": sim.get("runs"), "seed": sim.get("seed")}
+    return status
 
 
-def _attach_ledger(result: Dict[str, Any]) -> Dict[str, Any]:
+def _attach_ledger(
+    result: Dict[str, Any],
+    *,
+    as_of: Optional[str] = None,
+    horizon_days: Optional[int] = None,
+    sim: Optional[Dict[str, Any]] = None,
+    view: Optional[Dict[str, Any]] = None,
+    hypothetical: bool = True,
+) -> Dict[str, Any]:
     result = dict(result)
-    result["ledger"] = _ledger_status()
+    result["ledger"] = _ledger_status(
+        view, as_of=as_of, horizon_days=horizon_days, sim=sim, hypothetical=hypothetical
+    )
     return result
 
 
 def forecast(as_of: str, horizon_days: int = DEFAULT_HORIZON_DAYS) -> Dict[str, Any]:
     """Deterministic forecast only (no simulation)."""
     _require_date(as_of, "as_of")
-    return _attach_ledger(run_scenario(_build(as_of, horizon_days)))
+    _require_horizon(horizon_days)
+    view = _view_for(as_of, horizon_days)
+    return _attach_ledger(
+        run_scenario(_build(as_of, horizon_days, ledger=view)),
+        as_of=as_of,
+        horizon_days=horizon_days,
+        view=view,
+        hypothetical=False,
+    )
 
 
 def risk(
@@ -111,7 +237,17 @@ def risk(
 ) -> Dict[str, Any]:
     """Forecast + Monte Carlo risk block."""
     _require_date(as_of, "as_of")
-    return _attach_ledger(run_scenario(_build(as_of, horizon_days, _sim(sim))))
+    _require_horizon(horizon_days)
+    params = _sim(sim)
+    view = _view_for(as_of, horizon_days)
+    return _attach_ledger(
+        run_scenario(_build(as_of, horizon_days, params, ledger=view)),
+        as_of=as_of,
+        horizon_days=horizon_days,
+        sim=params,
+        view=view,
+        hypothetical=False,
+    )
 
 
 def _shift_first_income(scenario: Dict[str, Any], days: int) -> None:
@@ -138,15 +274,19 @@ def simulate_purchase(
     the purchase itself (the purchase event consumes no RNG draws).
     """
     _require_positive_int(amount_cents, "amount_cents")
+    if amount_cents > MAX_AMOUNT_CENTS:
+        raise ContractError("INVALID_AMOUNT", f"amount_cents exceeds {MAX_AMOUNT_CENTS}")
     _require_date(purchase_date, "purchase_date")
     _require_date(as_of, "as_of")
+    _require_horizon(horizon_days)
     overrides = dict(sim or {})
     overrides.setdefault("expense_variation_min", 0)
     overrides.setdefault("expense_variation_max", 0)
     params = _sim(overrides)
+    view = _view_for(as_of, horizon_days)
 
-    baseline = run_scenario(_build(as_of, horizon_days, dict(params)))
-    with_purchase_scenario = _build(as_of, horizon_days, dict(params))
+    baseline = run_scenario(_build(as_of, horizon_days, dict(params), ledger=view))
+    with_purchase_scenario = _build(as_of, horizon_days, dict(params), ledger=view)
     with_purchase_scenario["events"].append({
         "date": purchase_date,
         "amount_cents": -amount_cents,
@@ -154,25 +294,31 @@ def simulate_purchase(
         "name": "Planned purchase",
     })
     with_purchase = run_scenario(with_purchase_scenario)
-    return {
-        "baseline": baseline,
-        "with_purchase": with_purchase,
-        "change": {
-            "negative_balance_probability_ppm": (
-                with_purchase["risk"]["negative_balance_probability_ppm"]
-                - baseline["risk"]["negative_balance_probability_ppm"]
-            ),
-            "minimum_balance_p10_cents": (
-                with_purchase["risk"]["minimum_balance_p10_cents"]
-                - baseline["risk"]["minimum_balance_p10_cents"]
-            ),
-            "safe_to_spend_cents": (
-                with_purchase["risk"]["safe_to_spend_cents"]
-                - baseline["risk"]["safe_to_spend_cents"]
-            ),
+    return _attach_ledger(
+        {
+            "baseline": baseline,
+            "with_purchase": with_purchase,
+            "change": {
+                "negative_balance_probability_ppm": (
+                    with_purchase["risk"]["negative_balance_probability_ppm"]
+                    - baseline["risk"]["negative_balance_probability_ppm"]
+                ),
+                "minimum_balance_p10_cents": (
+                    with_purchase["risk"]["minimum_balance_p10_cents"]
+                    - baseline["risk"]["minimum_balance_p10_cents"]
+                ),
+                "safe_to_spend_cents": (
+                    with_purchase["risk"]["safe_to_spend_cents"]
+                    - baseline["risk"]["safe_to_spend_cents"]
+                ),
+            },
         },
-        "ledger": _ledger_status(),
-    }
+        as_of=as_of,
+        horizon_days=horizon_days,
+        sim=params,
+        view=view,
+        hypothetical=True,
+    )
 
 
 def simulate_paycheck_delay(
@@ -183,63 +329,163 @@ def simulate_paycheck_delay(
 ) -> Dict[str, Any]:
     """Compare baseline vs the next in-window paycheck arriving ``delay_days`` late."""
     _require_date(as_of, "as_of")
+    _require_horizon(horizon_days)
     if not isinstance(delay_days, int) or isinstance(delay_days, bool) or delay_days < 0:
         raise ContractError("INVALID_HORIZON", f"delay_days must be a non-negative integer, got {delay_days!r}")
     params = _sim(sim)
-    baseline = run_scenario(_build(as_of, horizon_days, dict(params)))
-    delayed_scenario = _build(as_of, horizon_days, dict(params))
+    view = _view_for(as_of, horizon_days)
+    baseline = run_scenario(_build(as_of, horizon_days, dict(params), ledger=view))
+    delayed_scenario = _build(as_of, horizon_days, dict(params), ledger=view)
     _shift_first_income(delayed_scenario, delay_days)
     delayed = run_scenario(delayed_scenario)
-    return {
-        "baseline": baseline,
-        "delayed": delayed,
-        "change": {
-            "minimum_balance_p10_cents": (
-                delayed["risk"]["minimum_balance_p10_cents"]
-                - baseline["risk"]["minimum_balance_p10_cents"]
-            ),
-            "negative_balance_probability_ppm": (
-                delayed["risk"]["negative_balance_probability_ppm"]
-                - baseline["risk"]["negative_balance_probability_ppm"]
-            ),
+    return _attach_ledger(
+        {
+            "baseline": baseline,
+            "delayed": delayed,
+            "change": {
+                "minimum_balance_p10_cents": (
+                    delayed["risk"]["minimum_balance_p10_cents"]
+                    - baseline["risk"]["minimum_balance_p10_cents"]
+                ),
+                "negative_balance_probability_ppm": (
+                    delayed["risk"]["negative_balance_probability_ppm"]
+                    - baseline["risk"]["negative_balance_probability_ppm"]
+                ),
+            },
         },
-        "ledger": _ledger_status(),
-    }
+        as_of=as_of,
+        horizon_days=horizon_days,
+        sim=params,
+        view=view,
+        hypothetical=True,
+    )
+
+
+_COMPARE_EVENT_FIELDS = frozenset(
+    {"date", "amount_cents", "type", "name", "sequence", "category"}
+)
+
+
+def _validate_compare_events(
+    events: Any, field: str, as_of: str, horizon_days: int
+) -> List[Dict[str, Any]]:
+    """Validate a caller-supplied canonical event list.
+
+    A dictionary container used to be passed to ``list.extend``, which iterated its
+    keys and silently produced garbage. Inputs must be a list of canonical event
+    objects, fully validated before the engine sees them.
+    """
+    if not isinstance(events, list):
+        raise ContractError(
+            "SCHEMA_INVALID",
+            f"{field} must be a list of canonical event objects, got {type(events).__name__}",
+        )
+    start = date.fromisoformat(as_of)
+    window_end = start + timedelta(days=horizon_days)
+    seen = set()
+    validated: List[Dict[str, Any]] = []
+    for index, event in enumerate(events):
+        path = f"{field}[{index}]"
+        if not isinstance(event, dict):
+            raise ContractError("SCHEMA_INVALID", f"{path} must be an object")
+        unknown = set(event) - _COMPARE_EVENT_FIELDS
+        if unknown:
+            raise ContractError(
+                "SCHEMA_INVALID", f"{path} has unsupported fields: {sorted(unknown)}"
+            )
+        event_date = _require_date(event.get("date"), f"{path}.date")
+        event_day = date.fromisoformat(event_date)
+        if event_day < start or event_day >= window_end:
+            raise ContractError(
+                "EVENT_OUT_OF_HORIZON",
+                f"{path}.date {event_date!r} is outside [{as_of}, {window_end.isoformat()})",
+            )
+        amount = event.get("amount_cents")
+        if not isinstance(amount, int) or isinstance(amount, bool):
+            raise ContractError("INVALID_AMOUNT", f"{path}.amount_cents must be an integer")
+        if abs(amount) > MAX_MONEY_CENTS:
+            raise ContractError("MONEY_OVERFLOW", f"{path}.amount_cents")
+        etype = event.get("type")
+        if etype == "income" and amount <= 0:
+            raise ContractError("INVALID_AMOUNT", f"{path}: income must be positive")
+        if etype == "expense" and amount >= 0:
+            raise ContractError("INVALID_AMOUNT", f"{path}: expense must be negative")
+        if etype == "adjustment" and amount == 0:
+            raise ContractError("INVALID_AMOUNT", f"{path}: zero adjustment")
+        if etype not in ("income", "expense", "adjustment"):
+            raise ContractError("INVALID_EVENT_TYPE", f"{path}.type {etype!r}")
+        name = event.get("name")
+        if name is not None and not isinstance(name, str):
+            raise ContractError("SCHEMA_INVALID", f"{path}.name must be a string")
+        sequence = event.get("sequence")
+        if sequence is not None and (
+            not isinstance(sequence, int) or isinstance(sequence, bool)
+        ):
+            raise ContractError("SCHEMA_INVALID", f"{path}.sequence must be an integer")
+        category = event.get("category")
+        if category is not None and not isinstance(category, str):
+            raise ContractError("SCHEMA_INVALID", f"{path}.category must be a string")
+
+        signature = (event_date, amount, etype, name)
+        if signature in seen:
+            # An identical duplicate is ambiguous (two bills or an accidental copy?)
+            # and would silently double-count.
+            raise ContractError(
+                "SCHEMA_INVALID", f"{path} duplicates an earlier event exactly"
+            )
+        seen.add(signature)
+        validated.append(dict(event))
+    return validated
 
 
 def compare_scenarios(
-    first: Dict[str, Any],
-    second: Dict[str, Any],
+    first: List[Dict[str, Any]],
+    second: List[Dict[str, Any]],
     as_of: str,
     horizon_days: int = DEFAULT_HORIZON_DAYS,
     sim: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """Run two caller-supplied event lists over the same base state and compare."""
+    """Run two caller-supplied canonical event lists over the same base state.
+
+    ``first``/``second`` are typed lists of canonical event objects. Malformed input
+    raises a ``ContractError``; it is never coerced or partially applied.
+    """
     _require_date(as_of, "as_of")
+    _require_horizon(horizon_days)
     params = _sim(sim)
+    first_events = _validate_compare_events(first, "first", as_of, horizon_days)
+    second_events = _validate_compare_events(second, "second", as_of, horizon_days)
+    view = _view_for(as_of, horizon_days)
     results: List[Dict[str, Any]] = []
-    for extra_events in (first, second):
-        scenario = _build(as_of, horizon_days, dict(params))
+    for extra_events in (first_events, second_events):
+        scenario = _build(as_of, horizon_days, dict(params), ledger=view)
         scenario["events"].extend(extra_events)
         results.append(run_scenario(scenario))
     a, b = results
-    return {
-        "first": a,
-        "second": b,
-        "change": {
-            "negative_balance_probability_ppm": (
-                b["risk"]["negative_balance_probability_ppm"]
-                - a["risk"]["negative_balance_probability_ppm"]
-            ),
-            "minimum_balance_p10_cents": (
-                b["risk"]["minimum_balance_p10_cents"]
-                - a["risk"]["minimum_balance_p10_cents"]
-            ),
-            "safe_to_spend_cents": (
-                b["risk"]["safe_to_spend_cents"] - a["risk"]["safe_to_spend_cents"]
-            ),
+    return _attach_ledger(
+        {
+            "first": a,
+            "second": b,
+            "change": {
+                "negative_balance_probability_ppm": (
+                    b["risk"]["negative_balance_probability_ppm"]
+                    - a["risk"]["negative_balance_probability_ppm"]
+                ),
+                "minimum_balance_p10_cents": (
+                    b["risk"]["minimum_balance_p10_cents"]
+                    - a["risk"]["minimum_balance_p10_cents"]
+                ),
+                "safe_to_spend_cents": (
+                    b["risk"]["safe_to_spend_cents"] - a["risk"]["safe_to_spend_cents"]
+                ),
+            },
         },
-    }
+        as_of=as_of,
+        horizon_days=horizon_days,
+        sim=params,
+        view=view,
+        hypothetical=True,
+    )
 
 
 def overdraft_risk(
@@ -262,6 +508,9 @@ def overdraft_risk(
         "safe_to_spend_cents": risk_block["safe_to_spend_cents"],
         "forecast": forecast,
         "risk": risk_block,
+        # Reuse the provenance produced by the same operation instead of re-reading
+        # the ledger, which could describe a different revision.
+        "ledger": result["ledger"],
     }
 
 
@@ -292,6 +541,7 @@ def financial_snapshot() -> Dict[str, Any]:
     return {
         "ledger_balance_cents": ledger_balance,
         "stored_balance_cents": stored_balance,
+        "cached_balance_cents": stored_balance,
         "bank_balance_cents": bank_balance,
         "reconciled_with_bank": bool(bank_balance is not None and bank_balance == ledger_balance),
         "balance_consistent": bool(is_sync),
@@ -303,6 +553,10 @@ def financial_snapshot() -> Dict[str, Any]:
         "newest_transaction_date": stats["newest_date"],
         # A future adapter must present this basis, not just the numbers.
         "data_source": "local sqlite ledger (monte_carlo_ledger/db_manager)",
+        "source": "local sqlite ledger",
+        "contract_version": CONTRACT_VERSION,
+        "read_only": True,
+        "hypothetical": False,
     }
 
 
@@ -323,23 +577,30 @@ def compare_debt_strategies(
     # Negative extra payments are invalid input, not "zero extra": silently clamping would
     # change the caller's meaning and could understate the payoff cost.
     _require_non_negative_int(extra_monthly_payment_cents, "extra_monthly_payment_cents")
+    view = _view_for(as_of, DEFAULT_HORIZON_DAYS)
     results: Dict[str, Any] = {}
     for strategy in ("snowball", "avalanche"):
-        scenario = _build(as_of, DEFAULT_HORIZON_DAYS)
+        scenario = _build(as_of, DEFAULT_HORIZON_DAYS, ledger=view)
         scenario["liabilities"] = copy.deepcopy(liabilities)
         scenario["debt_strategy"] = strategy
         scenario["extra_monthly_payment_cents"] = extra_monthly_payment_cents
         results[strategy] = run_scenario(scenario)["debt"]
-    return {
-        "as_of": as_of,
-        "strategies": results,
-        # Honest interplay note: amortization and cash flow are separate models.
-        "cash_flow_note": (
-            "Deterministic payoff schedules only; these payments are not included in the "
-            "cash-flow forecast or overdraft estimate. Affordability of any extra payment "
-            "must be validated separately via simulate_purchase/forecast."
-        ),
-    }
+    return _attach_ledger(
+        {
+            "as_of": as_of,
+            "strategies": results,
+            # Honest interplay note: amortization and cash flow are separate models.
+            "cash_flow_note": (
+                "Deterministic payoff schedules only; these payments are not included in the "
+                "cash-flow forecast or overdraft estimate. Affordability of any extra payment "
+                "must be validated separately via simulate_purchase/forecast."
+            ),
+        },
+        as_of=as_of,
+        horizon_days=DEFAULT_HORIZON_DAYS,
+        view=view,
+        hypothetical=True,
+    )
 
 
 def validate_scenario(scenario: Dict[str, Any]) -> Dict[str, Any]:
@@ -450,6 +711,22 @@ def engine_capabilities() -> Dict[str, Any]:
                   "overflow_is_error": True},
         "time": {"as_of_required": True, "horizon_half_open": True},
         "simulation": dict(DEFAULT_SIM),
+        "limits": {
+            "max_horizon_days": MAX_HORIZON_DAYS,
+            "max_runs": MAX_RUNS,
+            "max_quantile": MAX_QUANTILE,
+            "max_reserve_cents": MAX_RESERVE_CENTS,
+            "max_amount_cents": MAX_AMOUNT_CENTS,
+        },
+        "provenance": {
+            "field": "ledger",
+            "operations": [
+                "forecast", "risk", "overdraft_risk", "safe_to_spend",
+                "simulate_purchase", "simulate_paycheck_delay", "compare_scenarios",
+                "compare_debt_strategies", "financial_snapshot",
+            ],
+            "read_only": True,
+        },
         "validation": {
             "operation": "validate_scenario",
             "fail_closed": True,
@@ -461,6 +738,7 @@ def engine_capabilities() -> Dict[str, Any]:
                 "SCHEMA_INVALID", "VALIDATION_UNAVAILABLE", "INTERNAL_ERROR",
                 "MONEY_OVERFLOW", "INVALID_DATE", "INVALID_AMOUNT", "INVALID_HORIZON",
                 "INVALID_EVENT_TYPE", "INVALID_FREQUENCY", "INVALID_RUNS", "MISSING_AS_OF",
+                "INVALID_SEED", "INVALID_QUANTILE", "EVENT_OUT_OF_HORIZON",
             ],
         },
         "writes": {"allowed": False},

@@ -41,11 +41,23 @@ engine output (validated by `schemas/result.schema.json`):
   `ending_balance_p10/p50/p90_cents`, `projected_low_point_cents`, `safe_to_spend_cents`.
 - `debt` (when liabilities are declared): `strategy`, `months_to_payoff`, `payoff_date`,
   `total_interest_cents`, `total_paid_cents`, `did_not_converge`, `schedule[]`.
-- `ledger` (every decision op): `source`, `read_only`, `ledger_balance_cents`,
-  `stored_balance_cents`, `balance_consistent`, `bank_balance_cents` (nullable),
-  `reconciled_with_bank`. This is provenance, not a financial input: the forecast always uses
-  the authoritative transaction sum, and an unexplained cache/bank difference is surfaced so an
-  adapter does not present it as trustworthy spending capacity.
+- `ledger` (every decision op: `forecast`, `risk`, `overdraft_risk`,
+  `simulate_purchase`, `simulate_paycheck_delay`, `compare_scenarios`,
+  `compare_debt_strategies`): `source`, `contract_version`, `as_of`, `horizon_days`,
+  `read_only`, `hypothetical`, `balance_consistent`, `ledger_balance_cents`,
+  `stored_balance_cents`, `cached_balance_cents`, `bank_balance_cents` (nullable),
+  `reconciled_with_bank`, `snapshot` (`transaction_count`, `income_source_count`,
+  `payment_count`, `newest_transaction_date`), `model` (`basis`, `assumptions`) and,
+  where applicable, `simulation` (`runs`, `seed`). This is provenance, not a financial
+  input: the forecast always uses the authoritative transaction sum, and an
+  unexplained cache/bank difference is surfaced so an adapter does not present it as
+  trustworthy spending capacity. `financial_snapshot()` carries `source`,
+  `contract_version`, `read_only` and `hypothetical` directly.
+
+Every operation derives the calculation **and** this provenance from one
+`db_manager.read_ledger_view()` SQLite read transaction. A ledger edit made while a
+decision is running therefore cannot make the numbers and the provenance describe
+different revisions.
 
 Money is **integer cents** (MCD-0007 rounding, MCD-0020 overflow-is-error), probabilities are **ppm**
 (MCD-0004), quantiles use nearest-rank (MCD-0005), and time is **explicit `as_of` date-only**
@@ -56,9 +68,23 @@ yield bit-for-bit identical output; the adapter contract tests assert this.
 
 An operation either returns a canonical result or raises `monte_carlo_ledger.contract.ContractError`
 with a stable machine-readable `code` (`SCHEMA_INVALID`, `MISSING_AS_OF`, `INVALID_DATE`,
-`INVALID_AMOUNT`, `INVALID_HORIZON`, `INVALID_RUNS`, `MONEY_OVERFLOW`, ...). There is **no** code
+`INVALID_AMOUNT`, `INVALID_HORIZON`, `INVALID_RUNS`, `INVALID_SEED`, `INVALID_QUANTILE`,
+`INVALID_EVENT_TYPE`, `EVENT_OUT_OF_HORIZON`, `MONEY_OVERFLOW`, ...). There is **no** code
 path that converts a failure into a zero, a "0% risk", or a default. An adapter MUST map exceptions
 to tool errors (`isError: true`) carrying `err.code` — never swallow them into a numeric result.
+
+`engine_capabilities().limits` declares the central execution bounds that both the
+programmatic surface and the loopback HTTP API enforce: `max_horizon_days`,
+`max_runs`, `max_quantile`, `max_reserve_cents`, `max_amount_cents`.
+
+`compare_scenarios(first, second, ...)` accepts **lists of canonical event objects**,
+not dictionaries and not pre-built scenario documents. Each event may contain
+`date`, `amount_cents`, `type` (`income`/`expense`/`adjustment`), optional `name`,
+`sequence` and `category`. Dates must fall inside the half-open window
+`[as_of, as_of + horizon_days)`, signs must match the type, amounts must be exact
+integer cents within the contract range, and an exact duplicate event is rejected as
+ambiguous. A dictionary container is rejected with `SCHEMA_INVALID` — it is never
+iterated into the event list.
 
 `validate_scenario()` is the one operation that returns a verdict instead of raising, so its shape
 is contractual:
@@ -102,9 +128,12 @@ data freshness; simulation defaults (runs/seed/variance ranges) are declared in
 3. **Least data.** Results contain balances/risks, not transaction narratives. The adapter MUST NOT
    log full results by default, MUST redact financial fields from any LLM-visible trace the user
    has not explicitly requested, and MUST NOT send ledger content to remote services.
-4. **Provenance.** An adapter SHOULD attach `contract_version`, the engine package version, and the
-   `as_of` to every answer. "Safe to spend" answers must carry the quantile/reserve basis
-   (MCD-0008) and the model-based/unverified caveat for stochastic estimates.
+4. **Provenance.** Every decision result already carries the `ledger` block described in §2
+   (`contract_version`, explicit `as_of`, authority/cache balances, reconciliation, snapshot
+   counts, simulation seed/runs and the model basis). An adapter MUST forward it rather than
+   summarising results down to a bare number. "Safe to spend" answers must carry the
+   quantile/reserve basis (MCD-0008) and the model-based/unverified caveat for stochastic
+   estimates.
 5. **No secrets.** The adapter never needs the vault passphrase; do not wire sync credentials into
    any LLM-reachable tool.
 
@@ -151,6 +180,20 @@ def handle(name, args):
 - deterministic debt strategy comparison with the cash-flow caveat,
 - rejection of empty liability sets and of negative extra payments (never clamped).
 
+`tests/test_decision_contract.py` additionally pins the campaign-3 additions:
+
+- complete `ledger` provenance on **every** operation (including `overdraft_risk`,
+  `compare_scenarios` and `compare_debt_strategies`),
+- exactly one `read_ledger_view` per operation, and a concurrent write after the view
+  cannot change either the numbers or the provenance,
+- typed `compare_scenarios` input (dictionary container, dates, window, signs, overflow,
+  unknown fields, exact duplicates),
+- central bounds for runs/seed/quantile/reserve/horizon/amount.
+
+`tests/test_api_limits.py` proves the loopback HTTP boundary enforces the same bounds
+(including the previously unbounded `/v1/safe-to-spend` runs) and that accepted
+requests do not mutate the ledger.
+
 ## 7. Deliberately NOT done here
 
 - No MCP server, transport, or session handling.
@@ -189,7 +232,10 @@ unchanged after every operation, including failures.
 - Snapshot format **2.1** adds `incomes[].expected_amount`; 2.0 snapshots still restore
   (override `null`).
 - Every field is validated before any row is written; non-integer identifiers are
-  remapped deterministically; duplicate ids roll back.
+  remapped deterministically; duplicate ids and dangling references are rejected
+  during validation, before the transaction starts. A missing collection or balance is
+  an incomplete snapshot, never an empty ledger. Unknown row fields are refused rather
+  than silently discarded (`tests/test_snapshot_restore_strict.py`).
 - Restore is a single SQLite transaction; a rejected or interrupted restore leaves the
   previous ledger intact. The recovery copy uses SQLite's online backup API.
 - **Python cannot persist liabilities.** A snapshot containing them is rejected with a
