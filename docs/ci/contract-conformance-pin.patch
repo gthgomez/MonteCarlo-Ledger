@@ -1,0 +1,19 @@
+Subject: [PATCH] ci(conformance): advance ANDROID_PIN_SHA to the merged Android main
+
+The live cross-engine job compares a fresh Kotlin run at a pinned Android commit. That
+commit must be a merged `main` revision whose vendored contract snapshot matches the
+released Contract 2.0 pin (`contract-pin.json` source_commit `01f5090`).
+
+Apply with a credential that has the `workflow` scope:
+
+    git apply docs/ci/contract-conformance-pin.patch
+
+diff --git a/.github/workflows/contract-conformance.yml b/.github/workflows/contract-conformance.yml
+--- a/.github/workflows/contract-conformance.yml
++++ b/.github/workflows/contract-conformance.yml
+@@
+-  ANDROID_PIN_SHA: 6cadf72c50ca6466f342a7263bacacf9145b28d3
++  ANDROID_PIN_SHA: 898e74ccab45e57017b4eb9807668d227bce0e34
+@@
+-  # ANDROID_PIN_SHA = the `main` tip of gthgomez/MonteCarloLedger-Android when this job was written
++  # ANDROID_PIN_SHA = the merged `main` tip that vendored released Contract 2.0

@@ -20,7 +20,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from monte_carlo_ledger import api as api_module
-from monte_carlo_ledger import commands, sync
+from monte_carlo_ledger import commands, db_manager, sync
 
 
 @pytest.fixture()
@@ -312,3 +312,71 @@ def test_api_still_serves_loopback_requests(tmp_path, monkeypatch):
     assert resp.status_code == 200, resp.text
     payload = resp.json()
     assert "safe_spend_cents" in payload
+
+
+# ---------------------------------------------------------------------------
+# Restore integrity: a rejected or interrupted restore must never destroy or
+# partially replace the pre-existing ledger.
+
+
+@pytest.fixture()
+def ledger_db(tmp_path, monkeypatch):
+    db_path = tmp_path / "ledger.db"
+    monkeypatch.setattr(db_manager, "DB_PATH", str(db_path))
+    db_manager.init_db()
+    db_manager.add_transaction(
+        500_000, "System", "Opening", t_type="Adjustment", date_str="2026-10-01"
+    )
+    return db_path
+
+
+def _without_timestamp(snapshot):
+    doc = json.loads(json.dumps(snapshot))
+    doc.pop("updated_at", None)
+    return doc
+
+
+def test_restore_rejects_unsupported_snapshot_version(ledger_db):
+    before = sync.export_ledger_snapshot()
+    bad = _without_timestamp(before)
+    bad["version"] = "9.9"
+    with pytest.raises(ValueError, match="Unsupported snapshot version"):
+        sync.restore_ledger_snapshot(bad)
+    assert _without_timestamp(sync.export_ledger_snapshot()) == _without_timestamp(before)
+
+
+def test_restore_rejects_inconsistent_snapshot_and_preserves_ledger(ledger_db):
+    before = sync.export_ledger_snapshot()
+    bad = _without_timestamp(before)
+    bad["transactions"] = [
+        {"id": 1, "amount_cents": -100, "type": "Expense", "date": "2026-10-01", "description": "x"}
+    ]
+    bad["current_balance_cents"] = 999
+    with pytest.raises(ValueError, match="internally inconsistent"):
+        sync.restore_ledger_snapshot(bad)
+    assert _without_timestamp(sync.export_ledger_snapshot()) == _without_timestamp(before)
+
+
+def test_restore_rolls_back_on_midway_failure(ledger_db):
+    before = sync.export_ledger_snapshot()
+    bad = _without_timestamp(before)
+    duplicate = before["transactions"][0]
+    bad["transactions"] = [duplicate, dict(duplicate)]
+    bad["current_balance_cents"] = sum(t["amount_cents"] for t in bad["transactions"])
+    with pytest.raises(Exception):
+        sync.restore_ledger_snapshot(bad)
+    assert _without_timestamp(sync.export_ledger_snapshot()) == _without_timestamp(before)
+
+
+def test_restore_round_trip_is_exact_and_idempotent(ledger_db):
+    db_manager.add_income_source("Paycheck", 220_000, "Bi-weekly", "2026-10-30")
+    db_manager.add_payment("Rent", 135_000, "Monthly", 1)
+    snapshot = sync.export_ledger_snapshot()
+
+    sync.restore_ledger_snapshot(snapshot)
+    first = _without_timestamp(sync.export_ledger_snapshot())
+    sync.restore_ledger_snapshot(snapshot)
+    second = _without_timestamp(sync.export_ledger_snapshot())
+
+    assert first == second
+    assert first == _without_timestamp(snapshot)

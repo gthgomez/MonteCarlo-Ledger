@@ -168,15 +168,47 @@ def export_ledger_snapshot() -> Dict[str, Any]:
     }
 
 
+SUPPORTED_SNAPSHOT_VERSIONS = ("2.0",)
+
+
 def restore_ledger_snapshot(snapshot: Dict[str, Any]) -> None:
-    """Atomically restore a ledger snapshot into local ledger.db with backup."""
+    """Atomically restore a ledger snapshot into the local database.
+
+    The whole replacement runs in one SQLite transaction and the snapshot's internal
+    consistency (declared balance == sum of its transactions) is checked *before*
+    commit. A rejected or interrupted restore therefore leaves the pre-existing ledger
+    exactly as it was — there is no window in which a partially restored ledger is
+    committed and then "repaired" from a file copy.
+    """
+    if not isinstance(snapshot, dict):
+        raise ValueError("Snapshot must be an object")
+    version = snapshot.get("version")
+    if version not in SUPPORTED_SNAPSHOT_VERSIONS:
+        raise ValueError(
+            f"Unsupported snapshot version: {version!r}; supported: {SUPPORTED_SNAPSHOT_VERSIONS}"
+        )
+
+    declared_balance = snapshot.get("current_balance_cents", 0)
+    if not isinstance(declared_balance, int) or isinstance(declared_balance, bool):
+        raise ValueError(f"Snapshot current_balance_cents must be an integer, got {declared_balance!r}")
+    declared_sum = sum(
+        int(tx.get("amount_cents", 0)) for tx in snapshot.get("transactions", [])
+    )
+    if declared_sum != declared_balance:
+        raise ValueError(
+            f"Snapshot is internally inconsistent: transactions sum to {declared_sum}, "
+            f"declared balance is {declared_balance}"
+        )
+
+    # A file backup is kept as a last-resort recovery aid for tooling. The transaction
+    # below is what guarantees atomicity.
     db_path = db_manager.DB_PATH
     backup_path = f"{db_path}.bak"
     if os.path.exists(db_path):
         shutil.copy2(db_path, backup_path)
 
-    try:
-        with db_manager.get_db_connection() as conn:
+    with db_manager.get_db_connection() as conn:
+        with conn:  # one transaction: commit on success, roll back on any error
             conn.execute("DELETE FROM bill_occurrences")
             conn.execute("DELETE FROM transactions")
             conn.execute("DELETE FROM payments")
@@ -206,22 +238,23 @@ def restore_ledger_snapshot(snapshot: Dict[str, Any]) -> None:
                     (occ.get("id"), occ["payment_id"], occ["due_date"], 1 if occ.get("paid") else 0, occ.get("transaction_id")),
                 )
 
-            # Update cached balance
+            ledger_sum = conn.execute(
+                "SELECT COALESCE(SUM(amount), 0) FROM transactions"
+            ).fetchone()[0]
+            if int(ledger_sum) != declared_balance:
+                raise ValueError(
+                    f"Restored ledger desynchronized inside the transaction: "
+                    f"rows sum to {ledger_sum}, expected {declared_balance}"
+                )
             conn.execute(
                 "INSERT OR REPLACE INTO settings (key, value) VALUES ('current_balance', ?)",
-                (snapshot.get("current_balance_cents", 0),),
+                (declared_balance,),
             )
-            conn.commit()
 
-        # Validate restored balance consistency
-        is_sync, ledger, stored = db_manager.validate_balance_consistency()
-        if not is_sync:
-            raise ValueError(f"Restored ledger desynchronized! Stored: {stored}, Calculated: {ledger}")
-
-    except Exception:
-        if os.path.exists(backup_path):
-            shutil.copy2(backup_path, db_path)
-        raise
+    # Post-commit cross-check against the stored balance (defence in depth).
+    is_sync, ledger, stored = db_manager.validate_balance_consistency()
+    if not is_sync:
+        raise ValueError(f"Restored ledger desynchronized! Stored: {stored}, Calculated: {ledger}")
 
 
 def load_sync_config() -> Optional[Dict[str, Any]]:

@@ -49,5 +49,14 @@ required by branch protection.
   - the CLI exits 0 for a valid forecast and 2 for invalid input, from a real install.
 
 The existing `.github/workflows/contract-conformance.yml` already provides the fast pinned Python
-comparison and the live Kotlin job. Its `ANDROID_PIN_SHA` must be advanced to the merged Android
-`main` commit when that repository lands the re-pin for released Contract 2.0.
+comparison and the live Kotlin job. Its `ANDROID_PIN_SHA` still points at `6cadf72` (the pre-release
+Android `main`). Advance it to the merged Android `main` that vendored released Contract 2.0:
+
+```text
+ANDROID_PIN_SHA: 898e74ccab45e57017b4eb9807668d227bce0e34
+```
+
+`docs/ci/contract-conformance-pin.patch` contains that exact change. It is not applied here for the
+same `workflow`-scope reason as the two workflow files above. Until it is applied, the live job
+still runs and passes (the 38 fixtures and the Kotlin engine are unchanged), but its recorded
+provenance is older than the merged Android `main`; the report must be read accordingly.
