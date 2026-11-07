@@ -16,6 +16,7 @@ import json
 import os
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from monte_carlo_ledger import db_manager, decisions
 from monte_carlo_ledger.contract import ContractError
@@ -238,6 +239,171 @@ class MCPAdapterContractTests(unittest.TestCase):
         with self.assertRaises(ContractError) as ctx:
             decisions.compare_debt_strategies([], AS_OF)
         self.assertEqual(ctx.exception.code, "SCHEMA_INVALID")
+
+    def test_compare_debt_strategies_rejects_negative_extra_payment(self):
+        liabilities = [{
+            "id": "card",
+            "balance_cents": 100_000,
+            "apr_basis_points": 1999,
+            "min_payment_cents": 3_000,
+        }]
+        with self.assertRaises(ContractError) as ctx:
+            decisions.compare_debt_strategies(liabilities, AS_OF, extra_monthly_payment_cents=-1)
+        self.assertEqual(ctx.exception.code, "INVALID_AMOUNT")
+
+    def test_compare_debt_strategies_rejects_invalid_date(self):
+        with self.assertRaises(ContractError) as ctx:
+            decisions.compare_debt_strategies(
+                [{"id": "card", "balance_cents": 1, "apr_basis_points": 0, "min_payment_cents": 1}],
+                "2026-13-40",
+            )
+        self.assertEqual(ctx.exception.code, "INVALID_DATE")
+
+    def test_simulate_purchase_rejects_non_positive_amount(self):
+        for amount in (0, -5_000):
+            with self.assertRaises(ContractError) as ctx:
+                decisions.simulate_purchase(amount, "2026-11-10", AS_OF)
+            self.assertEqual(ctx.exception.code, "INVALID_AMOUNT")
+
+    def test_financial_snapshot_never_materializes_the_ledger(self):
+        # Bounded-query guarantee: the snapshot must never call the full-history loader.
+        with mock.patch.object(
+            db_manager,
+            "get_transaction_history",
+            side_effect=AssertionError("snapshot must not materialize the ledger"),
+        ):
+            snap = decisions.financial_snapshot()
+        self.assertEqual(snap["counts"]["transactions"], 1)
+
+    def test_financial_snapshot_scales_to_a_large_ledger(self):
+        rows = [(100, "Income", "2026-01-01", "bulk")] * 5_000
+        with db_manager.get_db_connection() as conn:
+            conn.executemany(
+                "INSERT INTO transactions (amount, type, date, description) VALUES (?, ?, ?, ?)",
+                rows,
+            )
+            conn.commit()
+        with db_manager.get_db_connection() as conn:
+            expected_newest = conn.execute("SELECT MAX(date) FROM transactions").fetchone()[0]
+        snap = decisions.financial_snapshot()
+        self.assertEqual(snap["counts"]["transactions"], 5_001)
+        self.assertEqual(snap["newest_transaction_date"], expected_newest)
+
+
+class MCPValidationFailClosedTests(unittest.TestCase):
+    """A future adapter must never read an incomplete validation as success."""
+
+    def _valid(self):
+        return {
+            "contract_version": "2.0",
+            "scenario_id": "probe",
+            "as_of": AS_OF,
+            "starting_balance_cents": 0,
+            "horizon_days": 10,
+            "events": [],
+        }
+
+    def _codes(self, verdict):
+        return [e["code"] for e in verdict["errors"]]
+
+    def test_valid_scenario_reports_every_stage(self):
+        verdict = decisions.validate_scenario(self._valid())
+        self.assertTrue(verdict["valid"], verdict["errors"])
+        self.assertTrue(verdict["schema_checked"])
+        self.assertTrue(verdict["schema_valid"])
+        self.assertTrue(verdict["engine_evaluated"])
+        self.assertEqual(verdict["errors"], [])
+
+    def test_missing_validation_dependency_is_not_success(self):
+        import sys as _sys
+
+        with mock.patch.dict(_sys.modules, {"jsonschema": None}):
+            verdict = decisions.validate_scenario(self._valid())
+        self.assertFalse(verdict["valid"], "a skipped schema check must never report valid")
+        self.assertFalse(verdict["schema_checked"])
+        self.assertFalse(verdict["schema_valid"])
+        self.assertFalse(verdict["engine_evaluated"])
+        self.assertEqual(self._codes(verdict), ["VALIDATION_UNAVAILABLE"])
+
+    def test_non_object_scenario_is_rejected(self):
+        verdict = decisions.validate_scenario(["not", "an", "object"])
+        self.assertFalse(verdict["valid"])
+        self.assertEqual(self._codes(verdict), ["SCHEMA_INVALID"])
+
+    def test_schema_invalid_document_does_not_reach_the_engine(self):
+        bad = dict(self._valid(), surprise_field=1)
+        verdict = decisions.validate_scenario(bad)
+        self.assertFalse(verdict["valid"])
+        self.assertTrue(verdict["schema_checked"])
+        self.assertFalse(verdict["schema_valid"])
+        self.assertFalse(verdict["engine_evaluated"])
+        self.assertIn("SCHEMA_INVALID", self._codes(verdict))
+
+    def test_contract_version_boundaries(self):
+        cases = {
+            None: "SCHEMA_INVALID",
+            2.0: "SCHEMA_INVALID",
+            "3.0": "SCHEMA_INVALID",
+            "not-a-version": "SCHEMA_INVALID",
+            "1.0": None,
+            "1.1": None,
+            "1.2": None,
+            "2.0": None,
+        }
+        for value, expected in cases.items():
+            with self.subTest(contract_version=value):
+                doc = dict(self._valid())
+                doc["contract_version"] = value
+                verdict = decisions.validate_scenario(doc)
+                if expected is None:
+                    self.assertTrue(verdict["valid"], verdict["errors"])
+                else:
+                    self.assertFalse(verdict["valid"])
+                    self.assertIn(expected, self._codes(verdict))
+
+    def test_omitted_contract_version_is_rejected_by_canonical_validation(self):
+        # Two-tier policy: canonical public inputs must declare a version (the schema requires
+        # it), while the engine still tolerates omission for legacy/hand-written scenarios by
+        # evaluating them as the latest released version.
+        doc = self._valid()
+        del doc["contract_version"]
+        verdict = decisions.validate_scenario(doc)
+        self.assertFalse(verdict["valid"])
+        self.assertIn("SCHEMA_INVALID", self._codes(verdict))
+
+        from monte_carlo_ledger import contract
+
+        result = contract.run_scenario(dict(doc, as_of=AS_OF))
+        self.assertEqual(result["contract_version"], "2.0")
+
+    def test_invalid_date_is_reported_by_the_engine(self):
+        doc = dict(
+            self._valid(),
+            events=[{"date": "2026-13-40", "amount_cents": -100, "type": "expense"}],
+        )
+        verdict = decisions.validate_scenario(doc)
+        self.assertFalse(verdict["valid"])
+        self.assertTrue(verdict["engine_evaluated"])
+        self.assertIn("INVALID_DATE", self._codes(verdict))
+
+    def test_invalid_amount_is_reported_by_the_engine(self):
+        doc = dict(
+            self._valid(),
+            events=[{"date": AS_OF, "amount_cents": 500, "type": "expense"}],
+        )
+        verdict = decisions.validate_scenario(doc)
+        self.assertFalse(verdict["valid"])
+        self.assertIn("INVALID_AMOUNT", self._codes(verdict))
+
+    def test_overflow_is_reported_by_the_engine(self):
+        doc = dict(
+            self._valid(),
+            starting_balance_cents=9223372036854775807,
+            events=[{"date": AS_OF, "amount_cents": 1, "type": "income"}],
+        )
+        verdict = decisions.validate_scenario(doc)
+        self.assertFalse(verdict["valid"])
+        self.assertIn("MONEY_OVERFLOW", self._codes(verdict))
 
 
 if __name__ == "__main__":

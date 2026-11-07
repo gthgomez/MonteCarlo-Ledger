@@ -24,3 +24,11 @@
   `contracts/version.json` / `engine_capabilities`. This is not a normative-output change for any
   scenario that declares its version (the entire golden corpus does); it only removes the one
   version-less input class where engines previously disagreed.
+- **Boundary — canonical public inputs require an explicit version.** The default is a compatibility
+  affordance for legacy and hand-written scenarios, not a licence to omit the field in a canonical
+  input. The golden corpus, the cross-engine comparison, and `decisions.validate_scenario()` all
+  require `contract_version` (the schema marks it required); omission is `SCHEMA_INVALID` there.
+  An explicitly malformed value — `null`, a number, an object, an unknown string — is rejected by
+  every engine and is never silently replaced by the default. Engines must distinguish "key absent"
+  from "key present with an invalid value"; TypeScript's `??` and Kotlin's `as?` traps both violated
+  this and were fixed with the implementation of this MCD.

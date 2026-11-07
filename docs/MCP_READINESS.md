@@ -22,7 +22,7 @@ canonical engine (`monte_carlo_ledger/contract/run_scenario`) through the decisi
 | `simulate_purchase` | `decisions.simulate_purchase(amount_cents, purchase_date, as_of, ...)` | baseline vs scenario + `change` deltas, identical seed |
 | `simulate_paycheck_delay` | `decisions.simulate_paycheck_delay(delay_days, as_of, ...)` | baseline vs delayed + deltas, identical seed |
 | `compare_debt_payoff_strategies` | `decisions.compare_debt_strategies(liabilities, as_of, extra_monthly_payment_cents)` | canonical amortization + explicit cash-flow caveat |
-| `validate_scenario` | `decisions.validate_scenario(scenario)` | schema-first structured verdict, no side effects |
+| `validate_scenario` | `decisions.validate_scenario(scenario)` | fail-closed schema-then-engine verdict, no side effects |
 | `get_engine_capabilities` | `decisions.engine_capabilities()` | contract version, supported versions, bounds, op list |
 
 `compare_scenarios` exists for arbitrary what-if pairs; do not add further decision handlers
@@ -54,6 +54,33 @@ with a stable machine-readable `code` (`SCHEMA_INVALID`, `MISSING_AS_OF`, `INVAL
 `INVALID_AMOUNT`, `INVALID_HORIZON`, `INVALID_RUNS`, `MONEY_OVERFLOW`, ...). There is **no** code
 path that converts a failure into a zero, a "0% risk", or a default. An adapter MUST map exceptions
 to tool errors (`isError: true`) carrying `err.code` — never swallow them into a numeric result.
+
+`validate_scenario()` is the one operation that returns a verdict instead of raising, so its shape
+is contractual:
+
+```json
+{
+  "valid": false,
+  "schema_checked": true,
+  "schema_valid": false,
+  "engine_evaluated": false,
+  "errors": [{"code": "SCHEMA_INVALID", "path": "horizon_days", "message": "..."}]
+}
+```
+
+`valid` is true **only** when the schema was actually checked, the document passed it, the engine
+evaluated it, and no error was recorded. If the validation dependency (`jsonschema`, a required
+runtime dependency) is unavailable, the verdict is `VALIDATION_UNAVAILABLE` with
+`valid: false` — a skipped check is never reported as success. Schema failure short-circuits engine
+evaluation (`engine_evaluated: false`); an invalid *date* or *amount* that the JSON schema cannot
+express is reported by the engine stage with its typed code.
+
+**Contract-version policy (two tiers).** Canonical public inputs — the fixture corpus, cross-engine
+comparison, and anything passed to `validate_scenario()` — MUST declare `contract_version`
+explicitly; omission is `SCHEMA_INVALID`. The engine itself retains a documented default for
+legacy/hand-written scenarios: a missing version evaluates as the latest **released** version
+(MCD-0027). An explicitly malformed version (`null`, a number, an object, an unknown string) is
+always rejected — it is never silently replaced by the default.
 Stale/insufficient data is surfaced, not hidden: `financial_snapshot()` exposes
 `balance_consistent`, `reconciled_with_bank` and `newest_transaction_date` so the adapter can label
 data freshness; simulation defaults (runs/seed/variance ranges) are declared in
@@ -110,11 +137,14 @@ def handle(name, args):
 - `simulate_purchase` results validating against `schemas/result.schema.json`,
 - unaffordable purchases produce honest negative troughs (never clamped),
 - invalid dates raise typed `ContractError` (never zeros),
-- `validate_scenario` schema-level and engine-level error codes,
-- `financial_snapshot` balances/freshness and full-suite read-only behaviour,
+- `validate_scenario` schema-level and engine-level error codes, including date, amount and
+  overflow cases,
+- a missing validation dependency yields `VALIDATION_UNAVAILABLE`, never `valid: true`,
+- contract-version boundaries: omission, `null`, numbers, unknown strings, 1.0–1.2, 2.0,
+- `financial_snapshot` balances/freshness, bounded queries (no full-ledger materialization), and
+  full-suite read-only behaviour,
 - deterministic debt strategy comparison with the cash-flow caveat,
-- rejection of empty liability sets,
-- version-less scenarios evaluate as the latest released version (MCD-0027).
+- rejection of empty liability sets and of negative extra payments (never clamped).
 
 ## 7. Deliberately NOT done here
 
