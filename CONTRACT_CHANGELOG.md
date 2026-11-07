@@ -8,9 +8,10 @@ clarification requires a MINOR bump. Every entry links to an MCD where applicabl
 
 Released after fresh three-engine conformance on the merged default branches: 38/38 fixtures
 (31 valid, 7 invalid) agreed bit-for-bit between the Python reference, the Kotlin engine at
-`6418cd2acf68474e02a43138a9cd330dd6ff6fb4`, and the TypeScript engine, with zero divergences.
-The release covers contract *semantics*; Android app-binary verification (instrumented/device)
-remains a separate product gate and is not claimed by this release.
+`898e74ccab45e57017b4eb9807668d227bce0e34`, and the TypeScript engine, with zero divergences.
+The release covers contract *semantics*. Android instrumented tests later passed on an API 34
+emulator in CI (39 tests, including Room migration 16→17 coverage), but no physical-device run was
+performed and no Play Store release is claimed.
 
 MAJOR: adds a new liability/amortization conclusion domain and supersedes the deferred-liabilities
 clause of MCD-0012. No existing scenario's forecast, risk, or result changes.
