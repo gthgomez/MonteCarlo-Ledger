@@ -216,8 +216,8 @@ export function DecisionStudio({
 
                   <p className="text-[11px] text-slate-400 pt-1 border-t border-slate-700/60">
                     {purchaseOk.safeSpendCents >= 0
-                      ? "This purchase remains safely above your P10 floor without risking negative balance."
-                      : "Caution: This purchase drives your conservative trough negative before the next income event."}
+                      ? `In this simulation the conservative (P10) trough stays above $0 after the purchase. That is a model estimate, not a guarantee.`
+                      : `Caution: in this simulation the conservative (P10) trough goes below $0 before the next income event.`}
                   </p>
                 </>
               )}

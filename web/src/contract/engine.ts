@@ -122,9 +122,14 @@ function validateRecurrence(rec: any): void {
 }
 
 function contractVersion(scenario: any): string {
-  const v = scenario.contract_version ?? CONTRACT_VERSION;
-  if (!SUPPORTED_CONTRACT_VERSIONS.includes(v)) {
-    throw new ContractError("SCHEMA_INVALID", `unsupported contract_version '${v}'`);
+  // Distinguish "key absent" (documented default, MCD-0027) from "key present with an
+  // invalid value". `??` treated an explicit null as absent, which the Python engine rejects.
+  const v = "contract_version" in scenario ? scenario.contract_version : CONTRACT_VERSION;
+  if (typeof v !== "string" || !(SUPPORTED_CONTRACT_VERSIONS as readonly string[]).includes(v)) {
+    throw new ContractError(
+      "SCHEMA_INVALID",
+      `unsupported contract_version ${JSON.stringify(v)}`
+    );
   }
   return v;
 }
@@ -438,7 +443,7 @@ export function runScenario(scenario: any): any {
   const start = BigInt(scenario.starting_balance_cents);
 
   const result: any = {
-    contract_version: scenario.contract_version ?? CONTRACT_VERSION,
+    contract_version: "contract_version" in scenario ? scenario.contract_version : CONTRACT_VERSION,
     scenario_id: scenario.scenario_id ?? "",
     forecast: forecast(start, asOf, base),
   };
