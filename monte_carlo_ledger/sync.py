@@ -25,6 +25,7 @@ from typing import Any, Dict, Optional, Tuple
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from . import db_manager
+from .contract.money import MAX_MONEY_CENTS, MIN_MONEY_CENTS
 
 SYNC_CONFIG_FILE = ".ledger-sync.json"
 DEFAULT_SERVER_URL = "https://montecarlo-ledger.vercel.app"
@@ -172,18 +173,36 @@ def export_ledger_snapshot() -> Dict[str, Any]:
 SNAPSHOT_VERSION = "2.1"
 # 2.0 snapshots predate incomes[].expected_amount; they restore with a null override.
 SUPPORTED_SNAPSHOT_VERSIONS = ("2.0", "2.1")
-_SNAPSHOT_FIELDS = frozenset(
-    {
-        "version",
-        "updated_at",
-        "current_balance_cents",
-        "incomes",
-        "payments",
-        "transactions",
-        "bill_occurrences",
-        "liabilities",
-    }
+# Collections that every supported snapshot must carry. A missing collection is an
+# incomplete snapshot, never an empty one: treating it as empty is the defect that
+# allowed `{"version": "2.1"}` to wipe a populated ledger.
+REQUIRED_SNAPSHOT_FIELDS = (
+    "version",
+    "current_balance_cents",
+    "incomes",
+    "payments",
+    "transactions",
+    "bill_occurrences",
 )
+OPTIONAL_SNAPSHOT_FIELDS = ("updated_at", "liabilities")
+_SNAPSHOT_FIELDS = frozenset(REQUIRED_SNAPSHOT_FIELDS) | frozenset(OPTIONAL_SNAPSHOT_FIELDS)
+
+# Exact row shapes the Python ledger can persist. Anything else (e.g. an embedded
+# liability field) would be silently discarded on restore, so it is rejected.
+_ROW_FIELDS = {
+    "incomes": frozenset(
+        {"id", "name", "amount_cents", "frequency", "last_payday", "next_payday", "expected_amount"}
+    ),
+    "payments": frozenset(
+        {"id", "name", "amount_cents", "due_day", "recurrence", "due_date", "is_auto_withdraw"}
+    ),
+    "transactions": frozenset(
+        {"id", "amount_cents", "category", "type", "date", "description"}
+    ),
+    "bill_occurrences": frozenset(
+        {"id", "payment_id", "due_date", "paid", "transaction_id"}
+    ),
+}
 
 
 def _require_str(value: Any, field: str) -> str:
@@ -192,14 +211,45 @@ def _require_str(value: Any, field: str) -> str:
     return value
 
 
-def _require_int(value: Any, field: str, *, allow_none: bool = False, minimum: Optional[int] = None) -> Optional[int]:
+def _require_int(
+    value: Any,
+    field: str,
+    *,
+    allow_none: bool = False,
+    minimum: Optional[int] = None,
+    maximum: Optional[int] = None,
+) -> Optional[int]:
     if value is None and allow_none:
         return None
     if not isinstance(value, int) or isinstance(value, bool):
         raise ValueError(f"Snapshot {field} must be an integer, got {value!r}")
     if minimum is not None and value < minimum:
         raise ValueError(f"Snapshot {field} must be >= {minimum}, got {value}")
+    if maximum is not None and value > maximum:
+        raise ValueError(f"Snapshot {field} must be <= {maximum}, got {value}")
     return value
+
+
+def _require_money(value: Any, field: str, *, minimum: Optional[int] = None) -> int:
+    """Exact integer cents within the contract's supported range."""
+    return _require_int(
+        value, field, minimum=minimum, maximum=MAX_MONEY_CENTS
+    )  # type: ignore[return-value]
+
+
+def _require_bool(value: Any, field: str) -> bool:
+    if not isinstance(value, bool):
+        raise ValueError(f"Snapshot {field} must be a boolean, got {value!r}")
+    return value
+
+
+def _require_present(snapshot: Dict[str, Any], key: str) -> Any:
+    if key not in snapshot:
+        raise ValueError(
+            f"Snapshot is missing required field {key!r}; refusing to treat an "
+            "incomplete snapshot as an empty ledger"
+        )
+    return snapshot[key]
 
 
 def _require_date(value: Any, field: str, *, allow_none: bool = False) -> Optional[str]:
@@ -214,11 +264,39 @@ def _require_date(value: Any, field: str, *, allow_none: bool = False) -> Option
     return value
 
 
-def _require_rows(snapshot: Dict[str, Any], key: str) -> list:
-    value = snapshot.get(key, [])
-    if not isinstance(value, list) or any(not isinstance(row, dict) for row in value):
-        raise ValueError(f"Snapshot {key} must be a list of objects")
+def _require_timestamp(value: Any, field: str) -> str:
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"Snapshot {field} must be a timestamp string, got {value!r}")
+    try:
+        datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(f"Snapshot {field} is not a valid timestamp: {value!r}") from exc
     return value
+
+
+def _require_rows(snapshot: Dict[str, Any], key: str) -> list:
+    """Return a required collection of objects.
+
+    A missing key is an incomplete snapshot, not an empty collection. Treating it as
+    empty is what allowed a version-only snapshot to replace a populated ledger.
+    """
+    value = _require_present(snapshot, key)
+    if not isinstance(value, list):
+        raise ValueError(f"Snapshot {key} must be a list, got {type(value).__name__}")
+    for index, row in enumerate(value):
+        if not isinstance(row, dict):
+            raise ValueError(f"Snapshot {key}[{index}] must be an object, got {row!r}")
+    return value
+
+
+def _validate_row_fields(row: Dict[str, Any], collection: str, index: int) -> None:
+    allowed = _ROW_FIELDS[collection]
+    unknown = set(row) - allowed
+    if unknown:
+        raise ValueError(
+            f"Snapshot {collection}[{index}] contains unsupported fields: "
+            f"{sorted(unknown)}; refusing to discard financial information"
+        )
 
 
 def _id_map(rows: list, collection: str) -> Dict[str, int]:
@@ -239,16 +317,18 @@ def _id_map(rows: list, collection: str) -> Dict[str, int]:
         if "id" not in row or row["id"] is None:
             raise ValueError(f"Snapshot {collection} row is missing its id")
         old = row["id"]
+        if isinstance(old, bool) or not isinstance(old, (int, str)) or old == "":
+            raise ValueError(
+                f"Snapshot {collection} has an invalid identifier {old!r}; "
+                "only integers and non-empty strings are supported"
+            )
         key = str(old)
         if key in mapping:
-            # Integer duplicates are left to the primary-key constraint (which rolls
-            # the transaction back). A mixed "1" / 1 collision would otherwise be
-            # silently merged into one row, so reject it explicitly.
-            if not (isinstance(old, int) and not isinstance(old, bool) and mapping[key] == old):
-                raise ValueError(
-                    f"Snapshot {collection} has colliding identifiers after normalization: {old!r}"
-                )
-            continue
+            # Reject duplicates during validation, before any database mutation.
+            # A mixed "1" / 1 pair would otherwise be silently merged into one row.
+            raise ValueError(
+                f"Snapshot {collection} has duplicate identifier {old!r}"
+            )
         if isinstance(old, int) and not isinstance(old, bool):
             mapping[key] = old
         else:
@@ -301,13 +381,18 @@ def restore_ledger_snapshot(snapshot: Dict[str, Any]) -> None:
             "refusing to discard data the Python ledger cannot represent"
         )
 
-    version = snapshot.get("version")
+    version = _require_str(_require_present(snapshot, "version"), "version")
     if version not in SUPPORTED_SNAPSHOT_VERSIONS:
         raise ValueError(
             f"Unsupported snapshot version: {version!r}; supported: {SUPPORTED_SNAPSHOT_VERSIONS}"
         )
 
-    liabilities = _require_rows(snapshot, "liabilities")
+    if "updated_at" in snapshot:
+        _require_timestamp(snapshot["updated_at"], "updated_at")
+
+    # Liabilities are optional (older snapshots may omit them) but an empty list is
+    # the only value the Python ledger can faithfully persist.
+    liabilities = _require_rows(snapshot, "liabilities") if "liabilities" in snapshot else []
     if liabilities:
         raise ValueError(
             f"Snapshot contains {len(liabilities)} liabilit"
@@ -316,9 +401,14 @@ def restore_ledger_snapshot(snapshot: Dict[str, Any]) -> None:
             "silently dropping debt records."
         )
 
+    # A missing balance is an incomplete snapshot, never a zero balance.
     declared_balance = _require_int(
-        snapshot.get("current_balance_cents", 0), "current_balance_cents"
+        _require_present(snapshot, "current_balance_cents"),
+        "current_balance_cents",
+        minimum=MIN_MONEY_CENTS,
+        maximum=MAX_MONEY_CENTS,
     )
+    assert declared_balance is not None
 
     incomes = _require_rows(snapshot, "incomes")
     payments = _require_rows(snapshot, "payments")
@@ -327,33 +417,77 @@ def restore_ledger_snapshot(snapshot: Dict[str, Any]) -> None:
 
     # Validate everything before opening the write transaction, so a malformed
     # snapshot never even starts replacing the ledger.
-    for inc in incomes:
-        _require_str(inc.get("name"), "incomes.name")
-        _require_int(inc.get("amount_cents"), "incomes.amount_cents", minimum=1)
-        _require_int(inc.get("expected_amount"), "incomes.expected_amount", allow_none=True, minimum=1)
+    for index, inc in enumerate(incomes):
+        _validate_row_fields(inc, "incomes", index)
+        _require_str(inc.get("name"), f"incomes[{index}].name")
+        _require_money(inc.get("amount_cents"), f"incomes[{index}].amount_cents", minimum=1)
+        _require_int(
+            inc.get("expected_amount"),
+            f"incomes[{index}].expected_amount",
+            allow_none=True,
+            minimum=1,
+            maximum=MAX_MONEY_CENTS,
+        )
         if inc.get("frequency") not in _SNAPSHOT_INCOME_FREQUENCIES:
-            raise ValueError(f"Snapshot incomes.frequency is unsupported: {inc.get('frequency')!r}")
-        _require_date(inc.get("last_payday"), "incomes.last_payday")
-        _require_date(inc.get("next_payday"), "incomes.next_payday")
+            raise ValueError(
+                f"Snapshot incomes[{index}].frequency is unsupported: {inc.get('frequency')!r}"
+            )
+        _require_date(inc.get("last_payday"), f"incomes[{index}].last_payday")
+        _require_date(inc.get("next_payday"), f"incomes[{index}].next_payday")
+        if "id" not in inc or inc["id"] is None:
+            raise ValueError(f"Snapshot incomes[{index}] is missing its id")
 
-    for pmt in payments:
-        _require_str(pmt.get("name"), "payments.name")
-        _require_int(pmt.get("amount_cents"), "payments.amount_cents", minimum=1)
+    for index, pmt in enumerate(payments):
+        _validate_row_fields(pmt, "payments", index)
+        _require_str(pmt.get("name"), f"payments[{index}].name")
+        _require_money(pmt.get("amount_cents"), f"payments[{index}].amount_cents", minimum=1)
         if pmt.get("recurrence") not in _SNAPSHOT_PAYMENT_RECURRENCES:
-            raise ValueError(f"Snapshot payments.recurrence is unsupported: {pmt.get('recurrence')!r}")
-        due_day = _require_int(pmt.get("due_day"), "payments.due_day", allow_none=True)
+            raise ValueError(
+                f"Snapshot payments[{index}].recurrence is unsupported: {pmt.get('recurrence')!r}"
+            )
+        due_day = _require_int(pmt.get("due_day"), f"payments[{index}].due_day", allow_none=True)
         if due_day is not None and not 1 <= due_day <= 31:
-            raise ValueError(f"Snapshot payments.due_day must be 1..31, got {due_day}")
-        _require_date(pmt.get("due_date"), "payments.due_date", allow_none=True)
+            raise ValueError(f"Snapshot payments[{index}].due_day must be 1..31, got {due_day}")
+        _require_date(pmt.get("due_date"), f"payments[{index}].due_date", allow_none=True)
+        if "is_auto_withdraw" in pmt:
+            _require_bool(pmt["is_auto_withdraw"], f"payments[{index}].is_auto_withdraw")
+        if "id" not in pmt or pmt["id"] is None:
+            raise ValueError(f"Snapshot payments[{index}] is missing its id")
 
-    for tx in transactions:
-        _require_int(tx.get("amount_cents"), "transactions.amount_cents")
-        if tx.get("type", "Expense") not in _SNAPSHOT_TRANSACTION_TYPES:
-            raise ValueError(f"Snapshot transactions.type is unsupported: {tx.get('type')!r}")
-        _require_date(tx.get("date"), "transactions.date")
+    for index, tx in enumerate(transactions):
+        _validate_row_fields(tx, "transactions", index)
+        _require_int(
+            tx.get("amount_cents"),
+            f"transactions[{index}].amount_cents",
+            minimum=MIN_MONEY_CENTS,
+            maximum=MAX_MONEY_CENTS,
+        )
+        if tx.get("type") not in _SNAPSHOT_TRANSACTION_TYPES:
+            raise ValueError(
+                f"Snapshot transactions[{index}].type is unsupported: {tx.get('type')!r}"
+            )
+        _require_date(tx.get("date"), f"transactions[{index}].date")
+        for field in ("category", "description"):
+            if field in tx and tx[field] is not None and not isinstance(tx[field], str):
+                raise ValueError(f"Snapshot transactions[{index}].{field} must be a string")
+        if "id" not in tx or tx["id"] is None:
+            raise ValueError(f"Snapshot transactions[{index}] is missing its id")
 
-    for occ in occurrences:
-        _require_date(occ.get("due_date"), "bill_occurrences.due_date")
+    for index, occ in enumerate(occurrences):
+        _validate_row_fields(occ, "bill_occurrences", index)
+        if "id" not in occ or occ["id"] is None:
+            raise ValueError(f"Snapshot bill_occurrences[{index}] is missing its id")
+        if occ.get("payment_id") is None:
+            raise ValueError(f"Snapshot bill_occurrences[{index}] is missing its payment_id")
+        _require_date(occ.get("due_date"), f"bill_occurrences[{index}].due_date")
+        _require_bool(occ.get("paid"), f"bill_occurrences[{index}].paid")
+        if occ.get("transaction_id") is not None and not isinstance(
+            occ.get("transaction_id"), (int, str)
+        ):
+            raise ValueError(
+                f"Snapshot bill_occurrences[{index}].transaction_id is invalid: "
+                f"{occ.get('transaction_id')!r}"
+            )
 
     declared_sum = sum(tx["amount_cents"] for tx in transactions)
     if declared_sum != declared_balance:
