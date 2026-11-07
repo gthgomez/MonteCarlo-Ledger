@@ -53,6 +53,10 @@ class MCPAdapterContractTests(unittest.TestCase):
         with db_manager.get_db_connection() as conn:
             return conn.execute("SELECT COUNT(*) AS n FROM transactions").fetchone()["n"]
 
+    def _occurrence_count(self) -> int:
+        with db_manager.get_db_connection() as conn:
+            return conn.execute("SELECT COUNT(*) AS n FROM bill_occurrences").fetchone()["n"]
+
     # -- capabilities ------------------------------------------------------
 
     def test_engine_capabilities_shape_and_version(self):
@@ -199,12 +203,22 @@ class MCPAdapterContractTests(unittest.TestCase):
 
     def test_all_operations_are_read_only(self):
         before = self._txn_count()
+        before_occurrences = self._occurrence_count()
         decisions.forecast(AS_OF, 30)
         decisions.risk(AS_OF, 30)
         decisions.simulate_purchase(65_000, "2026-11-10", AS_OF)
         decisions.simulate_paycheck_delay(3, AS_OF)
+        decisions.compare_debt_strategies(
+            [{"id": "c", "balance_cents": 100_000, "apr_basis_points": 0, "min_payment_cents": 5_000}],
+            AS_OF,
+        )
         decisions.financial_snapshot()
         self.assertEqual(before, self._txn_count(), "decision ops must never write the ledger")
+        self.assertEqual(
+            before_occurrences,
+            self._occurrence_count(),
+            "decision ops must not generate or mutate bill occurrences either",
+        )
 
     # -- debt comparison ---------------------------------------------------
 

@@ -205,6 +205,8 @@ def _dispatch(args) -> int:
             f"Overdraft chance:    {result['negative_balance_probability_ppm'] / 10000:.2f}%",
             f"Safe to spend:       {_format_money(result['safe_to_spend_cents'])}",
         ])
+        return 0
+
     if args.command == "export-snapshot":
         from . import sync
         snap = sync.export_ledger_snapshot()

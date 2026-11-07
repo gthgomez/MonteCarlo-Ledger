@@ -1,3 +1,4 @@
+import os
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -9,7 +10,9 @@ from . import budget_engine, domain_rules
 
 BASE_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = BASE_DIR.parent
-DB_PATH = str(PROJECT_ROOT / "ledger.db")
+# Explicit override for isolated runs (tests, a second profile). Defaults to the repo-local
+# ledger.db so local-first behaviour is unchanged.
+DB_PATH = os.environ.get("MC_LEDGER_DB") or str(PROJECT_ROOT / "ledger.db")
 SCHEMA_PATH = str(BASE_DIR / "schema.sql")
 
 def _to_int_safe(val: Any) -> int:
