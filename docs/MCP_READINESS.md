@@ -130,7 +130,7 @@ def handle(name, args):
 
 ## 6. Adapter-facing evidence
 
-`tests/test_mcp_adapter_contract.py` (12 tests) pins, against the real core:
+`tests/test_mcp_adapter_contract.py` (28 tests) pins, against the real core:
 
 - capability shape + agreement with `contracts/version.json`,
 - bit-for-bit reproducible forecast/risk for a fixed seed,
@@ -152,3 +152,82 @@ def handle(name, args):
 - No new credentials, token flows, or remote calls.
 - No write tools, sync tools, or "apply this plan" affordances.
 - No orchestration layer between the adapter and `decisions.py`.
+
+## 8. Qualification evidence — campaign 2 (2026-11-07)
+
+Executed against the merged default branches, not against PR descriptions.
+
+### Adapter inputs are now correct
+
+- **Monthly income anchoring (MCD-0022).** `scenario.py` delegates to the canonical
+  `contract.recurrence_dates()` expander with an explicit `anchor_day` taken from
+  `last_payday`. A Jan 31 schedule now projects Feb 28 → **Mar 31** (previously Mar 28),
+  leap years project Feb 29 → Mar 31, and a deliberately moved next payday becomes the
+  new anchor. `tests/test_income_anchoring.py` (12 tests) pins this, including invalid
+  dates/frequencies and non-positive income.
+- **Web adapter parity.** The TypeScript builder uses the same anchor rule and applies
+  `income.expected_amount` to the first projected paycheck; the timeline renders
+  `timelineRows()` from the contract engine instead of re-sorting and re-accumulating.
+- **Android** already used `day_of_month` and `expectedAmountCents` in
+  `ContractScenarioBridge`; the widget and dashboard share one simulation configuration
+  and an end-to-end parity test.
+
+### Read-only includes derived state
+
+`forecast`, `overdraft_risk`/`risk`, `safe_to_spend`, `simulate_purchase`,
+`simulate_paycheck_delay`, `compare_scenarios` and `compare_debt_strategies` all build
+with `read_only=True`. Tests assert that **transactions and bill_occurrences** are
+unchanged after every operation, including failures.
+
+### Snapshot / restore compatibility (not an MCP operation)
+
+- Snapshot format **2.1** adds `incomes[].expected_amount`; 2.0 snapshots still restore
+  (override `null`).
+- Every field is validated before any row is written; non-integer identifiers are
+  remapped deterministically; duplicate ids roll back.
+- Restore is a single SQLite transaction; a rejected or interrupted restore leaves the
+  previous ledger intact. The recovery copy uses SQLite's online backup API.
+- **Python cannot persist liabilities.** A snapshot containing them is rejected with a
+  compatibility error instead of silently dropping debt. Use the Android/Web client for
+  ledgers with debt.
+- `tests/test_snapshot_fidelity.py` compares the *persisted database* before/after a real
+  export → restore (11 tests), which detects fields omitted from both sides.
+
+### Qualification commands
+
+```bash
+# Python reference + adapter surface
+python -m pytest -o addopts="" -q
+python -m ruff check .
+python -m pyright
+
+# Clean installation without developer extras
+python -m venv .clean && .clean/bin/pip install . 
+MC_LEDGER_DB=/tmp/clean.db .clean/bin/python -m monte_carlo_ledger forecast --as-of 2026-11-09 --json
+
+# Web
+cd web && pnpm install --frozen-lockfile && pnpm lint && pnpm test
+NODE_ENV=production pnpm build && NODE_ENV=production pnpm exec playwright test
+
+# Android
+./gradlew :app:testDebugUnitTest :app:assembleDebug :app:assembleRelease
+./gradlew :app:connectedDebugAndroidTest   # emulator; CI runs this on API 34
+
+# Three-engine conformance (from the Ledger repo)
+python tools/conformance/run_python.py --out /tmp/py
+python tools/conformance/cross_engine.py --strict \
+  --python-dir /tmp/py --kotlin-dir /tmp/kotlin --fixtures fixtures \
+  --contract-pin ../MonteCarloLedger-Android/app/src/test/resources/contract/contract-pin.json
+```
+
+### Remaining limitations (adapter must not paper over)
+
+- Cloud sync was exercised against the real Next.js vault routes with an explicit
+  test-only store and against the real Python client (create → push → second client
+  join → pull → wrong passphrase → stale revision). It has **not** been executed against
+  a live Turso/libSQL database; treat that external gate as BLOCKED until it is.
+- The TypeScript binding fails closed (`MONEY_OVERFLOW`) when a result exceeds
+  `Number.MAX_SAFE_INTEGER`; Python's int64 is exact. Canonical fixture values are far
+  inside this bound.
+- The local HTTP API's loopback guard cannot distinguish a same-host reverse proxy.
+  Prefer in-process operation calls for a local MCP adapter.
