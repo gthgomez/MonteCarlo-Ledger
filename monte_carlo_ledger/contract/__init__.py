@@ -11,6 +11,7 @@ from .engine import (
     forecast,
     nearest_rank,
     ordered_events,
+    recurrence_dates,
     run_scenario,
     run_scenario_safe,
 )
@@ -39,6 +40,7 @@ __all__ = [
     "forecast",
     "nearest_rank",
     "ordered_events",
+    "recurrence_dates",
     "round_half_away",
     "run_scenario",
     "run_scenario_safe",

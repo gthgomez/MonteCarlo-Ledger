@@ -15,11 +15,10 @@ import getpass
 import hashlib
 import json
 import os
-import shutil
 import sys
 import urllib.error
 import urllib.request
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Any, Dict, Optional, Tuple
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -113,6 +112,7 @@ def export_ledger_snapshot() -> Dict[str, Any]:
             "frequency": inc.frequency,
             "last_payday": inc.last_payday,
             "next_payday": inc.next_payday,
+            "expected_amount": inc.expected_amount,
         }
         for inc in db_manager.get_all_income()
     ]
@@ -157,7 +157,7 @@ def export_ledger_snapshot() -> Dict[str, Any]:
         ]
 
     return {
-        "version": "2.0",
+        "version": SNAPSHOT_VERSION,
         "updated_at": _utc_now_iso(),
         "current_balance_cents": ledger_balance,
         "incomes": incomes,
@@ -168,7 +168,106 @@ def export_ledger_snapshot() -> Dict[str, Any]:
     }
 
 
-SUPPORTED_SNAPSHOT_VERSIONS = ("2.0",)
+SNAPSHOT_VERSION = "2.1"
+# 2.0 snapshots predate incomes[].expected_amount; they restore with a null override.
+SUPPORTED_SNAPSHOT_VERSIONS = ("2.0", "2.1")
+_SNAPSHOT_FIELDS = frozenset(
+    {
+        "version",
+        "updated_at",
+        "current_balance_cents",
+        "incomes",
+        "payments",
+        "transactions",
+        "bill_occurrences",
+        "liabilities",
+    }
+)
+
+
+def _require_str(value: Any, field: str) -> str:
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"Snapshot {field} must be a non-empty string, got {value!r}")
+    return value
+
+
+def _require_int(value: Any, field: str, *, allow_none: bool = False, minimum: Optional[int] = None) -> Optional[int]:
+    if value is None and allow_none:
+        return None
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise ValueError(f"Snapshot {field} must be an integer, got {value!r}")
+    if minimum is not None and value < minimum:
+        raise ValueError(f"Snapshot {field} must be >= {minimum}, got {value}")
+    return value
+
+
+def _require_date(value: Any, field: str, *, allow_none: bool = False) -> Optional[str]:
+    if value is None and allow_none:
+        return None
+    if not isinstance(value, str):
+        raise ValueError(f"Snapshot {field} must be an ISO date string, got {value!r}")
+    try:
+        date.fromisoformat(value)
+    except ValueError as exc:
+        raise ValueError(f"Snapshot {field} is not a valid date: {value!r}") from exc
+    return value
+
+
+def _require_rows(snapshot: Dict[str, Any], key: str) -> list:
+    value = snapshot.get(key, [])
+    if not isinstance(value, list) or any(not isinstance(row, dict) for row in value):
+        raise ValueError(f"Snapshot {key} must be a list of objects")
+    return value
+
+
+def _id_map(rows: list, collection: str) -> Dict[str, int]:
+    """Preserve integer ids; give every other id a fresh deterministic integer.
+
+    Web/Android snapshots may use string ids. Remapping lets Python restore such
+    data without mutating the original identifier scheme or colliding with the
+    integer primary keys.
+    """
+    explicit = [
+        row["id"]
+        for row in rows
+        if isinstance(row.get("id"), int) and not isinstance(row.get("id"), bool)
+    ]
+    nxt = (max(explicit) if explicit else 0) + 1
+    mapping: Dict[str, int] = {}
+    for row in rows:
+        if "id" not in row or row["id"] is None:
+            raise ValueError(f"Snapshot {collection} row is missing its id")
+        old = row["id"]
+        if isinstance(old, int) and not isinstance(old, bool):
+            mapping[str(old)] = old
+        else:
+            mapping[str(old)] = nxt
+            nxt += 1
+    return mapping
+
+
+def _ref(mapping: Dict[str, int], value: Any, field: str) -> int:
+    key = str(value)
+    if key not in mapping:
+        raise ValueError(f"Snapshot {field} references unknown id {value!r}")
+    return mapping[key]
+
+
+def _sqlite_backup(db_path: str, backup_path: str) -> None:
+    """Consistent online backup using SQLite's backup API (WAL-safe)."""
+    import sqlite3
+
+    with db_manager.get_db_connection() as source:
+        destination = sqlite3.connect(backup_path)
+        try:
+            source.backup(destination)
+        finally:
+            destination.close()
+
+
+_SNAPSHOT_INCOME_FREQUENCIES = frozenset({"Weekly", "Bi-weekly", "Monthly", "One-time"})
+_SNAPSHOT_PAYMENT_RECURRENCES = frozenset({"Monthly", "One-time", "Weekly", "Bi-weekly"})
+_SNAPSHOT_TRANSACTION_TYPES = frozenset({"Income", "Expense", "Adjustment"})
 
 
 def restore_ledger_snapshot(snapshot: Dict[str, Any]) -> None:
@@ -177,35 +276,92 @@ def restore_ledger_snapshot(snapshot: Dict[str, Any]) -> None:
     The whole replacement runs in one SQLite transaction and the snapshot's internal
     consistency (declared balance == sum of its transactions) is checked *before*
     commit. A rejected or interrupted restore therefore leaves the pre-existing ledger
-    exactly as it was — there is no window in which a partially restored ledger is
-    committed and then "repaired" from a file copy.
+    exactly as it was. Every field is validated before any row is written, non-integer
+    identifiers are remapped deterministically, and data the Python ledger cannot
+    represent (liabilities) is rejected instead of being silently discarded.
     """
     if not isinstance(snapshot, dict):
         raise ValueError("Snapshot must be an object")
+
+    unknown = set(snapshot) - _SNAPSHOT_FIELDS
+    if unknown:
+        raise ValueError(
+            f"Snapshot contains unsupported fields: {sorted(unknown)}; "
+            "refusing to discard data the Python ledger cannot represent"
+        )
+
     version = snapshot.get("version")
     if version not in SUPPORTED_SNAPSHOT_VERSIONS:
         raise ValueError(
             f"Unsupported snapshot version: {version!r}; supported: {SUPPORTED_SNAPSHOT_VERSIONS}"
         )
 
-    declared_balance = snapshot.get("current_balance_cents", 0)
-    if not isinstance(declared_balance, int) or isinstance(declared_balance, bool):
-        raise ValueError(f"Snapshot current_balance_cents must be an integer, got {declared_balance!r}")
-    declared_sum = sum(
-        int(tx.get("amount_cents", 0)) for tx in snapshot.get("transactions", [])
+    liabilities = _require_rows(snapshot, "liabilities")
+    if liabilities:
+        raise ValueError(
+            f"Snapshot contains {len(liabilities)} liabilit"
+            f"{'y' if len(liabilities) == 1 else 'ies'}, which the Python ledger "
+            "cannot persist. Restore it with the Android or Web client instead of "
+            "silently dropping debt records."
+        )
+
+    declared_balance = _require_int(
+        snapshot.get("current_balance_cents", 0), "current_balance_cents"
     )
+
+    incomes = _require_rows(snapshot, "incomes")
+    payments = _require_rows(snapshot, "payments")
+    transactions = _require_rows(snapshot, "transactions")
+    occurrences = _require_rows(snapshot, "bill_occurrences")
+
+    # Validate everything before opening the write transaction, so a malformed
+    # snapshot never even starts replacing the ledger.
+    for inc in incomes:
+        _require_str(inc.get("name"), "incomes.name")
+        _require_int(inc.get("amount_cents"), "incomes.amount_cents", minimum=1)
+        _require_int(inc.get("expected_amount"), "incomes.expected_amount", allow_none=True, minimum=1)
+        if inc.get("frequency") not in _SNAPSHOT_INCOME_FREQUENCIES:
+            raise ValueError(f"Snapshot incomes.frequency is unsupported: {inc.get('frequency')!r}")
+        _require_date(inc.get("last_payday"), "incomes.last_payday")
+        _require_date(inc.get("next_payday"), "incomes.next_payday")
+
+    for pmt in payments:
+        _require_str(pmt.get("name"), "payments.name")
+        _require_int(pmt.get("amount_cents"), "payments.amount_cents", minimum=1)
+        if pmt.get("recurrence") not in _SNAPSHOT_PAYMENT_RECURRENCES:
+            raise ValueError(f"Snapshot payments.recurrence is unsupported: {pmt.get('recurrence')!r}")
+        due_day = _require_int(pmt.get("due_day"), "payments.due_day", allow_none=True)
+        if due_day is not None and not 1 <= due_day <= 31:
+            raise ValueError(f"Snapshot payments.due_day must be 1..31, got {due_day}")
+        _require_date(pmt.get("due_date"), "payments.due_date", allow_none=True)
+
+    for tx in transactions:
+        _require_int(tx.get("amount_cents"), "transactions.amount_cents")
+        if tx.get("type", "Expense") not in _SNAPSHOT_TRANSACTION_TYPES:
+            raise ValueError(f"Snapshot transactions.type is unsupported: {tx.get('type')!r}")
+        _require_date(tx.get("date"), "transactions.date")
+
+    for occ in occurrences:
+        _require_date(occ.get("due_date"), "bill_occurrences.due_date")
+
+    declared_sum = sum(tx["amount_cents"] for tx in transactions)
     if declared_sum != declared_balance:
         raise ValueError(
             f"Snapshot is internally inconsistent: transactions sum to {declared_sum}, "
             f"declared balance is {declared_balance}"
         )
 
-    # A file backup is kept as a last-resort recovery aid for tooling. The transaction
-    # below is what guarantees atomicity.
+    income_ids = _id_map(incomes, "incomes")
+    payment_ids = _id_map(payments, "payments")
+    transaction_ids = _id_map(transactions, "transactions")
+    occurrence_ids = _id_map(occurrences, "bill_occurrences")
+
+    # A consistent snapshot is kept as a last-resort recovery aid for tooling. The
+    # transaction below is what guarantees atomicity.
     db_path = db_manager.DB_PATH
     backup_path = f"{db_path}.bak"
     if os.path.exists(db_path):
-        shutil.copy2(db_path, backup_path)
+        _sqlite_backup(db_path, backup_path)
 
     with db_manager.get_db_connection() as conn:
         with conn:  # one transaction: commit on success, roll back on any error
@@ -214,28 +370,63 @@ def restore_ledger_snapshot(snapshot: Dict[str, Any]) -> None:
             conn.execute("DELETE FROM payments")
             conn.execute("DELETE FROM income")
 
-            for inc in snapshot.get("incomes", []):
+            for inc in incomes:
                 conn.execute(
-                    "INSERT INTO income (id, name, amount, frequency, last_payday, next_payday) VALUES (?, ?, ?, ?, ?, ?)",
-                    (inc.get("id"), inc["name"], inc["amount_cents"], inc["frequency"], inc["last_payday"], inc["next_payday"]),
+                    "INSERT INTO income (id, name, amount, frequency, last_payday, next_payday, expected_amount) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        income_ids[str(inc["id"])],
+                        inc["name"],
+                        inc["amount_cents"],
+                        inc["frequency"],
+                        inc["last_payday"],
+                        inc["next_payday"],
+                        inc.get("expected_amount"),
+                    ),
                 )
 
-            for pmt in snapshot.get("payments", []):
+            for pmt in payments:
                 conn.execute(
-                    "INSERT INTO payments (id, name, amount, due_day, recurrence, due_date, is_auto_withdraw) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    (pmt.get("id"), pmt["name"], pmt["amount_cents"], pmt.get("due_day"), pmt["recurrence"], pmt.get("due_date"), 1 if pmt.get("is_auto_withdraw", True) else 0),
+                    "INSERT INTO payments (id, name, amount, due_day, recurrence, due_date, is_auto_withdraw) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        payment_ids[str(pmt["id"])],
+                        pmt["name"],
+                        pmt["amount_cents"],
+                        pmt.get("due_day"),
+                        pmt["recurrence"],
+                        pmt.get("due_date"),
+                        1 if pmt.get("is_auto_withdraw", True) else 0,
+                    ),
                 )
 
-            for tx in snapshot.get("transactions", []):
+            for tx in transactions:
                 conn.execute(
-                    "INSERT INTO transactions (id, amount, category, type, date, description) VALUES (?, ?, ?, ?, ?, ?)",
-                    (tx.get("id"), tx["amount_cents"], tx.get("category"), tx.get("type", "Expense"), tx["date"], tx.get("description")),
+                    "INSERT INTO transactions (id, amount, category, type, date, description) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        transaction_ids[str(tx["id"])],
+                        tx["amount_cents"],
+                        tx.get("category"),
+                        tx.get("type", "Expense"),
+                        tx["date"],
+                        tx.get("description"),
+                    ),
                 )
 
-            for occ in snapshot.get("bill_occurrences", []):
+            for occ in occurrences:
                 conn.execute(
-                    "INSERT INTO bill_occurrences (id, payment_id, due_date, paid, transaction_id) VALUES (?, ?, ?, ?, ?)",
-                    (occ.get("id"), occ["payment_id"], occ["due_date"], 1 if occ.get("paid") else 0, occ.get("transaction_id")),
+                    "INSERT INTO bill_occurrences (id, payment_id, due_date, paid, transaction_id) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (
+                        occurrence_ids[str(occ["id"])],
+                        _ref(payment_ids, occ.get("payment_id"), "bill_occurrences.payment_id"),
+                        occ["due_date"],
+                        1 if occ.get("paid") else 0,
+                        None
+                        if occ.get("transaction_id") is None
+                        else _ref(transaction_ids, occ.get("transaction_id"), "bill_occurrences.transaction_id"),
+                    ),
                 )
 
             ledger_sum = conn.execute(
