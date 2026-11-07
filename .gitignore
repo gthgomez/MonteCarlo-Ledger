@@ -64,5 +64,6 @@ AGENTS_README.md
 web/node_modules/
 web/.next/
 web/dist-test/
+web/test-results/
 *.tsbuildinfo
 *.bak

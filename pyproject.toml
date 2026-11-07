@@ -44,7 +44,9 @@ monte-carlo-ledger = "monte_carlo_ledger.cli:main"
 packages = ["monte_carlo_ledger", "monte_carlo_ledger.contract"]
 
 [tool.setuptools.package-data]
-monte_carlo_ledger = ["schema.sql"]
+# The canonical schemas are shipped inside the distribution so runtime validation works in a
+# real (non-editable) install. A test asserts these copies match the normative files.
+monte_carlo_ledger = ["schema.sql", "schemas/*.json"]
 
 [tool.pytest.ini_options]
 addopts = "-q"

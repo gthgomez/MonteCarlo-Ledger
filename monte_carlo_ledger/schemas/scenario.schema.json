@@ -1,0 +1,127 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://montecarlo.dev/schemas/scenario.schema.json",
+  "title": "MonteCarlo canonical scenario (contract 2.0)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["contract_version", "scenario_id", "as_of", "starting_balance_cents", "horizon_days", "events"],
+  "properties": {
+    "contract_version": { "enum": ["1.0", "1.1", "1.2", "2.0"] },
+    "scenario_id": { "type": "string", "minLength": 1 },
+    "as_of": { "type": "string", "format": "date" },
+    "starting_balance_cents": { "type": "integer" },
+    "horizon_days": { "type": "integer", "minimum": 0 },
+    "events": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/event" }
+    },
+    "recurrences": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/recurrence" }
+    },
+    "occurrence_exclusions": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/occurrence_exclusion" }
+    },
+    "debt_strategy": { "enum": ["snowball", "avalanche"] },
+    "extra_monthly_payment_cents": { "type": "integer", "minimum": 0 },
+    "liabilities": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/liability" }
+    },
+    "simulation": { "$ref": "#/$defs/simulation" }
+  },
+  "$defs": {
+    "liability": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "balance_cents", "apr_basis_points", "min_payment_cents"],
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "balance_cents": { "type": "integer", "minimum": 0 },
+        "apr_basis_points": { "type": "integer", "minimum": 0 },
+        "min_payment_cents": { "type": "integer", "minimum": 0 },
+        "kind": { "enum": ["installment", "revolving"] },
+        "min_payment_percent_bps": { "type": "integer", "minimum": 0 },
+        "min_payment_floor_cents": { "type": "integer", "minimum": 0 },
+        "due_day_of_month": { "type": "integer", "minimum": 1, "maximum": 31 }
+      }
+    },
+    "occurrence_exclusion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["recurrence_id", "date"],
+      "properties": {
+        "recurrence_id": { "type": "string" },
+        "date": { "type": "string", "format": "date" }
+      }
+    },
+    "expense_category_range": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["category", "min", "max"],
+      "properties": {
+        "category": { "type": "string" },
+        "min": { "type": "integer" },
+        "max": { "type": "integer" }
+      }
+    },
+    "recurrence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "type", "amount_cents", "frequency", "start_date"],
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "category": { "type": "string" },
+        "type": { "enum": ["income", "expense"] },
+        "amount_cents": { "type": "integer" },
+        "frequency": {
+          "enum": ["weekly", "biweekly", "semimonthly", "monthly", "bimonthly", "quarterly", "semiannually", "annually", "onetime"]
+        },
+        "start_date": { "type": "string", "format": "date" },
+        "end_date": { "type": "string", "format": "date" },
+        "anchor_day": { "type": "integer", "minimum": 1, "maximum": 31 },
+        "expected_amount_cents": { "type": "integer" }
+      }
+    },
+    "event": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["date", "amount_cents", "type"],
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "category": { "type": "string" },
+        "date": { "type": "string", "format": "date" },
+        "amount_cents": { "type": "integer" },
+        "type": { "enum": ["income", "expense", "adjustment"] },
+        "sequence": { "type": "integer" }
+      }
+    },
+    "simulation": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "runs": { "type": "integer", "minimum": 1 },
+        "seed": { "type": "integer", "minimum": 0 },
+        "income_variation_min": { "type": "integer" },
+        "income_variation_max": { "type": "integer" },
+        "expense_variation_min": { "type": "integer" },
+        "expense_variation_max": { "type": "integer" },
+        "expense_category_variation": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/expense_category_range" }
+        },
+        "surprise_probability_ppm": { "type": "integer", "minimum": 0, "maximum": 1000000 },
+        "surprise_check_interval_days": { "type": "integer", "minimum": 1 },
+        "surprise_amount_min": { "type": "integer", "minimum": 0 },
+        "surprise_amount_max": { "type": "integer", "minimum": 0 },
+        "quantile_num": { "type": "integer", "minimum": 1 },
+        "quantile_den": { "type": "integer", "minimum": 1 },
+        "reserve_cents": { "type": "integer", "minimum": 0 }
+      }
+    }
+  }
+}

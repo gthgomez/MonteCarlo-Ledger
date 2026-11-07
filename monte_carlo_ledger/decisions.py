@@ -355,7 +355,9 @@ def validate_scenario(scenario: Dict[str, Any]) -> Dict[str, Any]:
         })
         return verdict()
 
-    schema_path = pathlib.Path(__file__).resolve().parents[1] / "schemas" / "scenario.schema.json"
+    # Load the schema shipped inside the package. Resolving it relative to the repository root
+    # (parents[1]) works only in a source checkout; a real wheel has no `schemas/` there.
+    schema_path = pathlib.Path(__file__).resolve().parent / "schemas" / "scenario.schema.json"
     schema_checked = True
     try:
         schema = json.loads(schema_path.read_text())

@@ -51,3 +51,59 @@ test.describe("forced engine failure fails closed", () => {
     await expect(page.getByText("Safe to Spend (P10)")).toBeVisible();
   });
 });
+
+test.describe("decision studio journeys", () => {
+  test("purchase scenario is labelled as a model estimate, never a guarantee", async ({ page }) => {
+    await page.goto("/");
+    await expect(page.getByText(/^Purchase Amount:/)).toBeVisible();
+    await page.locator('input[type="range"]').first().press("End");
+    await expect(page.getByText(/^Purchase Amount: \$2,500/)).toBeVisible();
+    // The old copy claimed the purchase was safe "without risking negative balance".
+    await expect(page.getByText(/without risking negative balance/i)).toHaveCount(0);
+    await expect(page.getByText(/in this simulation/i).first()).toBeVisible();
+    await expect(page.getByText("Overdraft Risk:")).toBeVisible();
+  });
+
+  test("late paycheck tab computes payroll-variance impact", async ({ page }) => {
+    await page.goto("/");
+    await page.getByRole("button", { name: /Late Paycheck/ }).click();
+    await expect(page.getByText("Fragility Under Payroll Variance")).toBeVisible();
+    await expect(page.getByText("Overdraft Risk:")).toBeVisible();
+    await expect(page.getByText("Calculation Failed")).toHaveCount(0);
+  });
+
+  test("debt tab computes payoff and states the cash-flow caveat", async ({ page }) => {
+    await page.goto("/");
+    await page.getByRole("button", { name: /Debt Snowball vs Avalanche/ }).click();
+    await expect(page.getByText("Payoff Strategy")).toBeVisible();
+    await expect(page.getByText("Months to Payoff")).toBeVisible();
+    await expect(page.getByText("Total Interest Paid")).toBeVisible();
+    // Amortization must never be presented as affordability.
+    await expect(
+      page.getByText(/not automatically included in the cash-flow forecast/i)
+    ).toBeVisible();
+    await page.getByRole("button", { name: /Avalanche \(APR\)/ }).click();
+    await expect(page.getByText("Months to Payoff")).toBeVisible();
+    await expect(page.getByText(/Calculation Failed|UNKNOWN_ERROR/)).toHaveCount(0);
+  });
+});
+
+test.describe("ledger editing", () => {
+  test("adding a recurring bill updates the ledger and keeps a valid forecast", async ({ page }) => {
+    await page.goto("/");
+    await expect(page.getByText("Safe to Spend (P10)")).toBeVisible();
+
+    const billForm = page
+      .locator("form")
+      .filter({ has: page.getByPlaceholder("e.g. Electric Bill, Rent, Netflix") });
+    await page.getByPlaceholder("e.g. Electric Bill, Rent, Netflix").fill("Demo Gym");
+    const numbers = billForm.locator('input[type="number"]');
+    await numbers.nth(0).fill("45");
+    await numbers.nth(1).fill("12");
+    await billForm.getByRole("button", { name: /Add Recurring Bill/ }).click();
+
+    await expect(page.getByText("Demo Gym")).toBeVisible();
+    await expect(page.getByText("Safe to Spend (P10)")).toBeVisible();
+    await expect(page.getByText("Calculation Failed")).toHaveCount(0);
+  });
+});
