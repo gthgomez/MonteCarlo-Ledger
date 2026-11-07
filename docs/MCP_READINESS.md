@@ -54,10 +54,11 @@ engine output (validated by `schemas/result.schema.json`):
   trustworthy spending capacity. `financial_snapshot()` carries `source`,
   `contract_version`, `read_only` and `hypothetical` directly.
 
-Every operation derives the calculation **and** this provenance from one
-`db_manager.read_ledger_view()` SQLite read transaction. A ledger edit made while a
-decision is running therefore cannot make the numbers and the provenance describe
-different revisions.
+Every operation derives the calculation **and** this provenance from one SQLite
+read transaction: `db_manager.read_ledger_view()` for decisions and
+`db_manager.read_ledger_metadata()` for `financial_snapshot()`. A ledger edit made
+while a decision is running therefore cannot make the numbers and the provenance
+describe different revisions.
 
 Money is **integer cents** (MCD-0007 rounding, MCD-0020 overflow-is-error), probabilities are **ppm**
 (MCD-0004), quantiles use nearest-rank (MCD-0005), and time is **explicit `as_of` date-only**
