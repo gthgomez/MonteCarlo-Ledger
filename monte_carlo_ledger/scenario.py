@@ -54,10 +54,12 @@ def _income_recurrence(inc: db_manager.IncomeSource) -> Dict[str, Any]:
     return rec
 
 
-def _income_events(as_of: date, window_end: date) -> List[Dict[str, Any]]:
+def _income_events_from(
+    incomes: List[db_manager.IncomeSource], as_of: date, window_end: date
+) -> List[Dict[str, Any]]:
     """Materialize in-window income occurrences with a stable anchor (MCD-0002, MCD-0022)."""
     events: List[Dict[str, Any]] = []
-    for inc in db_manager.get_all_income():
+    for inc in incomes:
         dates = recurrence_dates(_income_recurrence(inc), window_end)
         first_in_window = True
         for occurrence in dates:
@@ -95,26 +97,23 @@ def _bill_events_rw(as_of: date, window_end: date) -> List[Dict[str, Any]]:
     return events
 
 
-def _bill_events_readonly(as_of: date, window_end: date) -> List[Dict[str, Any]]:
-    """Project in-window unpaid bills in-memory (no writes), half-open ``[as_of, window_end)``."""
-    payments = db_manager.get_all_payments()
+def _bill_events_from(
+    payments: List[db_manager.Payment],
+    paid_occurrences: set,
+    as_of: date,
+    window_end: date,
+) -> List[Dict[str, Any]]:
+    """Project in-window unpaid bills in-memory, half-open ``[as_of, window_end)``."""
     pmt_dicts = [dict(vars(p)) for p in payments]
     schedule = budget_engine.get_upcoming_schedule(
         pmt_dicts, as_of.isoformat(), window_end.isoformat()
     )
-    with db_manager.get_db_connection() as conn:
-        paid = conn.execute(
-            "SELECT payment_id, due_date FROM bill_occurrences "
-            "WHERE paid = 1 AND due_date >= ? AND due_date <= ?",
-            (as_of.isoformat(), window_end.isoformat()),
-        ).fetchall()
-    paid_set = {(r["payment_id"], r["due_date"]) for r in paid}
     hi = window_end.isoformat()
     events: List[Dict[str, Any]] = []
     for item in schedule:
         if item["date"] >= hi:  # enforce half-open even though the helper is inclusive
             continue
-        if (item["payment_id"], item["date"]) in paid_set:
+        if (item["payment_id"], item["date"]) in paid_occurrences:
             continue
         events.append({
             "date": item["date"],
@@ -123,6 +122,14 @@ def _bill_events_readonly(as_of: date, window_end: date) -> List[Dict[str, Any]]
             "name": item["name"],
         })
     return events
+
+
+def _bill_events_readonly(as_of: date, window_end: date) -> List[Dict[str, Any]]:
+    """Standalone readonly projection (opens its own consistent view)."""
+    view = db_manager.read_ledger_view(as_of.isoformat(), window_end.isoformat())
+    return _bill_events_from(
+        view["payments"], view["paid_occurrences"], as_of, window_end
+    )
 
 
 def _bill_events(as_of: date, window_end: date, read_only: bool) -> List[Dict[str, Any]]:
@@ -134,16 +141,31 @@ def build_scenario(
     horizon_days: int = 90,
     include_simulation: Optional[Dict[str, Any]] = None,
     read_only: bool = False,
+    ledger: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """Return a canonical scenario for the given explicit ``as_of`` (YYYY-MM-DD)."""
+    """Return a canonical scenario for the given explicit ``as_of`` (YYYY-MM-DD).
+
+    When ``ledger`` is supplied (a ``db_manager.read_ledger_view`` result), the whole
+    scenario is derived from that one consistent snapshot rather than reopening the
+    database several times.
+    """
     start = date.fromisoformat(as_of)
     window_end = start + timedelta(days=horizon_days)
-    events = _bill_events(start, window_end, read_only) + _income_events(start, window_end)
+    if ledger is not None:
+        events = _bill_events_from(
+            ledger["payments"], ledger["paid_occurrences"], start, window_end
+        ) + _income_events_from(ledger["incomes"], start, window_end)
+        starting_balance = ledger["ledger_balance_cents"]
+    else:
+        events = _bill_events(start, window_end, read_only) + _income_events_from(
+            db_manager.get_all_income(), start, window_end
+        )
+        starting_balance = db_manager.get_ledger_balance()
     scenario: Dict[str, Any] = {
         "contract_version": CONTRACT_VERSION,
         "scenario_id": f"db-{as_of}-{horizon_days}",
         "as_of": as_of,
-        "starting_balance_cents": db_manager.get_ledger_balance(),
+        "starting_balance_cents": starting_balance,
         "horizon_days": horizon_days,
         "events": events,
     }

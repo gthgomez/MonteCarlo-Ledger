@@ -503,6 +503,86 @@ def get_ledger_stats() -> Dict[str, Any]:
     }
 
 
+def read_ledger_view(start_date: str, end_date: str) -> Dict[str, Any]:
+    """Read every input a decision needs from one SQLite read transaction.
+
+    A decision used to open several connections (income, payments, balance, stats),
+    so a concurrent edit could make the calculation and its provenance describe
+    different revisions. This returns a single consistent view instead.
+    """
+    with get_db_connection() as conn:
+        conn.execute("BEGIN DEFERRED")
+        income_rows = conn.execute("SELECT * FROM income ORDER BY id ASC").fetchall()
+        payment_rows = conn.execute("SELECT * FROM payments ORDER BY name ASC").fetchall()
+        paid_rows = conn.execute(
+            "SELECT payment_id, due_date FROM bill_occurrences "
+            "WHERE paid = 1 AND due_date >= ? AND due_date <= ?",
+            (start_date, end_date),
+        ).fetchall()
+        ledger_sum = conn.execute("SELECT SUM(amount) FROM transactions").fetchone()[0]
+        stored_row = conn.execute(
+            "SELECT value FROM settings WHERE key = 'current_balance'"
+        ).fetchone()
+        bank_row = conn.execute(
+            "SELECT value FROM settings WHERE key = 'bank_balance_cents'"
+        ).fetchone()
+        stats_row = conn.execute(
+            "SELECT COUNT(*) AS transaction_count, MAX(date) AS newest_date FROM transactions"
+        ).fetchone()
+        income_count = conn.execute("SELECT COUNT(*) AS n FROM income").fetchone()["n"]
+        payment_count = conn.execute("SELECT COUNT(*) AS n FROM payments").fetchone()["n"]
+        conn.execute("COMMIT")
+
+    incomes = [
+        IncomeSource(
+            id=r["id"],
+            name=r["name"],
+            amount=_to_int_strict(r["amount"]),
+            frequency=r["frequency"],
+            last_payday=r["last_payday"],
+            next_payday=r["next_payday"],
+            expected_amount=(
+                _to_int_strict(r["expected_amount"])
+                if "expected_amount" in r.keys() and r["expected_amount"] is not None
+                else None
+            ),
+        )
+        for r in income_rows
+    ]
+    payments = [
+        Payment(
+            id=r["id"],
+            name=r["name"],
+            amount=_to_int_strict(r["amount"]),
+            recurrence=r["recurrence"],
+            due_day=r["due_day"],
+            due_date=r["due_date"],
+            is_auto_withdraw=bool(r["is_auto_withdraw"]),
+        )
+        for r in payment_rows
+    ]
+    ledger_balance = _to_int_strict(ledger_sum)
+    stored_balance = _to_int_strict(stored_row["value"]) if stored_row else 0
+    return {
+        "incomes": incomes,
+        "payments": payments,
+        "paid_occurrences": {(r["payment_id"], r["due_date"]) for r in paid_rows},
+        "ledger_balance_cents": ledger_balance,
+        "stored_balance_cents": stored_balance,
+        "bank_balance_cents": (
+            _to_int_strict(bank_row["value"])
+            if bank_row is not None and bank_row["value"] is not None
+            else None
+        ),
+        "counts": {
+            "transaction_count": int(stats_row["transaction_count"]),
+            "newest_date": stats_row["newest_date"],
+            "income_source_count": int(income_count),
+            "payment_count": int(payment_count),
+        },
+    }
+
+
 def get_transaction_history(limit: int = 20) -> List[Transaction]:
     with get_db_connection() as conn:
         rows = conn.execute('SELECT * FROM transactions ORDER BY date DESC, id DESC LIMIT ?', (limit,)).fetchall()

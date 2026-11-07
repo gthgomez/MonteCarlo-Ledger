@@ -10,11 +10,13 @@ from . import db_manager, decisions
 from .contract import ContractError, run_scenario
 from .scenario import build_scenario
 
-# A deliberately small ceiling for the HTTP boundary. Programmatic callers may use
-# larger values; an unauthenticated local HTTP client should not be able to pin a CPU.
-_MAX_RUNS = 10_000
-_MAX_QUANTILE = 1_000
-_MAX_RESERVE_CENTS = 10**12
+# Central limits from the decision layer. The HTTP boundary uses the same values as
+# the programmatic/MCP-ready surface, so an endpoint-specific gap cannot reappear.
+_MAX_RUNS = decisions.MAX_RUNS
+_MAX_QUANTILE = decisions.MAX_QUANTILE
+_MAX_RESERVE_CENTS = decisions.MAX_RESERVE_CENTS
+_MAX_HORIZON_DAYS = decisions.MAX_HORIZON_DAYS
+_MAX_AMOUNT_CENTS = decisions.MAX_AMOUNT_CENTS
 
 
 @asynccontextmanager
@@ -157,9 +159,9 @@ def get_safe_to_spend(
     as_of: Optional[str] = Query(
         None, description="Simulation date, YYYY-MM-DD. Defaults to today at this boundary."
     ),
-    quantile_num: int = Query(1, ge=1),
-    quantile_den: int = Query(10, ge=1),
-    reserve_cents: int = Query(0, ge=0),
+    quantile_num: int = Query(1, ge=1, le=_MAX_QUANTILE),
+    quantile_den: int = Query(10, ge=1, le=_MAX_QUANTILE),
+    reserve_cents: int = Query(0, ge=0, le=_MAX_RESERVE_CENTS),
 ):
     """Quantile-based safe-to-spend over the given horizon (MCD-0008)."""
     _require_sync()
@@ -188,7 +190,7 @@ def get_safe_to_spend(
 @app.get("/v1/forecast")
 def v1_forecast(
     as_of: str = Query(...),
-    horizon_days: int = Query(90, ge=0, le=3650),
+    horizon_days: int = Query(90, ge=0, le=_MAX_HORIZON_DAYS),
 ):
     return decisions.forecast(_resolve_as_of(as_of), horizon_days)
 
@@ -196,7 +198,7 @@ def v1_forecast(
 @app.get("/v1/risk")
 def v1_risk(
     as_of: str = Query(...),
-    horizon_days: int = Query(90, ge=0, le=3650),
+    horizon_days: int = Query(90, ge=0, le=_MAX_HORIZON_DAYS),
     seed: int = Query(42, ge=0),
     runs: int = Query(500, ge=1, le=_MAX_RUNS),
 ):
@@ -206,12 +208,12 @@ def v1_risk(
 @app.get("/v1/safe-to-spend")
 def v1_safe_to_spend(
     as_of: str = Query(...),
-    horizon_days: int = Query(90, ge=0, le=3650),
+    horizon_days: int = Query(90, ge=0, le=_MAX_HORIZON_DAYS),
     seed: int = Query(42, ge=0),
-    runs: int = Query(500, ge=1),
-    quantile_num: int = Query(1, ge=1),
-    quantile_den: int = Query(10, ge=1),
-    reserve_cents: int = Query(0, ge=0),
+    runs: int = Query(500, ge=1, le=_MAX_RUNS),
+    quantile_num: int = Query(1, ge=1, le=_MAX_QUANTILE),
+    quantile_den: int = Query(10, ge=1, le=_MAX_QUANTILE),
+    reserve_cents: int = Query(0, ge=0, le=_MAX_RESERVE_CENTS),
 ):
     return decisions.risk(_resolve_as_of(as_of), horizon_days, {
         "seed": seed,
@@ -225,7 +227,7 @@ def v1_safe_to_spend(
 @app.get("/v1/overdraft")
 def v1_overdraft(
     as_of: str = Query(...),
-    horizon_days: int = Query(90, ge=0, le=3650),
+    horizon_days: int = Query(90, ge=0, le=_MAX_HORIZON_DAYS),
     seed: int = Query(42, ge=0),
     runs: int = Query(500, ge=1, le=_MAX_RUNS),
 ):
@@ -234,10 +236,10 @@ def v1_overdraft(
 
 @app.get("/v1/simulate-purchase")
 def v1_simulate_purchase(
-    amount_cents: int = Query(..., ge=1),
+    amount_cents: int = Query(..., ge=1, le=_MAX_AMOUNT_CENTS),
     purchase_date: str = Query(...),
     as_of: str = Query(...),
-    horizon_days: int = Query(90, ge=0, le=3650),
+    horizon_days: int = Query(90, ge=0, le=_MAX_HORIZON_DAYS),
     seed: int = Query(42, ge=0),
     runs: int = Query(500, ge=1, le=_MAX_RUNS),
 ):
