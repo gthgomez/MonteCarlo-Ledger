@@ -11,6 +11,7 @@ import copy
 from datetime import date, timedelta
 from typing import Any, Dict, List, Optional
 
+from . import db_manager
 from . import scenario as scenario_mod
 from .contract import ContractError, run_scenario
 from .contract.engine import SUPPORTED_CONTRACT_VERSIONS
@@ -67,10 +68,40 @@ def _build(
     )
 
 
+def _ledger_status() -> Dict[str, Any]:
+    """Provenance for every decision result: source, consistency and reconciliation.
+
+    The forecast itself always uses the authoritative transaction sum; this block
+    tells a caller whether the stored cache and the optional bank balance agree, so
+    an unexplained difference is visible rather than presented as spendable cash.
+    """
+    is_sync, ledger, stored = db_manager.validate_balance_consistency()
+    with db_manager.get_db_connection() as conn:
+        row = conn.execute(
+            "SELECT value FROM settings WHERE key = 'bank_balance_cents'"
+        ).fetchone()
+    bank = int(row["value"]) if row and row["value"] is not None else None
+    return {
+        "source": "local sqlite ledger",
+        "read_only": True,
+        "balance_consistent": bool(is_sync),
+        "ledger_balance_cents": ledger,
+        "stored_balance_cents": stored,
+        "bank_balance_cents": bank,
+        "reconciled_with_bank": bool(bank is not None and bank == ledger),
+    }
+
+
+def _attach_ledger(result: Dict[str, Any]) -> Dict[str, Any]:
+    result = dict(result)
+    result["ledger"] = _ledger_status()
+    return result
+
+
 def forecast(as_of: str, horizon_days: int = DEFAULT_HORIZON_DAYS) -> Dict[str, Any]:
     """Deterministic forecast only (no simulation)."""
     _require_date(as_of, "as_of")
-    return run_scenario(_build(as_of, horizon_days))
+    return _attach_ledger(run_scenario(_build(as_of, horizon_days)))
 
 
 def risk(
@@ -80,7 +111,7 @@ def risk(
 ) -> Dict[str, Any]:
     """Forecast + Monte Carlo risk block."""
     _require_date(as_of, "as_of")
-    return run_scenario(_build(as_of, horizon_days, _sim(sim)))
+    return _attach_ledger(run_scenario(_build(as_of, horizon_days, _sim(sim))))
 
 
 def _shift_first_income(scenario: Dict[str, Any], days: int) -> None:
@@ -140,6 +171,7 @@ def simulate_purchase(
                 - baseline["risk"]["safe_to_spend_cents"]
             ),
         },
+        "ledger": _ledger_status(),
     }
 
 
@@ -171,6 +203,7 @@ def simulate_paycheck_delay(
                 - baseline["risk"]["negative_balance_probability_ppm"]
             ),
         },
+        "ledger": _ledger_status(),
     }
 
 

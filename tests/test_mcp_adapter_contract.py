@@ -216,6 +216,32 @@ class MCPAdapterContractTests(unittest.TestCase):
         self.assertEqual(snap["counts"]["payments"], 2)
         self.assertIn("data_source", snap)
 
+    def test_decision_results_expose_ledger_provenance_and_surface_desync(self):
+        opening = db_manager.get_ledger_balance()
+        good = decisions.forecast(AS_OF, 30)
+        ledger = good["ledger"]
+        assert ledger["source"] == "local sqlite ledger"
+        assert ledger["read_only"] is True
+        assert ledger["balance_consistent"] is True
+        assert ledger["ledger_balance_cents"] == opening
+        assert ledger["stored_balance_cents"] == opening
+        assert ledger["reconciled_with_bank"] is False
+
+        # A stale cache is surfaced without changing the authoritative forecast.
+        with db_manager.get_db_connection() as conn:
+            with conn:
+                conn.execute(
+                    "UPDATE settings SET value = ? WHERE key = 'current_balance'",
+                    (opening - 1,),
+                )
+        stale = decisions.forecast(AS_OF, 30)
+        assert stale["ledger"]["balance_consistent"] is False
+        assert stale["forecast"] == good["forecast"]
+
+        # Every hypothetical decision carries the same provenance envelope.
+        purchase = decisions.simulate_purchase(65_000, "2026-11-10", AS_OF, 30, {"runs": 20})
+        assert purchase["ledger"]["balance_consistent"] is False
+
     def test_all_operations_are_read_only(self):
         before = self._txn_count()
         before_occurrences = self._occurrence_count()

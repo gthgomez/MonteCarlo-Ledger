@@ -52,7 +52,8 @@ class TestRefactorVerification(unittest.TestCase):
         built = scenario.build_scenario(today_str, 30, read_only=True)
         result = run_scenario(built)
         self.assertEqual(result["forecast"]["minimum_balance_cents"], 100000)
-        self.assertEqual(decisions.forecast(today_str, 30), result)
+        decision = decisions.forecast(today_str, 30)
+        self.assertEqual({k: v for k, v in decision.items() if k != "ledger"}, result)
 
         response = self.api_client.get("/safe-to-spend?days_ahead=30")
         self.assertEqual(response.status_code, 200)

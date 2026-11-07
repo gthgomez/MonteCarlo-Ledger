@@ -38,7 +38,9 @@ def test_scenario_is_explicit_and_deterministic(seeded):
 
 
 def test_forecast_matches_contract_directly(seeded):
-    assert decisions.forecast(AS_OF, 90) == run_scenario(
+    # The decision op adds a provenance envelope; the canonical result must match.
+    decision = decisions.forecast(AS_OF, 90)
+    assert {k: v for k, v in decision.items() if k != "ledger"} == run_scenario(
         scenario.build_scenario(AS_OF, 90, read_only=True)
     )
 
