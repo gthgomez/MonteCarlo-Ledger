@@ -5,7 +5,7 @@
    # warning naming the unsynchronised scenario ids (see docs/campaign/MC-07-*.md).
    ANDROID_REPO: gthgomez/MonteCarloLedger-Android
 -  ANDROID_PIN_SHA: 6cadf72c50ca6466f342a7263bacacf9145b28d3
-+  ANDROID_PIN_SHA: 3dddf8804cf9cfb87dad375b0b1eb49018410b30
++  ANDROID_PIN_SHA: 1e8ed890d9b2509f4f7095cd5e0fb944b3c8b7c0
  
  jobs:
    # Fast, always-on path: Python against the checked-in, hash-pinned Kotlin baseline. Runs on

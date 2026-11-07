@@ -45,10 +45,11 @@ engine output (validated by `schemas/result.schema.json`):
   `simulate_purchase`, `simulate_paycheck_delay`, `compare_scenarios`,
   `compare_debt_strategies`): `source`, `contract_version`, `as_of`, `horizon_days`,
   `read_only`, `hypothetical`, `balance_consistent`, `ledger_balance_cents`,
-  `stored_balance_cents`, `cached_balance_cents`, `bank_balance_cents` (nullable),
-  `reconciled_with_bank`, `snapshot` (`transaction_count`, `income_source_count`,
-  `payment_count`, `newest_transaction_date`), `model` (`basis`, `assumptions`) and,
-  where applicable, `simulation` (`runs`, `seed`). This is provenance, not a financial
+  `starting_balance_cents` (authoritative balance as of `as_of`), `stored_balance_cents`,
+  `cached_balance_cents`, `bank_balance_cents` (nullable), `reconciled_with_bank`,
+  `overdue_obligations` (`count`, `total_cents`, `earliest_date`), `snapshot`
+  (`transaction_count`, `income_source_count`, `payment_count`, `newest_transaction_date`),
+  `model` (`basis`, `assumptions`) and, where applicable, `simulation` (`runs`, `seed`). This is provenance, not a financial
   input: the forecast always uses the authoritative transaction sum, and an
   unexplained cache/bank difference is surfaced so an adapter does not present it as
   trustworthy spending capacity. `financial_snapshot()` carries `source`,
@@ -70,7 +71,7 @@ yield bit-for-bit identical output; the adapter contract tests assert this.
 An operation either returns a canonical result or raises `monte_carlo_ledger.contract.ContractError`
 with a stable machine-readable `code` (`SCHEMA_INVALID`, `MISSING_AS_OF`, `INVALID_DATE`,
 `INVALID_AMOUNT`, `INVALID_HORIZON`, `INVALID_RUNS`, `INVALID_SEED`, `INVALID_QUANTILE`,
-`INVALID_EVENT_TYPE`, `EVENT_OUT_OF_HORIZON`, `MONEY_OVERFLOW`, ...). There is **no** code
+`INVALID_EVENT_TYPE`, `EVENT_OUT_OF_HORIZON`, `NO_INCOME`, `MONEY_OVERFLOW`, ...). There is **no** code
 path that converts a failure into a zero, a "0% risk", or a default. An adapter MUST map exceptions
 to tool errors (`isError: true`) carrying `err.code` — never swallow them into a numeric result.
 
@@ -283,3 +284,72 @@ python tools/conformance/cross_engine.py --strict \
   inside this bound.
 - The local HTTP API's loopback guard cannot distinguish a same-host reverse proxy.
   Prefer in-process operation calls for a local MCP adapter.
+
+
+## 9. Qualification evidence — campaign 4 (2026-11-07, financial correctness)
+
+Executed and merged on the default branches (see the campaign report for SHAs and PRs).
+
+### Accounting integrity
+
+- **One transaction pays one bill.** Snapshot/import validation and a SQLite partial unique
+  index reject a transaction linked to more than one paid occurrence; the linked transaction must
+  be an `Expense` whose absolute amount equals the bill. Migration 11 detaches pre-existing
+  duplicate links (preserving rows and reporting the count) before creating the index.
+- **Moved and skipped bills.** `bill_occurrences.original_due_date` / `is_user_modified` mirror the
+  Android model. A moved bill is projected once at its moved date, the original slot is never
+  regenerated, later months keep the recurrence anchor, and a bill moved outside the window is not
+  projected. Reads and the write path share one projection rule. Paid/skipped rows suppress the
+  scheduled slot exactly once.
+- **`as_of` cash.** `read_ledger_view().starting_balance_cents` sums only transactions dated on or
+  before `as_of`; later transactions become events at their date. A historical forecast therefore
+  cannot count future cash as opening balance. Python and the Web adapter implement the same rule.
+- **Overdue obligations** are reported in `ledger.overdue_obligations` and the Web dashboard banner
+  but are not injected into the canonical forecast window (MCD-0014 preserved).
+
+### Mathematical boundaries
+
+- Canonical money inputs must be exact integers: booleans, floats, numeric strings and `null` are
+  `INVALID_AMOUNT`; values outside signed 64-bit cents are `MONEY_OVERFLOW`. No `int(...)` coercion
+  remains on a canonical boundary.
+- `checked_sub` plus overflow-checked percent/basis-point scaling cover safe-to-spend, simulation
+  amounts and scenario deltas. Debt interest/payment aggregates and schedule rows are overflow-checked
+  in Python, TypeScript and Kotlin.
+- Simulation parameters are validated in all three engines: exact integer types, run/interval/quantile
+  bounds, seed and ppm ranges, ordered variation and surprise ranges, unknown fields rejected.
+- A purchase outside `[as_of, as_of + horizon_days)` is `EVENT_OUT_OF_HORIZON`, never an unchanged
+  baseline reported as success. A paycheck delay selects the earliest scheduled date (scenario order
+  breaks ties), rejects zero delays and raises `NO_INCOME` when nothing is modeled.
+- Contract 2.0 revolving semantics are preserved and documented: `min_payment_cents` is ignored for
+  revolving liabilities; a positive balance with neither percent nor floor does not converge.
+  `compare_debt_strategies()` surfaces this as `model_warnings` rather than redefining the math.
+  `due_day_of_month` is range-validated but does not affect the amortization schedule in 2.0.
+
+### Persistence and synchronization
+
+- Web ledger + vault id + sync ancestry are written as one rollback-safe bundle: a failed write at
+  any boundary restores the prior values, so no success is reported for a non-durable state.
+- Post-pull ancestry fingerprints the **local canonical export**, so Python's string-id remapping no
+  longer produces false "unsynchronized" warnings; real local edits are still detected.
+- Existing protections (strict snapshots, non-destructive pull, compatibility preflight, CAS) are
+  retained and re-tested.
+
+### Android model coherence
+
+- The daily fan chart is now computed from the same canonical simulation paths as the headline risk
+  (`ContractRunner.runWithDaily` / `ContractSimulation.simulateWithDaily`); it is no longer an
+  overlaid native distribution. Surprises are generated for empty schedules exactly as the contract
+  specifies.
+- Native fallback arithmetic uses checked add/subtract/negate and raises `MoneyArithmeticOverflow`
+  instead of wrapping. Native metrics are computed only when native mode is actually used.
+- Calibration and the out-of-sample backtest use only realized, complete months; future-dated rows
+  and the incomplete current month are excluded.
+
+### Known limitations
+
+- Live Turso/libSQL durability remains BLOCKED (no provider credentials); route-level and in-memory
+  vault tests pass.
+- Physical-device instrumentation and signed release remain NOT RUN; CI emulator tests execute the
+  instrumented suite on the PR head.
+- GitHub workflow installation remains BLOCKED by the credential's missing `workflow` scope;
+  installable assets stay under `docs/ci/`.
