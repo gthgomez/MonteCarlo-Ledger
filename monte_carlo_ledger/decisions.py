@@ -23,7 +23,7 @@ DEFAULT_SIM: Dict[str, int] = {"runs": 500, "seed": 42}
 # Central execution bounds shared by the MCP-ready surface and the local HTTP API.
 # Programmatic callers get the same protection as unauthenticated HTTP clients.
 MAX_HORIZON_DAYS = 3650
-MAX_RUNS = 100_000
+MAX_RUNS = 10_000
 MAX_QUANTILE = 1_000
 MAX_RESERVE_CENTS = 10**12
 MAX_AMOUNT_CENTS = 10**12
