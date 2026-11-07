@@ -17,6 +17,7 @@
     "src/contract/*.ts",
     "src/lib/__tests__/**/*.ts",
     "src/lib/scenario-builder.ts",
+    "src/lib/overdue.ts",
     "src/lib/types.ts",
     "src/lib/validate.ts",
     "src/lib/turso.ts",

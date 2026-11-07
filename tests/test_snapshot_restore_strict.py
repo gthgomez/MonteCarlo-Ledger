@@ -24,7 +24,7 @@ def _db_state():
             "income": "id, name, amount, frequency, last_payday, next_payday, expected_amount",
             "payments": "id, name, amount, due_day, recurrence, due_date, is_auto_withdraw",
             "transactions": "id, amount, category, type, date, description",
-            "bill_occurrences": "id, payment_id, due_date, paid, transaction_id",
+            "bill_occurrences": "id, payment_id, due_date, paid, transaction_id, original_due_date, is_user_modified",
         }.items():
             rows = conn.execute(f"SELECT {columns} FROM {table} ORDER BY id").fetchall()
             state[table] = [dict(row) for row in rows]
@@ -56,12 +56,12 @@ def populated_db(tmp_path, monkeypatch):
     with db_manager.get_db_connection() as conn:
         with conn:
             conn.execute(
-                "INSERT INTO bill_occurrences (payment_id, due_date, paid, transaction_id) "
-                "VALUES (1, '2026-12-01', 1, 1)"
+                "INSERT INTO bill_occurrences (payment_id, due_date, paid, transaction_id, original_due_date, is_user_modified) "
+                "VALUES (1, '2026-12-01', 1, 2, '2026-12-01', 0)"
             )
             conn.execute(
-                "INSERT INTO bill_occurrences (payment_id, due_date, paid, transaction_id) "
-                "VALUES (2, '2026-12-20', 0, NULL)"
+                "INSERT INTO bill_occurrences (payment_id, due_date, paid, transaction_id, original_due_date, is_user_modified) "
+                "VALUES (2, '2026-12-20', 0, NULL, '2026-12-20', 0)"
             )
     return db_path
 

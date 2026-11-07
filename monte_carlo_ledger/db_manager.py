@@ -74,6 +74,8 @@ class BillOccurrence:
     transaction_id: Optional[int] = None
     name: Optional[str] = None # Joint field
     amount: Optional[int] = None # Joint field
+    original_due_date: Optional[str] = None # Scheduled slot; preserved when moved
+    is_user_modified: bool = False
 
 @contextmanager
 def get_db_connection():
@@ -120,6 +122,8 @@ def init_db():
             _migrate_v8_to_v9(conn)
         if version < 10:
             _migrate_v9_to_v10(conn)
+        if version < 11:
+            _migrate_v10_to_v11(conn)
         
 
 def _migrate_v4_to_v5(conn: sqlite3.Connection):
@@ -245,6 +249,64 @@ def _migrate_v9_to_v10(conn: sqlite3.Connection):
         conn.execute("CREATE INDEX IF NOT EXISTS idx_occurrences_paid ON bill_occurrences(paid)")
         conn.execute("PRAGMA user_version = 10")
     print("[Migration] Success: Version 10 Upgrade Complete.")
+
+def _migrate_v10_to_v11(conn: sqlite3.Connection):
+    """
+    Version 11: moved-bill identity and one-to-one payment linkage.
+
+    - ``original_due_date`` keeps a bill's scheduled slot when the user moves it,
+      matching the Android model, so the original occurrence is not regenerated.
+    - ``is_user_modified`` distinguishes a deliberate move from a generated row.
+    - Non-null ``transaction_id`` values become unique (one payment per transaction).
+      Pre-existing duplicate links are detached (paid status and due date preserved)
+      rather than deleting the occurrences, and the count is recorded for visibility.
+    """
+    print("[Migration] Upgrading database to Version 11 (Occurrence Identity & Payment Linkage)...")
+    with conn:
+        columns = [row[1] for row in conn.execute("PRAGMA table_info(bill_occurrences)")]
+        if "original_due_date" not in columns:
+            conn.execute("ALTER TABLE bill_occurrences ADD COLUMN original_due_date TEXT")
+        if "is_user_modified" not in columns:
+            conn.execute("ALTER TABLE bill_occurrences ADD COLUMN is_user_modified INTEGER NOT NULL DEFAULT 0")
+        conn.execute(
+            "UPDATE bill_occurrences SET original_due_date = due_date "
+            "WHERE original_due_date IS NULL"
+        )
+
+        duplicates = conn.execute(
+            "SELECT transaction_id FROM bill_occurrences "
+            "WHERE transaction_id IS NOT NULL "
+            "GROUP BY transaction_id HAVING COUNT(*) > 1"
+        ).fetchall()
+        detached = 0
+        for dup in duplicates:
+            rows = conn.execute(
+                "SELECT id FROM bill_occurrences WHERE transaction_id = ? ORDER BY id ASC",
+                (dup["transaction_id"],),
+            ).fetchall()
+            for row in rows[1:]:
+                conn.execute(
+                    "UPDATE bill_occurrences SET transaction_id = NULL WHERE id = ?",
+                    (row["id"],),
+                )
+                detached += 1
+        if detached:
+            conn.execute(
+                "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
+                ("migration_11_detached_duplicate_links", detached),
+            )
+            print(f"[Migration] Detached {detached} duplicate transaction link(s); records preserved.")
+
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_occurrences_transaction_unique "
+            "ON bill_occurrences(transaction_id) WHERE transaction_id IS NOT NULL"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_occurrences_original "
+            "ON bill_occurrences(payment_id, original_due_date)"
+        )
+        conn.execute("PRAGMA user_version = 11")
+    print("[Migration] Success: Version 11 Upgrade Complete.")
 
 def _migrate_v3_to_v4(conn: sqlite3.Connection):
     """
@@ -544,20 +606,36 @@ def read_ledger_metadata() -> Dict[str, Any]:
 def read_ledger_view(start_date: str, end_date: str) -> Dict[str, Any]:
     """Read every input a decision needs from one SQLite read transaction.
 
-    A decision used to open several connections (income, payments, balance, stats),
-    so a concurrent edit could make the calculation and its provenance describe
-    different revisions. This returns a single consistent view instead.
+    ``start_date`` is the scenario's explicit ``as_of``. The starting balance is the
+    sum of transactions dated on or before it; later transactions are returned as
+    ``future_transactions`` so a forecast shows them when they occur instead of
+    counting them as already-posted cash. ``occurrences`` includes moved rows whose
+    scheduled slot or moved due date falls in the window, and ``overdue`` aggregates
+    unpaid obligations before ``as_of`` without injecting them into the forecast.
     """
     with get_db_connection() as conn:
         conn.execute("BEGIN DEFERRED")
         income_rows = conn.execute("SELECT * FROM income ORDER BY id ASC").fetchall()
         payment_rows = conn.execute("SELECT * FROM payments ORDER BY name ASC").fetchall()
-        paid_rows = conn.execute(
-            "SELECT payment_id, due_date FROM bill_occurrences "
-            "WHERE paid = 1 AND due_date >= ? AND due_date <= ?",
+        occurrence_rows = conn.execute(
+            "SELECT id, payment_id, due_date, paid, transaction_id, "
+            "original_due_date, is_user_modified "
+            "FROM bill_occurrences "
+            "WHERE (due_date >= ? AND due_date <= ?) "
+            "   OR (original_due_date >= ? AND original_due_date <= ?) "
+            "ORDER BY due_date ASC, id ASC",
+            (start_date, end_date, start_date, end_date),
+        ).fetchall()
+        future_rows = conn.execute(
+            "SELECT id, amount, category, type, date, description "
+            "FROM transactions WHERE date > ? AND date < ? "
+            "ORDER BY date ASC, id ASC",
             (start_date, end_date),
         ).fetchall()
         ledger_sum = conn.execute("SELECT SUM(amount) FROM transactions").fetchone()[0]
+        starting_sum = conn.execute(
+            "SELECT SUM(amount) FROM transactions WHERE date <= ?", (start_date,)
+        ).fetchone()[0]
         stored_row = conn.execute(
             "SELECT value FROM settings WHERE key = 'current_balance'"
         ).fetchone()
@@ -569,6 +647,13 @@ def read_ledger_view(start_date: str, end_date: str) -> Dict[str, Any]:
         ).fetchone()
         income_count = conn.execute("SELECT COUNT(*) AS n FROM income").fetchone()["n"]
         payment_count = conn.execute("SELECT COUNT(*) AS n FROM payments").fetchone()["n"]
+        overdue_row = conn.execute(
+            "SELECT COUNT(*) AS n, COALESCE(SUM(p.amount), 0) AS total, "
+            "MIN(o.due_date) AS earliest "
+            "FROM bill_occurrences o JOIN payments p ON o.payment_id = p.id "
+            "WHERE o.paid = 0 AND o.due_date < ?",
+            (start_date,),
+        ).fetchone()
         conn.execute("COMMIT")
 
     incomes = [
@@ -599,19 +684,49 @@ def read_ledger_view(start_date: str, end_date: str) -> Dict[str, Any]:
         )
         for r in payment_rows
     ]
+    occurrences = [
+        {
+            "id": r["id"],
+            "payment_id": r["payment_id"],
+            "due_date": r["due_date"],
+            "paid": bool(r["paid"]),
+            "transaction_id": r["transaction_id"],
+            "original_due_date": r["original_due_date"] or r["due_date"],
+            "is_user_modified": bool(r["is_user_modified"]),
+        }
+        for r in occurrence_rows
+    ]
+    future_transactions = [
+        {
+            "id": r["id"],
+            "amount_cents": _to_int_strict(r["amount"]),
+            "category": r["category"],
+            "type": r["type"],
+            "date": r["date"],
+            "description": r["description"],
+        }
+        for r in future_rows
+    ]
     ledger_balance = _to_int_strict(ledger_sum)
     stored_balance = _to_int_strict(stored_row["value"]) if stored_row else 0
     return {
         "incomes": incomes,
         "payments": payments,
-        "paid_occurrences": {(r["payment_id"], r["due_date"]) for r in paid_rows},
+        "occurrences": occurrences,
+        "future_transactions": future_transactions,
         "ledger_balance_cents": ledger_balance,
+        "starting_balance_cents": _to_int_strict(starting_sum),
         "stored_balance_cents": stored_balance,
         "bank_balance_cents": (
             _to_int_strict(bank_row["value"])
             if bank_row is not None and bank_row["value"] is not None
             else None
         ),
+        "overdue": {
+            "count": int(overdue_row["n"]),
+            "total_cents": _to_int_strict(overdue_row["total"]),
+            "earliest_date": overdue_row["earliest"],
+        },
         "counts": {
             "transaction_count": int(stats_row["transaction_count"]),
             "newest_date": stats_row["newest_date"],
@@ -697,22 +812,53 @@ def get_unpaid_occurrences(start_date: str, end_date: str) -> List[BillOccurrenc
             paid=bool(r['paid']),
             transaction_id=r['transaction_id'],
             name=r['name'],
-            amount=_to_int_strict(r['amount'])
+            amount=_to_int_strict(r['amount']),
+            original_due_date=r['original_due_date'],
+            is_user_modified=bool(r['is_user_modified']),
         ) for r in rows]
     return []
 
 def ensure_occurrence_exists(payment_id: int, due_date: str):
-    """Checks if an occurrence exists for a payment on a date, creates if not."""
+    """Creates the scheduled slot unless any occurrence already represents it."""
     with get_db_connection() as conn:
         with conn:
-            # Check for existing
-            res = conn.execute("SELECT id FROM bill_occurrences WHERE payment_id = ? AND due_date = ?", (payment_id, due_date)).fetchone()
+            res = conn.execute(
+                "SELECT id FROM bill_occurrences "
+                "WHERE payment_id = ? AND (due_date = ? OR original_due_date = ?)",
+                (payment_id, due_date, due_date),
+            ).fetchone()
             if not res:
-                conn.execute("INSERT OR IGNORE INTO bill_occurrences (payment_id, due_date) VALUES (?, ?)", (payment_id, due_date))
+                conn.execute(
+                    "INSERT OR IGNORE INTO bill_occurrences "
+                    "(payment_id, due_date, original_due_date, is_user_modified) "
+                    "VALUES (?, ?, ?, 0)",
+                    (payment_id, due_date, due_date),
+                )
+
+def reschedule_occurrence(occurrence_id: int, due_date: str):
+    """Move a bill occurrence while preserving its scheduled slot (Android parity)."""
+    with get_db_connection() as conn:
+        with conn:
+            occ = conn.execute(
+                "SELECT due_date, original_due_date FROM bill_occurrences WHERE id = ?",
+                (occurrence_id,),
+            ).fetchone()
+            if occ is None:
+                raise ValueError("Occurrence not found.")
+            original = occ["original_due_date"] or occ["due_date"]
+            conn.execute(
+                "UPDATE bill_occurrences SET due_date = ?, original_due_date = ?, "
+                "is_user_modified = 1 WHERE id = ?",
+                (due_date, original, occurrence_id),
+            )
 
 def sync_bill_occurrences(start_date: str, end_date: str):
     """
-    Synchronizes bill occurrences with the rules defined in the engine (30-day lookback).
+    Synchronizes bill occurrences with the recurring schedule.
+
+    A moved occurrence keeps its ``original_due_date``; the generated check asks
+    whether that scheduled slot is already represented (by ``due_date`` *or*
+    ``original_due_date``), so a move is never regenerated as a second obligation.
     """
     # Look back 30 days to catch missed bills that need generation
     lookback_date = (datetime.strptime(start_date, '%Y-%m-%d') - timedelta(days=30)).strftime('%Y-%m-%d')
@@ -724,10 +870,18 @@ def sync_bill_occurrences(start_date: str, end_date: str):
             for item in schedule:
                 pid = item['payment_id']
                 date = item['date']
-                # Check for existing
-                res = conn.execute("SELECT id FROM bill_occurrences WHERE payment_id = ? AND due_date = ?", (pid, date)).fetchone()
+                res = conn.execute(
+                    "SELECT id FROM bill_occurrences "
+                    "WHERE payment_id = ? AND (due_date = ? OR original_due_date = ?)",
+                    (pid, date, date),
+                ).fetchone()
                 if not res:
-                    conn.execute("INSERT OR IGNORE INTO bill_occurrences (payment_id, due_date) VALUES (?, ?)", (pid, date))
+                    conn.execute(
+                        "INSERT OR IGNORE INTO bill_occurrences "
+                        "(payment_id, due_date, original_due_date, is_user_modified) "
+                        "VALUES (?, ?, ?, 0)",
+                        (pid, date, date),
+                    )
 
 def get_obligations_total(start_date: str, end_date: str) -> int:
     """Orchestrates sync and sums up unpaid occurrences."""
@@ -777,7 +931,9 @@ def get_next_unpaid_occurrence(payment_id: int) -> Optional[BillOccurrence]:
             paid=bool(row['paid']),
             transaction_id=row['transaction_id'],
             name=row['name'],
-            amount=_to_int_strict(row['amount'])
+            amount=_to_int_strict(row['amount']),
+            original_due_date=row['original_due_date'],
+            is_user_modified=bool(row['is_user_modified']),
         )
     return None
 

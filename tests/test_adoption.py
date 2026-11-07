@@ -17,7 +17,8 @@ def seeded(tmp_path, monkeypatch):
     monkeypatch.setattr(db_manager, "DB_PATH", str(tmp_path / "ledger.db"))
     db_manager.init_db()
     db_manager.add_transaction(
-        amount_cents=100000, category="System", description="start", t_type="Adjustment"
+        amount_cents=100000, category="System", description="start", t_type="Adjustment",
+        date_str="2026-09-15"
     )
     # Bi-weekly paycheck: last 2026-09-26 -> next 2026-10-10
     db_manager.add_income_source("Paycheck", 90000, "Bi-weekly", "2026-09-26")

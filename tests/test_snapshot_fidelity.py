@@ -23,7 +23,7 @@ def _db_state():
             "income": "id, name, amount, frequency, last_payday, next_payday, expected_amount",
             "payments": "id, name, amount, due_day, recurrence, due_date, is_auto_withdraw",
             "transactions": "id, amount, category, type, date, description",
-            "bill_occurrences": "id, payment_id, due_date, paid, transaction_id",
+            "bill_occurrences": "id, payment_id, due_date, paid, transaction_id, original_due_date, is_user_modified",
         }.items():
             rows = conn.execute(f"SELECT {columns} FROM {table} ORDER BY id").fetchall()
             state[table] = [dict(row) for row in rows]
@@ -42,6 +42,7 @@ class SnapshotFidelityTest(unittest.TestCase):
 
     def _seed_full_ledger(self):
         db_manager.add_transaction(500_000, "System", "Opening", t_type="Adjustment", date_str="2026-10-01")
+        db_manager.add_transaction(-135_000, "Rent", "Rent", t_type="Expense", date_str="2026-12-01")
         db_manager.add_income_source("Pay", 220_000, "Monthly", "2026-01-31")
         db_manager.update_income_source(
             1, "Pay", 220_000, "Monthly", "2026-01-31", "2026-02-28", expected_amount=235_000
@@ -51,12 +52,12 @@ class SnapshotFidelityTest(unittest.TestCase):
         with db_manager.get_db_connection() as conn:
             with conn:
                 conn.execute(
-                    "INSERT INTO bill_occurrences (payment_id, due_date, paid, transaction_id) "
-                    "VALUES (1, '2026-12-01', 1, 1)"
+                    "INSERT INTO bill_occurrences (payment_id, due_date, paid, transaction_id, original_due_date, is_user_modified) "
+                    "VALUES (1, '2026-12-01', 1, 2, '2026-12-01', 0)"
                 )
                 conn.execute(
-                    "INSERT INTO bill_occurrences (payment_id, due_date, paid, transaction_id) "
-                    "VALUES (2, '2026-12-20', 0, NULL)"
+                    "INSERT INTO bill_occurrences (payment_id, due_date, paid, transaction_id, original_due_date, is_user_modified) "
+                    "VALUES (2, '2026-12-20', 0, NULL, '2026-12-20', 0)"
                 )
 
     def test_expected_amount_survives_a_real_round_trip(self):
@@ -80,7 +81,7 @@ class SnapshotFidelityTest(unittest.TestCase):
         with db_manager.get_db_connection() as conn:
             with conn:
                 conn.execute(
-                    "UPDATE bill_occurrences SET due_date = '2026-12-03' WHERE payment_id = 1"
+                    "UPDATE bill_occurrences SET due_date = '2026-12-03', is_user_modified = 1 WHERE payment_id = 1"
                 )
         before = _db_state()
         sync.restore_ledger_snapshot(sync.export_ledger_snapshot())
@@ -224,7 +225,7 @@ class SnapshotFidelityTest(unittest.TestCase):
         probe = sqlite3.connect(backup)
         try:
             self.assertEqual(
-                probe.execute("SELECT COUNT(*) FROM transactions").fetchone()[0], 1
+                probe.execute("SELECT COUNT(*) FROM transactions").fetchone()[0], 2
             )
             self.assertEqual(probe.execute("PRAGMA integrity_check").fetchone()[0], "ok")
         finally:

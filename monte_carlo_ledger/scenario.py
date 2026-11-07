@@ -78,42 +78,56 @@ def _income_events_from(
     return events
 
 
-def _bill_events_rw(as_of: date, window_end: date) -> List[Dict[str, Any]]:
-    """Materialize in-window unpaid bill occurrences. Overdue (< as_of) is excluded (MCD-0014)."""
-    db_manager.sync_bill_occurrences(as_of.isoformat(), window_end.isoformat())
-    occurrences = db_manager.get_unpaid_occurrences(as_of.isoformat(), window_end.isoformat())
-    events: List[Dict[str, Any]] = []
-    lo, hi = as_of.isoformat(), window_end.isoformat()
-    for occ in occurrences:
-        if occ.amount is None or occ.name is None:
-            continue
-        if lo <= occ.due_date < hi:
-            events.append({
-                "date": occ.due_date,
-                "amount_cents": -int(occ.amount),
-                "type": "expense",
-                "name": occ.name,
-            })
-    return events
-
-
 def _bill_events_from(
     payments: List[db_manager.Payment],
-    paid_occurrences: set,
+    occurrences: List[Dict[str, Any]],
     as_of: date,
     window_end: date,
 ) -> List[Dict[str, Any]]:
-    """Project in-window unpaid bills in-memory, half-open ``[as_of, window_end)``."""
-    pmt_dicts = [dict(vars(p)) for p in payments]
-    schedule = budget_engine.get_upcoming_schedule(
-        pmt_dicts, as_of.isoformat(), window_end.isoformat()
-    )
-    hi = window_end.isoformat()
+    """Materialize in-window unpaid bills from one authoritative occurrence model.
+
+    Persisted occurrences win over regenerated schedule dates. A moved row keeps its
+    ``original_due_date``: the original slot and the moved date are both suppressed,
+    while the obligation is emitted once at ``due_date`` (Android parity). Scheduled
+    slots with no persisted row are filled in memory, so read-only decisions and the
+    write path share exactly one projection rule.
+    """
+    payment_by_id = {p.id: p for p in payments}
+    represented = set()
+    suppressed = set()
+    for occ in occurrences:
+        slot = occ.get("original_due_date") or occ["due_date"]
+        key = (occ["payment_id"], slot)
+        represented.add(key)
+        if occ["paid"] or occ["is_user_modified"]:
+            suppressed.add(key)
+        if occ["is_user_modified"]:
+            suppressed.add((occ["payment_id"], occ["due_date"]))
+
+    lo, hi = as_of.isoformat(), window_end.isoformat()
     events: List[Dict[str, Any]] = []
+    for occ in occurrences:
+        if occ["paid"]:
+            continue
+        if not (lo <= occ["due_date"] < hi):
+            continue
+        pmt = payment_by_id.get(occ["payment_id"])
+        if pmt is None:
+            continue
+        events.append({
+            "date": occ["due_date"],
+            "amount_cents": -int(pmt.amount),
+            "type": "expense",
+            "name": pmt.name,
+        })
+
+    pmt_dicts = [dict(vars(p)) for p in payments]
+    schedule = budget_engine.get_upcoming_schedule(pmt_dicts, lo, hi)
     for item in schedule:
         if item["date"] >= hi:  # enforce half-open even though the helper is inclusive
             continue
-        if (item["payment_id"], item["date"]) in paid_occurrences:
+        key = (item["payment_id"], item["date"])
+        if key in represented or key in suppressed:
             continue
         events.append({
             "date": item["date"],
@@ -124,12 +138,38 @@ def _bill_events_from(
     return events
 
 
+def _future_transaction_events(
+    transactions: List[Dict[str, Any]], as_of: date, window_end: date
+) -> List[Dict[str, Any]]:
+    """Future-dated posted transactions become events at their date, not opening cash."""
+    mapping = {"Income": "income", "Expense": "expense", "Adjustment": "adjustment"}
+    lo, hi = as_of.isoformat(), window_end.isoformat()
+    events: List[Dict[str, Any]] = []
+    for tx in transactions:
+        etype = mapping.get(tx["type"])
+        if etype is None or not (lo <= tx["date"] < hi):
+            continue
+        events.append({
+            "date": tx["date"],
+            "amount_cents": int(tx["amount_cents"]),
+            "type": etype,
+            "name": tx.get("description") or tx.get("category") or "Planned transaction",
+        })
+    return events
+
+
 def _bill_events_readonly(as_of: date, window_end: date) -> List[Dict[str, Any]]:
     """Standalone readonly projection (opens its own consistent view)."""
     view = db_manager.read_ledger_view(as_of.isoformat(), window_end.isoformat())
     return _bill_events_from(
-        view["payments"], view["paid_occurrences"], as_of, window_end
+        view["payments"], view["occurrences"], as_of, window_end
     )
+
+
+def _bill_events_rw(as_of: date, window_end: date) -> List[Dict[str, Any]]:
+    """Materialize any missing slots, then use the same projection as read-only."""
+    db_manager.sync_bill_occurrences(as_of.isoformat(), window_end.isoformat())
+    return _bill_events_readonly(as_of, window_end)
 
 
 def _bill_events(as_of: date, window_end: date, read_only: bool) -> List[Dict[str, Any]]:
@@ -151,16 +191,16 @@ def build_scenario(
     """
     start = date.fromisoformat(as_of)
     window_end = start + timedelta(days=horizon_days)
-    if ledger is not None:
-        events = _bill_events_from(
-            ledger["payments"], ledger["paid_occurrences"], start, window_end
-        ) + _income_events_from(ledger["incomes"], start, window_end)
-        starting_balance = ledger["ledger_balance_cents"]
-    else:
-        events = _bill_events(start, window_end, read_only) + _income_events_from(
-            db_manager.get_all_income(), start, window_end
-        )
-        starting_balance = db_manager.get_ledger_balance()
+    if ledger is None:
+        if not read_only:
+            db_manager.sync_bill_occurrences(as_of, window_end.isoformat())
+        ledger = db_manager.read_ledger_view(as_of, window_end.isoformat())
+    events = (
+        _bill_events_from(ledger["payments"], ledger["occurrences"], start, window_end)
+        + _income_events_from(ledger["incomes"], start, window_end)
+        + _future_transaction_events(ledger["future_transactions"], start, window_end)
+    )
+    starting_balance = ledger["starting_balance_cents"]
     scenario: Dict[str, Any] = {
         "contract_version": CONTRACT_VERSION,
         "scenario_id": f"db-{as_of}-{horizon_days}",

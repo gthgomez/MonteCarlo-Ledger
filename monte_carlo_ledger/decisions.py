@@ -157,6 +157,8 @@ def _ledger_status(
             "payment_count": stats["payment_count"],
             "newest_transaction_date": stats["newest_date"],
         }
+        starting = ledger
+        overdue = {"count": 0, "total_cents": 0, "earliest_date": None}
     else:
         ledger = view["ledger_balance_cents"]
         stored = view["stored_balance_cents"]
@@ -168,6 +170,8 @@ def _ledger_status(
             "payment_count": view["counts"]["payment_count"],
             "newest_transaction_date": view["counts"]["newest_date"],
         }
+        starting = view["starting_balance_cents"]
+        overdue = view["overdue"]
 
     status: Dict[str, Any] = {
         "source": "local sqlite ledger",
@@ -176,12 +180,16 @@ def _ledger_status(
         "hypothetical": hypothetical,
         "balance_consistent": bool(is_sync),
         "ledger_balance_cents": ledger,
+        "starting_balance_cents": starting,
         "stored_balance_cents": stored,
         # The cache is what older clients display; it is exposed separately so a
         # discrepancy is never mistaken for spendable cash.
         "cached_balance_cents": stored,
         "bank_balance_cents": bank,
         "reconciled_with_bank": bool(bank is not None and bank == ledger),
+        # Overdue unpaid obligations are deliberately excluded from the forecast
+        # window (MCD-0014) but must not be invisible behind a spendable figure.
+        "overdue_obligations": overdue,
         "snapshot": counts,
         "model": {
             "basis": "canonical Contract 2.0 deterministic projection + SplitMix64 Monte Carlo",
