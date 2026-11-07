@@ -128,6 +128,14 @@ minimum_payment(l, balance_after_interest):
 
 Notes:
 
+- `min_payment_cents` is the **installment** minimum. For `kind: "revolving"` it is ignored:
+  the minimum is `max(percent of balance, floor)` using `min_payment_percent_bps` /
+  `min_payment_floor_cents`, both of which default to `0`. A revolving liability with a positive
+  balance and neither field therefore projects a zero payment and `did_not_converge: true`.
+  That is released Contract 2.0 semantics; `compare_debt_strategies` emits a `model_warnings`
+  entry rather than silently changing the calculation.
+- `due_day_of_month` is accepted and range-validated but does not affect the monthly amortization
+  schedule in this version; it exists for display/planning metadata.
 - `months_to_payoff` is the number of months the loop ran (0 when there are no liabilities or all
   balances are 0; 360 when capped). `payoff_date` is `as_of + months_to_payoff months` (never null).
 - Rows are emitted in the `order` of step (b); `starting = start_of_month_balance`,

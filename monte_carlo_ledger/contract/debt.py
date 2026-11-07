@@ -13,7 +13,7 @@ import calendar
 from datetime import date
 from typing import Any, Dict, List, Set
 
-from .money import MAX_MONEY_CENTS, ContractError, round_half_away
+from .money import MAX_MONEY_CENTS, ContractError, checked_add, round_half_away
 
 STRATEGIES = ("snowball", "avalanche")
 _KINDS = ("installment", "revolving")
@@ -68,6 +68,21 @@ def validate_liabilities(liabilities: Any) -> None:
                     raise ContractError(
                         "SCHEMA_INVALID", f"liability {lid!r} {field} must be an integer >= 0"
                     )
+        if "due_day_of_month" in liability:
+            due_day = liability["due_day_of_month"]
+            if (
+                not isinstance(due_day, int)
+                or isinstance(due_day, bool)
+                or not 1 <= due_day <= 31
+            ):
+                raise ContractError(
+                    "SCHEMA_INVALID",
+                    f"liability {lid!r} due_day_of_month must be an integer 1..31",
+                )
+        # Contract 2.0 defines a revolving minimum as percent/floor only; a
+        # revolving row with neither (even when min_payment_cents is set) therefore
+        # projects a zero payment and does not converge. That is released semantics,
+        # not an input error: the decision layer warns instead of redefining it.
 
 
 def _monthly_interest(balance: int, apr_basis_points: int) -> int:
@@ -104,6 +119,16 @@ def amortize(
     if strategy not in STRATEGIES:
         raise ContractError("SCHEMA_INVALID", f"unknown debt strategy {strategy!r}")
     validate_liabilities(liabilities)
+    if (
+        not isinstance(extra_monthly_payment_cents, int)
+        or isinstance(extra_monthly_payment_cents, bool)
+        or extra_monthly_payment_cents < 0
+        or extra_monthly_payment_cents > MAX_MONEY_CENTS
+    ):
+        raise ContractError(
+            "INVALID_AMOUNT",
+            f"extra_monthly_payment_cents must be an integer in [0, {MAX_MONEY_CENTS}]",
+        )
 
     balances: Dict[str, int] = {
         liability["id"]: liability["balance_cents"] for liability in liabilities
@@ -143,10 +168,10 @@ def amortize(
                 break
             starting = balances[lid]
             balances[lid] += interest
-            total_interest += interest
+            total_interest = checked_add(total_interest, interest)
             payment = _minimum_payment(liability, balances[lid])
             balances[lid] -= payment
-            total_paid += payment
+            total_paid = checked_add(total_paid, payment)
             row = {
                 "month": months,
                 "date": month_date.isoformat(),
@@ -170,7 +195,7 @@ def amortize(
                 extra = min(extra_pool, balances[lid])
                 balances[lid] -= extra
                 extra_pool -= extra
-                total_paid += extra
+                total_paid = checked_add(total_paid, extra)
                 row = month_rows[lid]
                 row["payment_cents"] += extra
                 row["principal_cents"] += extra
