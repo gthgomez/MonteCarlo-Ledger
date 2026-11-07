@@ -147,7 +147,10 @@ def export_ledger_snapshot() -> Dict[str, Any]:
             for r in tx_rows
         ]
 
-        occ_rows = conn.execute("SELECT id, payment_id, due_date, paid, transaction_id FROM bill_occurrences ORDER BY id").fetchall()
+        occ_rows = conn.execute(
+            "SELECT id, payment_id, due_date, paid, transaction_id, "
+            "original_due_date, is_user_modified FROM bill_occurrences ORDER BY id"
+        ).fetchall()
         occurrences = [
             {
                 "id": r["id"],
@@ -155,6 +158,8 @@ def export_ledger_snapshot() -> Dict[str, Any]:
                 "due_date": r["due_date"],
                 "paid": bool(r["paid"]),
                 "transaction_id": r["transaction_id"],
+                "original_due_date": r["original_due_date"] or r["due_date"],
+                "is_user_modified": bool(r["is_user_modified"]),
             }
             for r in occ_rows
         ]
@@ -201,7 +206,10 @@ _ROW_FIELDS = {
         {"id", "amount_cents", "category", "type", "date", "description"}
     ),
     "bill_occurrences": frozenset(
-        {"id", "payment_id", "due_date", "paid", "transaction_id"}
+        {
+            "id", "payment_id", "due_date", "paid", "transaction_id",
+            "original_due_date", "is_user_modified",
+        }
     ),
 }
 
@@ -413,6 +421,13 @@ def _validate_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
     transactions = _require_rows(snapshot, "transactions")
     occurrences = _require_rows(snapshot, "bill_occurrences")
 
+    # Identifier validation (including duplicates) runs first so an id fault is
+    # reported even when a later cross-reference rule would also fail.
+    income_ids = _id_map(incomes, "incomes")
+    payment_ids = _id_map(payments, "payments")
+    transaction_ids = _id_map(transactions, "transactions")
+    occurrence_ids = _id_map(occurrences, "bill_occurrences")
+
     # Validate everything before opening the write transaction, so a malformed
     # snapshot never even starts replacing the ledger.
     for index, inc in enumerate(incomes):
@@ -454,16 +469,26 @@ def _validate_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
 
     for index, tx in enumerate(transactions):
         _validate_row_fields(tx, "transactions", index)
-        _require_int(
+        amount = _require_int(
             tx.get("amount_cents"),
             f"transactions[{index}].amount_cents",
             minimum=MIN_MONEY_CENTS,
             maximum=MAX_MONEY_CENTS,
         )
-        if tx.get("type") not in _SNAPSHOT_TRANSACTION_TYPES:
+        assert amount is not None
+        t_type = tx.get("type")
+        if t_type not in _SNAPSHOT_TRANSACTION_TYPES:
             raise ValueError(
-                f"Snapshot transactions[{index}].type is unsupported: {tx.get('type')!r}"
+                f"Snapshot transactions[{index}].type is unsupported: {t_type!r}"
             )
+        # A snapshot is not valid merely because its transactions add up: sign
+        # invariants must match the ordinary ledger insertion path.
+        if t_type == "Income" and amount <= 0:
+            raise ValueError(f"Snapshot transactions[{index}] is Income but not positive")
+        if t_type == "Expense" and amount >= 0:
+            raise ValueError(f"Snapshot transactions[{index}] is Expense but not negative")
+        if t_type == "Adjustment" and amount == 0:
+            raise ValueError(f"Snapshot transactions[{index}] is a zero Adjustment")
         _require_date(tx.get("date"), f"transactions[{index}].date")
         for field in ("category", "description"):
             if field in tx and tx[field] is not None and not isinstance(tx[field], str):
@@ -479,12 +504,67 @@ def _validate_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
             raise ValueError(f"Snapshot bill_occurrences[{index}] is missing its payment_id")
         _require_date(occ.get("due_date"), f"bill_occurrences[{index}].due_date")
         _require_bool(occ.get("paid"), f"bill_occurrences[{index}].paid")
+        _require_date(
+            occ.get("original_due_date"),
+            f"bill_occurrences[{index}].original_due_date",
+            allow_none=True,
+        )
+        if "is_user_modified" in occ:
+            _require_bool(occ["is_user_modified"], f"bill_occurrences[{index}].is_user_modified")
         if occ.get("transaction_id") is not None and not isinstance(
             occ.get("transaction_id"), (int, str)
         ):
             raise ValueError(
                 f"Snapshot bill_occurrences[{index}].transaction_id is invalid: "
                 f"{occ.get('transaction_id')!r}"
+            )
+
+    # One transaction may settle exactly one bill, and only when the money and
+    # classification actually match. This is validated before any database write.
+    payment_amounts = {str(p["id"]): p["amount_cents"] for p in payments}
+    txn_by_id = {str(t["id"]): t for t in transactions}
+    linked_transactions = set()
+    for index, occ in enumerate(occurrences):
+        pay_key = str(occ["payment_id"])
+        if pay_key not in payment_amounts:
+            raise ValueError(
+                f"Snapshot bill_occurrences[{index}].payment_id references unknown id "
+                f"{occ['payment_id']!r}"
+            )
+        txn_ref = occ.get("transaction_id")
+        if txn_ref is None:
+            if occ["paid"] and occ.get("is_user_modified"):
+                raise ValueError(
+                    f"Snapshot bill_occurrences[{index}] is marked paid and modified "
+                    "without a settling transaction"
+                )
+            continue
+        if not occ["paid"]:
+            raise ValueError(
+                f"Snapshot bill_occurrences[{index}] links a transaction but is not paid"
+            )
+        txn_key = str(txn_ref)
+        if txn_key not in txn_by_id:
+            raise ValueError(
+                f"Snapshot bill_occurrences[{index}].transaction_id references unknown id "
+                f"{txn_ref!r}"
+            )
+        if txn_key in linked_transactions:
+            raise ValueError(
+                f"Snapshot bill_occurrences[{index}] reuses transaction {txn_ref!r}; "
+                "one transaction cannot pay multiple bills"
+            )
+        linked_transactions.add(txn_key)
+        tx = txn_by_id[txn_key]
+        if tx.get("type") != "Expense":
+            raise ValueError(
+                f"Snapshot bill_occurrences[{index}] links a non-Expense transaction"
+            )
+        if abs(tx["amount_cents"]) != payment_amounts[pay_key]:
+            raise ValueError(
+                f"Snapshot bill_occurrences[{index}] transaction amount "
+                f"{abs(tx['amount_cents'])} does not match the bill amount "
+                f"{payment_amounts[pay_key]}"
             )
 
     declared_sum = sum(tx["amount_cents"] for tx in transactions)
@@ -500,10 +580,10 @@ def _validate_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
         "payments": payments,
         "transactions": transactions,
         "occurrences": occurrences,
-        "income_ids": _id_map(incomes, "incomes"),
-        "payment_ids": _id_map(payments, "payments"),
-        "transaction_ids": _id_map(transactions, "transactions"),
-        "occurrence_ids": _id_map(occurrences, "bill_occurrences"),
+        "income_ids": income_ids,
+        "payment_ids": payment_ids,
+        "transaction_ids": transaction_ids,
+        "occurrence_ids": occurrence_ids,
     }
 
 
@@ -587,9 +667,14 @@ def restore_ledger_snapshot(snapshot: Dict[str, Any]) -> None:
                 )
 
             for occ in occurrences:
+                original_due = occ.get("original_due_date") or occ["due_date"]
+                modified = occ.get("is_user_modified")
+                if modified is None:
+                    modified = original_due != occ["due_date"]
                 conn.execute(
-                    "INSERT INTO bill_occurrences (id, payment_id, due_date, paid, transaction_id) "
-                    "VALUES (?, ?, ?, ?, ?)",
+                    "INSERT INTO bill_occurrences "
+                    "(id, payment_id, due_date, paid, transaction_id, original_due_date, is_user_modified) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
                     (
                         occurrence_ids[str(occ["id"])],
                         _ref(payment_ids, occ.get("payment_id"), "bill_occurrences.payment_id"),
@@ -598,6 +683,8 @@ def restore_ledger_snapshot(snapshot: Dict[str, Any]) -> None:
                         None
                         if occ.get("transaction_id") is None
                         else _ref(transaction_ids, occ.get("transaction_id"), "bill_occurrences.transaction_id"),
+                        original_due,
+                        1 if modified else 0,
                     ),
                 )
 

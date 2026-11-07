@@ -83,12 +83,36 @@ export function buildScenarioFromLedger(
     }
   }
 
-  // 2. Materialize Bill Payments
-  const paidSet = new Set(
-    state.bill_occurrences
-      .filter((o) => o.paid)
-      .map((o) => `${o.payment_id}::${o.due_date}`)
-  );
+  // 2. Materialize Bill Payments from persisted occurrence state.
+  //    Persisted rows are authoritative; a moved row keeps its scheduled slot via
+  //    original_due_date, so the original date is never regenerated. Read-only and
+  //    write paths therefore share one projection rule (Android/Python parity).
+  const paymentById = new Map(state.payments.map((p) => [String(p.id), p] as const));
+  const represented = new Set<string>();
+  const suppressed = new Set<string>();
+  const occurrenceKey = (paymentId: number | string, date: string) => `${paymentId}::${date}`;
+  for (const occ of state.bill_occurrences) {
+    const slot = occ.original_due_date || occ.due_date;
+    represented.add(occurrenceKey(occ.payment_id, slot));
+    if (occ.paid || occ.is_user_modified) {
+      suppressed.add(occurrenceKey(occ.payment_id, slot));
+    }
+    if (occ.is_user_modified) {
+      suppressed.add(occurrenceKey(occ.payment_id, occ.due_date));
+    }
+  }
+  for (const occ of state.bill_occurrences) {
+    if (occ.paid) continue;
+    if (!(occ.due_date >= asOf && occ.due_date < windowEnd)) continue;
+    const pmt = paymentById.get(String(occ.payment_id));
+    if (!pmt) continue;
+    events.push({
+      date: occ.due_date,
+      amount_cents: -pmt.amount_cents,
+      type: "expense",
+      name: pmt.name,
+    });
+  }
 
   for (const pmt of state.payments) {
     if (pmt.recurrence === "Monthly" && pmt.due_day) {
@@ -105,7 +129,8 @@ export function buildScenarioFromLedger(
         const dueIso = `${curY}-${String(actualM).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
 
         if (dueIso >= asOf && dueIso < windowEnd) {
-          if (!paidSet.has(`${pmt.id}::${dueIso}`)) {
+          const key = occurrenceKey(String(pmt.id), dueIso);
+          if (!represented.has(key) && !suppressed.has(key)) {
             events.push({
               date: dueIso,
               amount_cents: -pmt.amount_cents,
@@ -121,7 +146,8 @@ export function buildScenarioFromLedger(
       let guard = 0;
       while (current < windowEnd && guard < 1000) {
         if (current >= asOf) {
-          if (!paidSet.has(`${pmt.id}::${current}`)) {
+          const key = occurrenceKey(String(pmt.id), current);
+          if (!represented.has(key) && !suppressed.has(key)) {
             events.push({
               date: current,
               amount_cents: -pmt.amount_cents,
@@ -139,11 +165,29 @@ export function buildScenarioFromLedger(
     }
   }
 
+  // 3. Future-dated posted transactions are events, not opening cash.
+  const futureTransactions = state.transactions.filter(
+    (tx) => tx.date > asOf && tx.date < windowEnd
+  );
+  for (const tx of futureTransactions) {
+    const type = tx.type === "Income" ? "income" : tx.type === "Expense" ? "expense" : "adjustment";
+    events.push({
+      date: tx.date,
+      amount_cents: tx.amount_cents,
+      type,
+      name: tx.description || tx.category || "Planned transaction",
+    });
+  }
+  const futureOutflow = state.transactions
+    .filter((tx) => tx.date > asOf)
+    .reduce((sum, tx) => sum + tx.amount_cents, 0);
+  const startingBalance = state.current_balance_cents - futureOutflow;
+
   const scenario: any = {
     contract_version: "2.0",
     scenario_id: `ledger-${asOf}-${horizonDays}`,
     as_of: asOf,
-    starting_balance_cents: state.current_balance_cents,
+    starting_balance_cents: startingBalance,
     horizon_days: horizonDays,
     events,
   };

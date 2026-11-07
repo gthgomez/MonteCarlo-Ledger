@@ -33,6 +33,9 @@ export interface BillOccurrenceItem {
   due_date: string;
   paid: boolean;
   transaction_id?: number | string | null;
+  /** Scheduled slot retained when the user moves a bill. */
+  original_due_date?: string | null;
+  is_user_modified?: boolean;
 }
 
 export interface LiabilityItem {

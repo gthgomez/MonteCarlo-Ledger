@@ -41,12 +41,16 @@ CREATE TABLE IF NOT EXISTS bill_occurrences (
     paid INTEGER DEFAULT 0,
     transaction_id INTEGER,
     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    original_due_date TEXT,
+    is_user_modified INTEGER NOT NULL DEFAULT 0,
     FOREIGN KEY (payment_id) REFERENCES payments(id) ON DELETE CASCADE,
     FOREIGN KEY (transaction_id) REFERENCES transactions(id) ON DELETE SET NULL
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_occurrences_unique ON bill_occurrences(payment_id, due_date);
 CREATE INDEX IF NOT EXISTS idx_occurrences_paid ON bill_occurrences(paid);
+CREATE INDEX IF NOT EXISTS idx_occurrences_original
+    ON bill_occurrences(payment_id, original_due_date);
 
 -- Insert default balance (stored as INTEGER)
 INSERT OR IGNORE INTO settings (key, value) VALUES ('current_balance', 0);

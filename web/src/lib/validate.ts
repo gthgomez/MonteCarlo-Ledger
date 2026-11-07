@@ -34,7 +34,10 @@ const ROW_FIELDS: Record<string, Set<string>> = {
   transactions: new Set([
     "id", "amount_cents", "category", "type", "date", "description",
   ]),
-  bill_occurrences: new Set(["id", "payment_id", "due_date", "paid", "transaction_id"]),
+  bill_occurrences: new Set([
+    "id", "payment_id", "due_date", "paid", "transaction_id",
+    "original_due_date", "is_user_modified",
+  ]),
   liabilities: new Set([
     "id", "name", "balance_cents", "apr_basis_points", "min_payment_cents",
     "kind", "min_payment_percent_bps", "min_payment_floor_cents", "due_day_of_month",
@@ -189,6 +192,10 @@ export function parseLedgerState(raw: unknown): ParseResult {
     if (fieldError) return fieldError;
     if (!isSafeInt(tx.amount_cents)) return fail(`${path}.amount_cents`, "must be integer cents");
     if (!TRANSACTION_TYPES.has(tx.type)) return fail(`${path}.type`, "is unsupported");
+    // Sign invariants must match ordinary ledger insertion, not merely balance to sum.
+    if (tx.type === "Income" && tx.amount_cents <= 0) return fail(`${path}.amount_cents`, "Income must be positive");
+    if (tx.type === "Expense" && tx.amount_cents >= 0) return fail(`${path}.amount_cents`, "Expense must be negative");
+    if (tx.type === "Adjustment" && tx.amount_cents === 0) return fail(`${path}.amount_cents`, "Adjustment must be non-zero");
     if (!isDate(tx.date)) return fail(`${path}.date`, "must be a valid date");
     if (tx.category !== undefined && tx.category !== null && typeof tx.category !== "string") {
       return fail(`${path}.category`, "must be a string");
@@ -207,6 +214,9 @@ export function parseLedgerState(raw: unknown): ParseResult {
 
   const occurrenceIds = ids(occurrences, "bill_occurrences");
   if ("ok" in occurrenceIds) return occurrenceIds;
+  const transactionById = new Map(transactions.map((tx: any) => [String(tx.id), tx] as const));
+  const paymentAmountById = new Map(payments.map((pmt: any) => [String(pmt.id), pmt.amount_cents] as const));
+  const linkedTransactions = new Set<string>();
   for (const [index, occ] of occurrences.entries()) {
     const path = `bill_occurrences[${index}]`;
     const fieldError = checkRowFields(occ, "bill_occurrences", index);
@@ -215,9 +225,25 @@ export function parseLedgerState(raw: unknown): ParseResult {
     if (!paymentIds.has(String(occ.payment_id))) return fail(`${path}.payment_id`, "references an unknown payment");
     if (!isDate(occ.due_date)) return fail(`${path}.due_date`, "must be a valid date");
     if (typeof occ.paid !== "boolean") return fail(`${path}.paid`, "must be a boolean");
-    if (occ.transaction_id !== undefined && occ.transaction_id !== null &&
-        !transactionIds.has(String(occ.transaction_id))) {
-      return fail(`${path}.transaction_id`, "references an unknown transaction");
+    if (occ.original_due_date !== undefined && occ.original_due_date !== null && !isDate(occ.original_due_date)) {
+      return fail(`${path}.original_due_date`, "must be a valid date or null");
+    }
+    if (occ.is_user_modified !== undefined && typeof occ.is_user_modified !== "boolean") {
+      return fail(`${path}.is_user_modified`, "must be a boolean");
+    }
+    if (occ.transaction_id !== undefined && occ.transaction_id !== null) {
+      const txnKey = String(occ.transaction_id);
+      if (!transactionIds.has(txnKey)) return fail(`${path}.transaction_id`, "references an unknown transaction");
+      if (!occ.paid) return fail(`${path}.transaction_id`, "cannot link a transaction to an unpaid occurrence");
+      if (linkedTransactions.has(txnKey)) {
+        return fail(`${path}.transaction_id`, "reuses a transaction that already paid another bill");
+      }
+      linkedTransactions.add(txnKey);
+      const tx: any = transactionById.get(txnKey)!;
+      if (tx.type !== "Expense") return fail(`${path}.transaction_id`, "must reference an Expense transaction");
+      if (Math.abs(tx.amount_cents) !== paymentAmountById.get(String(occ.payment_id))) {
+        return fail(`${path}.transaction_id`, "transaction amount does not match the bill amount");
+      }
     }
   }
 

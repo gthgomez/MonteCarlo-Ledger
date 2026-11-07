@@ -9,6 +9,7 @@ import { LedgerManager } from "@/components/LedgerManager";
 import { SyncModal } from "@/components/SyncModal";
 import { LedgerState, SAMPLE_LEDGER_STATE } from "@/lib/types";
 import { buildScenarioFromLedger } from "@/lib/scenario-builder";
+import { computeOverdueObligations } from "@/lib/overdue";
 import { runScenario, timelineRows } from "@/contract/engine";
 import { parseLedgerState } from "@/lib/validate";
 import { ContractError } from "@/contract/money";
@@ -215,10 +216,23 @@ export default function Home() {
     }
   }, [canonicalScenario]);
 
-  // Decision Simulator Hooks — typed results; failures are surfaced, never zero-filled.
+  const overdue = useMemo(
+    () => computeOverdueObligations(state, asOf),
+    [state, asOf]
+  );
   const handleSimulatePurchase = (amountCents: number, date: string): SimulatePurchaseResult => {
     if (!Number.isInteger(amountCents) || amountCents <= 0) {
       return { status: "error", code: "INVALID_AMOUNT" };
+    }
+    const [py, pm, pd] = asOf.split("-").map(Number);
+    const windowEnd = new Date(Date.UTC(py, pm - 1, pd + 90)).toISOString().split("T")[0];
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      return { status: "error", code: "INVALID_DATE" };
+    }
+    if (date < asOf || date >= windowEnd) {
+      // An out-of-window purchase would be silently dropped by the expander and
+      // look like a successful no-op. Fail closed instead.
+      return { status: "error", code: "EVENT_OUT_OF_HORIZON" };
     }
     const cloned = JSON.parse(JSON.stringify(canonicalScenario));
     cloned.events.push({
@@ -243,13 +257,26 @@ export default function Home() {
   };
 
   const handleSimulateDelay = (delayDays: number): SimulateDelayResult => {
-    const cloned = JSON.parse(JSON.stringify(canonicalScenario));
-    const incomes = cloned.events.filter((e: any) => e.type === "income");
-    if (incomes.length > 0) {
-      const [y, m, d] = incomes[0].date.split("-").map(Number);
-      const dt = new Date(Date.UTC(y, m - 1, d + delayDays));
-      incomes[0].date = dt.toISOString().split("T")[0];
+    if (!Number.isInteger(delayDays) || delayDays <= 0) {
+      return { status: "error", code: "INVALID_HORIZON" };
     }
+    const cloned = JSON.parse(JSON.stringify(canonicalScenario));
+    // Earliest scheduled paycheck wins, not insertion order. A stable sort keeps
+    // same-day incomes in a deterministic order (contract tie-break).
+    const incomes = cloned.events
+      .filter((e: any) => e.type === "income")
+      .sort((a: any, b: any) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+    if (incomes.length === 0) {
+      return { status: "error", code: "NO_INCOME" };
+    }
+    const target = incomes[0];
+    const [y, m, d] = target.date.split("-").map(Number);
+    const dt = new Date(Date.UTC(y, m - 1, d + delayDays));
+    const index = cloned.events.indexOf(target);
+    cloned.events[index] = {
+      ...target,
+      date: dt.toISOString().split("T")[0],
+    };
     try {
       const res = runScenario(cloned);
       return {
@@ -379,6 +406,16 @@ export default function Home() {
             <strong className="font-semibold">Demo data — not your finances.</strong>{" "}
             This is a sample household to explore the engine. Add your own ledger below, or
             import a backup / pull a vault to replace it.
+          </div>
+        )}
+        {overdue.count > 0 && (
+          <div className="rounded-xl border border-amber-700/50 bg-amber-950/30 px-4 py-3 text-xs text-amber-200">
+            <strong className="font-semibold">
+              {overdue.count} past-due unpaid {overdue.count === 1 ? "bill" : "bills"} totaling{" "}
+              ${(overdue.total_cents / 100).toFixed(2)}
+            </strong>{" "}
+            (earliest {overdue.earliest_date}) are outside the forward forecast window.
+            Safe-to-spend does not include them; settle or reschedule them before relying on it.
           </div>
         )}
         <SafeSpendHero

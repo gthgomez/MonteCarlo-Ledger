@@ -111,7 +111,7 @@ class TestLedgerLogic(unittest.TestCase):
 
         with db_manager.get_db_connection() as conn:
             v = conn.execute("PRAGMA user_version").fetchone()[0]
-            self.assertEqual(v, 10)
+            self.assertEqual(v, 11)
 
             # Verify type column exists
             res = conn.execute("PRAGMA table_info(transactions)").fetchall()
