@@ -30,7 +30,8 @@ git push
 
 The pin patch applies cleanly (`git apply --check` verified). It changes
 `ANDROID_PIN_SHA` from `6cadf72c50ca6466f342a7263bacacf9145b28d3` (pre-release) to
-`cbf0769668214c3f71bc6533f953064bc6fd53e3` (released Contract 2.0).
+`3dddf8804cf9cfb87dad375b0b1eb49018410b30` (released Contract 2.0; identical
+Kotlin engine source to `cbf0769`, which vendored the release).
 
 After installation, update required checks on Ledger `master` to:
 `test (3.10)`, `test (3.11)`, `test (3.12)`, `conformance`, `clean-install`, `web`.
@@ -62,12 +63,14 @@ manually when the pin changes.
 Executed on 2026-11-07 against the merged work:
 
 ```text
-python -m pytest -q                              -> all tests pass
+python -m pytest -o addopts="" --collect-only -q -> 353 tests collected
+python -m pytest -q                              -> all pass (exit 0)
 python -m ruff check .                           -> All checks passed
 python -m pyright --pythonpath .venv/bin/python  -> 0 errors
-cd web && pnpm test                              -> 92 tests pass
+cd web && pnpm test                              -> 98 tests pass
 cd web && pnpm lint && pnpm build                -> clean
 python tools/conformance/run_python.py           -> 38 fixtures (3 intentional errors)
+cross_engine.py --strict ... --kotlin-sha 3dddf88 -> 38 checked, 0 divergences
 ```
 
 ## Branch protection (current, 2026-11-07)
