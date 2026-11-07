@@ -133,6 +133,28 @@ def test_each_operation_reads_one_consistent_view(seeded, monkeypatch):
         assert len(calls) == 1, f"{name} opened {len(calls)} ledger views"
 
 
+def test_financial_snapshot_uses_one_metadata_transaction(seeded, monkeypatch):
+    real = db_manager.read_ledger_metadata
+    calls = []
+
+    def metadata_then_concurrent_write():
+        meta = real()
+        calls.append(meta["ledger_balance_cents"])
+        db_manager.add_transaction(
+            -1234, "Food", "Concurrent", t_type="Expense", date_str="2026-09-30"
+        )
+        return meta
+
+    monkeypatch.setattr(db_manager, "read_ledger_metadata", metadata_then_concurrent_write)
+    snapshot = decisions.financial_snapshot()
+
+    assert calls == [500_000]
+    assert snapshot["ledger_balance_cents"] == 500_000
+    assert snapshot["balance_consistent"] is True
+    assert snapshot["counts"]["transactions"] == 1
+    assert db_manager.get_ledger_balance() == 498_766
+
+
 def test_calculation_and_provenance_share_one_snapshot(seeded, monkeypatch):
     baseline = decisions.forecast(AS_OF)
     real = db_manager.read_ledger_view

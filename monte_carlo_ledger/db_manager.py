@@ -503,6 +503,44 @@ def get_ledger_stats() -> Dict[str, Any]:
     }
 
 
+def read_ledger_metadata() -> Dict[str, Any]:
+    """Balances, reconciliation and bounded counts from one read transaction.
+
+    Used by ``financial_snapshot`` so metadata cannot mix revisions. Unlike
+    ``read_ledger_view`` this does not materialize income/payment/bill rows.
+    """
+    with get_db_connection() as conn:
+        conn.execute("BEGIN DEFERRED")
+        ledger_sum = conn.execute("SELECT SUM(amount) FROM transactions").fetchone()[0]
+        stored_row = conn.execute(
+            "SELECT value FROM settings WHERE key = 'current_balance'"
+        ).fetchone()
+        bank_row = conn.execute(
+            "SELECT value FROM settings WHERE key = 'bank_balance_cents'"
+        ).fetchone()
+        stats_row = conn.execute(
+            "SELECT COUNT(*) AS transaction_count, MAX(date) AS newest_date FROM transactions"
+        ).fetchone()
+        income_count = conn.execute("SELECT COUNT(*) AS n FROM income").fetchone()["n"]
+        payment_count = conn.execute("SELECT COUNT(*) AS n FROM payments").fetchone()["n"]
+        conn.execute("COMMIT")
+    return {
+        "ledger_balance_cents": _to_int_strict(ledger_sum),
+        "stored_balance_cents": _to_int_strict(stored_row["value"]) if stored_row else 0,
+        "bank_balance_cents": (
+            _to_int_strict(bank_row["value"])
+            if bank_row is not None and bank_row["value"] is not None
+            else None
+        ),
+        "counts": {
+            "transaction_count": int(stats_row["transaction_count"]),
+            "newest_date": stats_row["newest_date"],
+            "income_source_count": int(income_count),
+            "payment_count": int(payment_count),
+        },
+    }
+
+
 def read_ledger_view(start_date: str, end_date: str) -> Dict[str, Any]:
     """Read every input a decision needs from one SQLite read transaction.
 
