@@ -166,6 +166,17 @@ def _occurrences(rec: Dict[str, Any], ceiling: date) -> List[date]:
     raise ContractError("INVALID_FREQUENCY", freq)
 
 
+def recurrence_dates(rec: Dict[str, Any], ceiling: date) -> List[date]:
+    """Public adapter entry point for canonical recurrence expansion (MCD-0022).
+
+    ``rec`` uses the canonical recurrence fields -- ``frequency``, ``start_date``,
+    optional ``anchor_day`` and optional ``end_date``. Returned dates are ascending
+    and strictly before ``ceiling``. Ledger adapters must use this rather than
+    re-implementing month stepping, so a clamped month-end date cannot drift.
+    """
+    return _occurrences(rec, ceiling)
+
+
 def expand(scenario: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], date, int, date]:
     """Expand explicit events and recurrences; return (events, as_of, horizon, window_end)."""
     if "as_of" not in scenario:

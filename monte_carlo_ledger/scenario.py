@@ -7,46 +7,72 @@ its own and it never reads a clock -- ``as_of`` is always an explicit input.
 
 from __future__ import annotations
 
+import calendar
 from datetime import date, timedelta
 from typing import Any, Dict, List, Optional
 
 from . import budget_engine, db_manager
-from .contract import CONTRACT_VERSION
+from .contract import CONTRACT_VERSION, ContractError, recurrence_dates
 
-_MAX_OCCURRENCES = 100_000
+_INCOME_FREQUENCY = {
+    "Weekly": "weekly",
+    "Bi-weekly": "biweekly",
+    "Monthly": "monthly",
+    "One-time": "onetime",
+}
+
+
+def _income_recurrence(inc: db_manager.IncomeSource) -> Dict[str, Any]:
+    """Map a persisted income row to canonical recurrence fields (MCD-0022).
+
+    The anchor is the day of ``last_payday`` (the original schedule anchor), not
+    the day of the possibly month-end-clamped ``next_payday``. A stored next
+    payday that does not match the anchored (possibly clamped) date was moved
+    deliberately, so it becomes the new anchor.
+    """
+    try:
+        last = date.fromisoformat(inc.last_payday)
+        start = date.fromisoformat(inc.next_payday)
+    except (TypeError, ValueError) as exc:
+        raise ContractError(
+            "INVALID_DATE", f"income {inc.name!r} has an invalid payday"
+        ) from exc
+
+    frequency = _INCOME_FREQUENCY.get(inc.frequency)
+    if frequency is None:
+        raise ContractError(
+            "INVALID_FREQUENCY", f"income {inc.name!r}: {inc.frequency!r}"
+        )
+
+    rec: Dict[str, Any] = {"frequency": frequency, "start_date": start.isoformat()}
+    if frequency == "monthly":
+        anchor = last.day
+        clamped = min(anchor, calendar.monthrange(start.year, start.month)[1])
+        if start.day != clamped:
+            anchor = start.day
+        rec["anchor_day"] = anchor
+    return rec
 
 
 def _income_events(as_of: date, window_end: date) -> List[Dict[str, Any]]:
-    """Materialize in-window income occurrences (MCD-0002, MCD-0017)."""
+    """Materialize in-window income occurrences with a stable anchor (MCD-0002, MCD-0022)."""
     events: List[Dict[str, Any]] = []
     for inc in db_manager.get_all_income():
-        try:
-            current = date.fromisoformat(inc.next_payday)
-        except (TypeError, ValueError):
-            continue
+        dates = recurrence_dates(_income_recurrence(inc), window_end)
         first_in_window = True
-        guard = 0
-        while current < window_end and guard < _MAX_OCCURRENCES:
-            if current >= as_of:
-                amount = inc.amount
-                if first_in_window and inc.expected_amount is not None:
-                    amount = inc.expected_amount
-                events.append({
-                    "date": current.isoformat(),
-                    "amount_cents": int(amount),
-                    "type": "income",
-                    "name": inc.name,
-                })
-                first_in_window = False
-            nxt = budget_engine.get_next_payday(current.isoformat(), inc.frequency)
-            try:
-                next_date = date.fromisoformat(nxt)
-            except ValueError:
-                break
-            if next_date <= current:
-                break
-            current = next_date
-            guard += 1
+        for occurrence in dates:
+            if occurrence < as_of:
+                continue
+            amount = inc.amount
+            if first_in_window and inc.expected_amount is not None:
+                amount = inc.expected_amount
+            events.append({
+                "date": occurrence.isoformat(),
+                "amount_cents": int(amount),
+                "type": "income",
+                "name": inc.name,
+            })
+            first_in_window = False
     return events
 
 
