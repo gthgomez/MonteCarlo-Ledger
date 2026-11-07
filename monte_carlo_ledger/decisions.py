@@ -49,10 +49,28 @@ def _require_non_negative_int(value: Any, field: str) -> int:
     return value
 
 
+def _build(
+    as_of: str,
+    horizon_days: int,
+    sim: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Build a canonical scenario for a decision operation.
+
+    Deliberately ``read_only=True``: every operation on this surface is read-only or
+    purely hypothetical, so it must not generate or mutate bill occurrences in the
+    database as a side effect of being asked a question.
+    """
+    if sim is None:
+        return scenario_mod.build_scenario(as_of, horizon_days, read_only=True)
+    return scenario_mod.build_scenario(
+        as_of, horizon_days, include_simulation=sim, read_only=True
+    )
+
+
 def forecast(as_of: str, horizon_days: int = DEFAULT_HORIZON_DAYS) -> Dict[str, Any]:
     """Deterministic forecast only (no simulation)."""
     _require_date(as_of, "as_of")
-    return run_scenario(scenario_mod.build_scenario(as_of, horizon_days))
+    return run_scenario(_build(as_of, horizon_days))
 
 
 def risk(
@@ -62,10 +80,7 @@ def risk(
 ) -> Dict[str, Any]:
     """Forecast + Monte Carlo risk block."""
     _require_date(as_of, "as_of")
-    scenario = scenario_mod.build_scenario(
-        as_of, horizon_days, include_simulation=_sim(sim)
-    )
-    return run_scenario(scenario)
+    return run_scenario(_build(as_of, horizon_days, _sim(sim)))
 
 
 def _shift_first_income(scenario: Dict[str, Any], days: int) -> None:
@@ -99,12 +114,8 @@ def simulate_purchase(
     overrides.setdefault("expense_variation_max", 0)
     params = _sim(overrides)
 
-    baseline = run_scenario(
-        scenario_mod.build_scenario(as_of, horizon_days, include_simulation=dict(params))
-    )
-    with_purchase_scenario = scenario_mod.build_scenario(
-        as_of, horizon_days, include_simulation=dict(params)
-    )
+    baseline = run_scenario(_build(as_of, horizon_days, dict(params)))
+    with_purchase_scenario = _build(as_of, horizon_days, dict(params))
     with_purchase_scenario["events"].append({
         "date": purchase_date,
         "amount_cents": -amount_cents,
@@ -143,12 +154,8 @@ def simulate_paycheck_delay(
     if not isinstance(delay_days, int) or isinstance(delay_days, bool) or delay_days < 0:
         raise ContractError("INVALID_HORIZON", f"delay_days must be a non-negative integer, got {delay_days!r}")
     params = _sim(sim)
-    baseline = run_scenario(
-        scenario_mod.build_scenario(as_of, horizon_days, include_simulation=dict(params))
-    )
-    delayed_scenario = scenario_mod.build_scenario(
-        as_of, horizon_days, include_simulation=dict(params)
-    )
+    baseline = run_scenario(_build(as_of, horizon_days, dict(params)))
+    delayed_scenario = _build(as_of, horizon_days, dict(params))
     _shift_first_income(delayed_scenario, delay_days)
     delayed = run_scenario(delayed_scenario)
     return {
@@ -179,9 +186,7 @@ def compare_scenarios(
     params = _sim(sim)
     results: List[Dict[str, Any]] = []
     for extra_events in (first, second):
-        scenario = scenario_mod.build_scenario(
-            as_of, horizon_days, include_simulation=dict(params)
-        )
+        scenario = _build(as_of, horizon_days, dict(params))
         scenario["events"].extend(extra_events)
         results.append(run_scenario(scenario))
     a, b = results
@@ -287,7 +292,7 @@ def compare_debt_strategies(
     _require_non_negative_int(extra_monthly_payment_cents, "extra_monthly_payment_cents")
     results: Dict[str, Any] = {}
     for strategy in ("snowball", "avalanche"):
-        scenario = scenario_mod.build_scenario(as_of, DEFAULT_HORIZON_DAYS)
+        scenario = _build(as_of, DEFAULT_HORIZON_DAYS)
         scenario["liabilities"] = copy.deepcopy(liabilities)
         scenario["debt_strategy"] = strategy
         scenario["extra_monthly_payment_cents"] = extra_monthly_payment_cents
