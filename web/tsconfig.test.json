@@ -23,6 +23,7 @@
     "src/lib/turso.ts",
     "src/lib/crypto.ts",
     "src/lib/sync-state.ts",
+    "src/lib/persistence.ts",
     "src/lib/vault-client.ts"
   ],
   "exclude": [
