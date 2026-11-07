@@ -239,10 +239,20 @@ def _id_map(rows: list, collection: str) -> Dict[str, int]:
         if "id" not in row or row["id"] is None:
             raise ValueError(f"Snapshot {collection} row is missing its id")
         old = row["id"]
+        key = str(old)
+        if key in mapping:
+            # Integer duplicates are left to the primary-key constraint (which rolls
+            # the transaction back). A mixed "1" / 1 collision would otherwise be
+            # silently merged into one row, so reject it explicitly.
+            if not (isinstance(old, int) and not isinstance(old, bool) and mapping[key] == old):
+                raise ValueError(
+                    f"Snapshot {collection} has colliding identifiers after normalization: {old!r}"
+                )
+            continue
         if isinstance(old, int) and not isinstance(old, bool):
-            mapping[str(old)] = old
+            mapping[key] = old
         else:
-            mapping[str(old)] = nxt
+            mapping[key] = nxt
             nxt += 1
     return mapping
 

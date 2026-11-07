@@ -12,7 +12,7 @@ from .scenario import build_scenario
 
 # A deliberately small ceiling for the HTTP boundary. Programmatic callers may use
 # larger values; an unauthenticated local HTTP client should not be able to pin a CPU.
-_MAX_RUNS = 100_000
+_MAX_RUNS = 10_000
 _MAX_QUANTILE = 1_000
 _MAX_RESERVE_CENTS = 10**12
 
