@@ -1,12 +1,20 @@
+import sqlite3
 from contextlib import asynccontextmanager
 from datetime import date
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.responses import JSONResponse
 
 from . import db_manager, decisions
-from .contract import run_scenario
+from .contract import ContractError, run_scenario
 from .scenario import build_scenario
+
+# A deliberately small ceiling for the HTTP boundary. Programmatic callers may use
+# larger values; an unauthenticated local HTTP client should not be able to pin a CPU.
+_MAX_RUNS = 100_000
+_MAX_QUANTILE = 1_000
+_MAX_RESERVE_CENTS = 10**12
 
 
 @asynccontextmanager
@@ -31,11 +39,13 @@ from fastapi.middleware.cors import CORSMiddleware
 
 app.add_middleware(
     CORSMiddleware,
+    # Local development only. A deployed Web origin must NOT be allowed to read
+    # this unauthenticated local ledger, so remote origins are intentionally absent.
     allow_origins=[
         "http://localhost:3000",
         "http://127.0.0.1:3000",
-        "https://montecarlo-ledger.vercel.app",
-        "https://montecarlo-ledger-jonathan-gomez-aguilars-projects.vercel.app",
+        "http://localhost:3100",
+        "http://127.0.0.1:3100",
     ],
     # The API is unauthenticated; it never needs or uses credentials.
     allow_credentials=False,
@@ -44,6 +54,9 @@ app.add_middleware(
 )
 
 _LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost", "testclient"}
+# Host headers accepted by the local API. This blocks DNS-rebinding requests:
+# a browser resolving attacker.example to 127.0.0.1 still sends Host: attacker.example.
+_ALLOWED_HOSTNAMES = {"127.0.0.1", "::1", "localhost", "testserver", "testclient"}
 
 
 class LoopbackOnlyMiddleware:
@@ -58,13 +71,22 @@ class LoopbackOnlyMiddleware:
     def __init__(self, app):
         self.app = app
 
+    @staticmethod
+    def _hostname(scope) -> Optional[str]:
+        for key, value in scope.get("headers", []):
+            if key == b"host":
+                raw = value.decode("latin-1").strip()
+                if raw.startswith("["):  # [::1]:8000
+                    return raw.split("]")[0].lstrip("[")
+                return raw.split(":")[0]
+        return None
+
     async def __call__(self, scope, receive, send):
         if scope.get("type") in ("http", "websocket"):
             client = scope.get("client") or (None, None)
             host = client[0] if client else None
-            if host not in _LOOPBACK_HOSTS:
-                from fastapi.responses import JSONResponse
-
+            host_header = self._hostname(scope)
+            if host not in _LOOPBACK_HOSTS or host_header not in _ALLOWED_HOSTNAMES:
                 response = JSONResponse(
                     {"detail": "MonteCarlo-Ledger local API is loopback-only (127.0.0.1)."},
                     status_code=403,
@@ -75,6 +97,31 @@ class LoopbackOnlyMiddleware:
 
 
 app.add_middleware(LoopbackOnlyMiddleware)
+
+
+@app.exception_handler(ContractError)
+async def _contract_error(_: Request, exc: ContractError) -> JSONResponse:
+    # Stable machine-readable code; never leak an internal traceback or raw values.
+    return JSONResponse(
+        {"error": exc.code, "detail": "The financial engine rejected this request."},
+        status_code=422,
+    )
+
+
+@app.exception_handler(sqlite3.DatabaseError)
+async def _database_error(_: Request, __: sqlite3.DatabaseError) -> JSONResponse:
+    return JSONResponse(
+        {"error": "DATABASE_ERROR", "detail": "The local ledger database could not be read."},
+        status_code=503,
+    )
+
+
+@app.exception_handler(ValueError)
+async def _value_error(_: Request, __: ValueError) -> JSONResponse:
+    return JSONResponse(
+        {"error": "INVALID_INPUT", "detail": "The request could not be interpreted."},
+        status_code=422,
+    )
 
 
 def _require_sync() -> None:
@@ -151,7 +198,7 @@ def v1_risk(
     as_of: str = Query(...),
     horizon_days: int = Query(90, ge=0, le=3650),
     seed: int = Query(42, ge=0),
-    runs: int = Query(500, ge=1),
+    runs: int = Query(500, ge=1, le=_MAX_RUNS),
 ):
     return decisions.risk(_resolve_as_of(as_of), horizon_days, {"seed": seed, "runs": runs})
 
@@ -180,7 +227,7 @@ def v1_overdraft(
     as_of: str = Query(...),
     horizon_days: int = Query(90, ge=0, le=3650),
     seed: int = Query(42, ge=0),
-    runs: int = Query(500, ge=1),
+    runs: int = Query(500, ge=1, le=_MAX_RUNS),
 ):
     return decisions.overdraft_risk(_resolve_as_of(as_of), horizon_days, {"seed": seed, "runs": runs})
 
@@ -192,7 +239,7 @@ def v1_simulate_purchase(
     as_of: str = Query(...),
     horizon_days: int = Query(90, ge=0, le=3650),
     seed: int = Query(42, ge=0),
-    runs: int = Query(500, ge=1),
+    runs: int = Query(500, ge=1, le=_MAX_RUNS),
 ):
     return decisions.simulate_purchase(
         amount_cents, purchase_date, _resolve_as_of(as_of), horizon_days,

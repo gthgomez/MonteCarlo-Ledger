@@ -280,18 +280,64 @@ def test_loopback_middleware_allows_loopback_client():
 
     import asyncio
 
-    for host in ("127.0.0.1", "::1", "testclient"):
+    cases = [
+        ("127.0.0.1", b"127.0.0.1:8000"),
+        ("::1", b"[::1]:8000"),
+        ("testclient", b"testserver"),
+    ]
+    for host, host_header in cases:
         sent.clear()
         scope = {
             "type": "http",
             "method": "GET",
             "path": "/",
-            "headers": [],
+            "headers": [(b"host", host_header)],
             "client": (host, 12345),
         }
         asyncio.run(middleware(scope, _receive, _send))
         assert sent and sent[0]["status"] == 200, host
     assert len(reached) == 3
+
+
+def test_loopback_middleware_rejects_dns_rebinding_host_header():
+    """A loopback peer with a foreign Host header is a DNS-rebinding attempt."""
+    async def _inner_app(scope, receive, send):  # pragma: no cover - must not be reached
+        raise AssertionError("rebound request must not reach the app")
+
+    middleware = api_module.LoopbackOnlyMiddleware(_inner_app)
+    sent = []
+
+    async def _receive():
+        return {"type": "http.request"}
+
+    async def _send(message):
+        sent.append(message)
+
+    import asyncio
+
+    scope = {
+        "type": "http",
+        "method": "GET",
+        "path": "/safe-to-spend",
+        "headers": [(b"host", b"attacker.example")],
+        "client": ("127.0.0.1", 54321),
+    }
+    asyncio.run(middleware(scope, _receive, _send))
+    assert sent[0]["status"] == 403
+
+
+def test_remote_origin_is_not_granted_cors_access():
+    client = TestClient(api_module.app)
+    response = client.options(
+        "/v1/forecast",
+        headers={
+            "Origin": "https://attacker.example",
+            "Access-Control-Request-Method": "GET",
+        },
+    )
+    assert "access-control-allow-origin" not in {
+        key.lower() for key in response.headers.keys()
+    }
 
 
 def test_api_still_serves_loopback_requests(tmp_path, monkeypatch):
