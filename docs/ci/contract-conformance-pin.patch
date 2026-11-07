@@ -1,6 +1,11 @@
-diff --git a/.github/workflows/contract-conformance.yml b/.github/workflows/contract-conformance.yml
---- a/.github/workflows/contract-conformance.yml
-+++ b/.github/workflows/contract-conformance.yml
-@@ -30,7 +30,7 @@ env:
+--- a/.github/workflows/contract-conformance.yml	2026-11-07 17:23:09.201719102 +0000
++++ b/.github/workflows/contract-conformance.yml	2026-11-07 17:23:09.202951416 +0000
+@@ -25,7 +25,7 @@
+   # Until both halves land, expect a deliberate red `conformance-live` plus a "corpus skew"
+   # warning naming the unsynchronised scenario ids (see docs/campaign/MC-07-*.md).
+   ANDROID_REPO: gthgomez/MonteCarloLedger-Android
 -  ANDROID_PIN_SHA: 6cadf72c50ca6466f342a7263bacacf9145b28d3
 +  ANDROID_PIN_SHA: cbf0769668214c3f71bc6533f953064bc6fd53e3
+ 
+ jobs:
+   # Fast, always-on path: Python against the checked-in, hash-pinned Kotlin baseline. Runs on
