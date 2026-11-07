@@ -11,8 +11,8 @@ from datetime import date, timedelta
 from typing import Any, Dict, List, Optional
 
 from . import budget_engine, db_manager
+from .contract import CONTRACT_VERSION
 
-CONTRACT_VERSION = "1.0"
 _MAX_OCCURRENCES = 100_000
 
 
