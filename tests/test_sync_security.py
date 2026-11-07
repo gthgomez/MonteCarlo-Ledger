@@ -387,6 +387,8 @@ def test_restore_round_trip_is_exact_and_idempotent(ledger_db):
 
 def test_sync_init_joins_existing_vault_using_public_metadata(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
+    db_manager.DB_PATH = str(tmp_path / "ledger.db")
+    db_manager.init_db()
     salt_b64 = base64.b64encode(os.urandom(16)).decode("ascii")
     calls = []
 
@@ -414,6 +416,8 @@ def test_sync_init_joins_existing_vault_using_public_metadata(monkeypatch, tmp_p
 
 def test_sync_init_join_with_wrong_passphrase_is_explicit(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
+    db_manager.DB_PATH = str(tmp_path / "ledger.db")
+    db_manager.init_db()
     salt_b64 = base64.b64encode(os.urandom(16)).decode("ascii")
 
     def fake_request(url, *, method="GET", payload=None, auth_token=None, timeout=30):
