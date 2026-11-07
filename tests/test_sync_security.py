@@ -280,18 +280,64 @@ def test_loopback_middleware_allows_loopback_client():
 
     import asyncio
 
-    for host in ("127.0.0.1", "::1", "testclient"):
+    cases = [
+        ("127.0.0.1", b"127.0.0.1:8000"),
+        ("::1", b"[::1]:8000"),
+        ("testclient", b"testserver"),
+    ]
+    for host, host_header in cases:
         sent.clear()
         scope = {
             "type": "http",
             "method": "GET",
             "path": "/",
-            "headers": [],
+            "headers": [(b"host", host_header)],
             "client": (host, 12345),
         }
         asyncio.run(middleware(scope, _receive, _send))
         assert sent and sent[0]["status"] == 200, host
     assert len(reached) == 3
+
+
+def test_loopback_middleware_rejects_dns_rebinding_host_header():
+    """A loopback peer with a foreign Host header is a DNS-rebinding attempt."""
+    async def _inner_app(scope, receive, send):  # pragma: no cover - must not be reached
+        raise AssertionError("rebound request must not reach the app")
+
+    middleware = api_module.LoopbackOnlyMiddleware(_inner_app)
+    sent = []
+
+    async def _receive():
+        return {"type": "http.request"}
+
+    async def _send(message):
+        sent.append(message)
+
+    import asyncio
+
+    scope = {
+        "type": "http",
+        "method": "GET",
+        "path": "/safe-to-spend",
+        "headers": [(b"host", b"attacker.example")],
+        "client": ("127.0.0.1", 54321),
+    }
+    asyncio.run(middleware(scope, _receive, _send))
+    assert sent[0]["status"] == 403
+
+
+def test_remote_origin_is_not_granted_cors_access():
+    client = TestClient(api_module.app)
+    response = client.options(
+        "/v1/forecast",
+        headers={
+            "Origin": "https://attacker.example",
+            "Access-Control-Request-Method": "GET",
+        },
+    )
+    assert "access-control-allow-origin" not in {
+        key.lower() for key in response.headers.keys()
+    }
 
 
 def test_api_still_serves_loopback_requests(tmp_path, monkeypatch):
@@ -380,3 +426,101 @@ def test_restore_round_trip_is_exact_and_idempotent(ledger_db):
 
     assert first == second
     assert first == _without_timestamp(snapshot)
+
+
+# --- vault protocol interoperability (mocked transport) ---------------------
+
+
+def test_sync_init_joins_existing_vault_using_public_metadata(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    db_manager.DB_PATH = str(tmp_path / "ledger.db")
+    db_manager.init_db()
+    salt_b64 = base64.b64encode(os.urandom(16)).decode("ascii")
+    calls = []
+
+    def fake_request(url, *, method="GET", payload=None, auth_token=None, timeout=30):
+        calls.append((method, url, auth_token))
+        if method == "POST":
+            return 409, {"error": "VAULT_ALREADY_EXISTS"}
+        if url.endswith("/metadata"):
+            return 200, {"kdf_salt_b64": salt_b64, "revision": 7}
+        return 200, {"revision": 7}
+
+    monkeypatch.setattr(sync, "_request_json", fake_request)
+    cfg = sync.sync_init("shared-vault", "passphrase", "http://vault.test")
+
+    assert cfg == {
+        "vault_id": "shared-vault",
+        "salt_b64": salt_b64,
+        "server_url": "http://vault.test",
+        "revision": 7,
+    }
+    # The join proves the passphrase with an authenticated read derived from the
+    # metadata salt (the original bug derived a fresh salt and got a 401).
+    assert any(token for (_, _, token) in calls)
+
+
+def test_sync_init_join_with_wrong_passphrase_is_explicit(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    db_manager.DB_PATH = str(tmp_path / "ledger.db")
+    db_manager.init_db()
+    salt_b64 = base64.b64encode(os.urandom(16)).decode("ascii")
+
+    def fake_request(url, *, method="GET", payload=None, auth_token=None, timeout=30):
+        if method == "POST":
+            return 409, {"error": "VAULT_ALREADY_EXISTS"}
+        if url.endswith("/metadata"):
+            return 200, {"kdf_salt_b64": salt_b64, "revision": 3}
+        return 401, {"error": "UNAUTHORIZED"}
+
+    monkeypatch.setattr(sync, "_request_json", fake_request)
+    with pytest.raises(ValueError, match="passphrase is wrong"):
+        sync.sync_init("shared-vault", "wrong", "http://vault.test")
+
+
+def test_sync_push_conflict_is_explicit_and_preserves_local_ledger(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    db_manager.DB_PATH = str(tmp_path / "ledger.db")
+    db_manager.init_db()
+    db_manager.add_transaction(500_000, "System", "Opening", t_type="Adjustment", date_str="2026-10-01")
+    sync.save_sync_config({
+        "vault_id": "v",
+        "salt_b64": base64.b64encode(os.urandom(16)).decode("ascii"),
+        "server_url": "http://vault.test",
+        "revision": 1,
+    })
+
+    def fake_request(url, *, method="GET", payload=None, auth_token=None, timeout=30):
+        assert method == "PUT"
+        assert payload["expected_revision"] == 1  # mandatory conditional write
+        return 409, {"error": "REVISION_CONFLICT", "current_revision": 2}
+
+    monkeypatch.setattr(sync, "_request_json", fake_request)
+    with pytest.raises(ValueError, match="Sync conflict"):
+        sync.sync_push(passphrase="passphrase")
+
+    # The local ledger and the recorded revision are untouched.
+    assert db_manager.get_ledger_balance() == 500_000
+    assert sync.load_sync_config()["revision"] == 1
+
+
+def test_sync_pull_wrong_passphrase_does_not_touch_the_ledger(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    db_manager.DB_PATH = str(tmp_path / "ledger.db")
+    db_manager.init_db()
+    db_manager.add_transaction(123_456, "System", "Opening", t_type="Adjustment", date_str="2026-10-01")
+    sync.save_sync_config({
+        "vault_id": "v",
+        "salt_b64": base64.b64encode(os.urandom(16)).decode("ascii"),
+        "server_url": "http://vault.test",
+        "revision": 4,
+    })
+
+    monkeypatch.setattr(
+        sync,
+        "_request_json",
+        lambda url, **kwargs: (401, {"error": "UNAUTHORIZED"}),
+    )
+    with pytest.raises(ValueError, match="Authentication failed"):
+        sync.sync_pull(passphrase="wrong")
+    assert db_manager.get_ledger_balance() == 123_456

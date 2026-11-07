@@ -15,6 +15,9 @@ export default defineConfig({
     url: "http://127.0.0.1:3100",
     reuseExistingServer: false,
     timeout: 120_000,
+    // Explicit test-only durable-store substitute. A real deployment must set
+    // TURSO_DATABASE_URL; otherwise vault routes fail closed with 503.
+    env: { ...process.env, VAULT_MEMORY_STORE: "1" },
   },
   projects: [
     { name: "desktop", use: { viewport: { width: 1280, height: 800 } } },

@@ -16,6 +16,21 @@ export class ContractError extends Error {
 }
 
 /**
+ * Convert a validated int64 amount to a JS number without losing precision.
+ *
+ * The contract allows signed 64-bit cents, but JavaScript numbers are exact only
+ * up to 2^53-1. Rather than return a silently rounded financial result, the TS
+ * binding fails closed when a value cannot be represented exactly.
+ */
+export function toSafeNumber(value: bigint): number {
+  const asNumber = Number(value);
+  if (!Number.isSafeInteger(asNumber)) {
+    throw new ContractError("MONEY_OVERFLOW", String(value));
+  }
+  return asNumber;
+}
+
+/**
  * Round n/d to nearest integer, ties away from zero. d > 0.
  */
 export function roundHalfAway(n: bigint, d: bigint): bigint {
