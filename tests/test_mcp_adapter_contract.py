@@ -18,12 +18,27 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import monte_carlo_ledger
 from monte_carlo_ledger import db_manager, decisions
 from monte_carlo_ledger.contract import ContractError
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 AS_OF = "2026-11-09"
+
+
+class PackagedSchemaTests(unittest.TestCase):
+    def test_packaged_schemas_match_the_normative_schemas(self):
+        """Runtime validation reads the packaged copy; it must never drift from the normative one."""
+        packaged = Path(monte_carlo_ledger.__file__).resolve().parent / "schemas"
+        for name in ("scenario.schema.json", "result.schema.json"):
+            with self.subTest(schema=name):
+                self.assertEqual(
+                    (packaged / name).read_bytes(),
+                    (REPO_ROOT / "schemas" / name).read_bytes(),
+                    f"{name} inside the package is stale; copy schemas/{name} into "
+                    f"monte_carlo_ledger/schemas/",
+                )
 
 
 class MCPAdapterContractTests(unittest.TestCase):

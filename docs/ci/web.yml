@@ -1,0 +1,66 @@
+name: Web
+
+on:
+  push:
+    branches: ["master"]
+    paths:
+      - "web/**"
+      - "fixtures/**"
+      - "schemas/**"
+      - ".github/workflows/web.yml"
+  pull_request:
+    paths:
+      - "web/**"
+      - "fixtures/**"
+      - "schemas/**"
+      - ".github/workflows/web.yml"
+  workflow_dispatch:
+
+jobs:
+  web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+
+      - name: Install (frozen lockfile)
+        run: pnpm install --frozen-lockfile
+
+      - name: Type check
+        run: pnpm lint
+
+      - name: Unit + contract conformance (all 38 fixtures, valid and invalid)
+        run: pnpm test
+
+      - name: Production build
+        run: pnpm build
+        env:
+          NODE_ENV: production
+
+      - name: Install Playwright browser
+        run: pnpm exec playwright install --with-deps chromium
+
+      - name: Browser E2E against the production build (desktop + mobile)
+        run: pnpm exec playwright test
+        env:
+          NODE_ENV: production
+
+      - name: Upload Playwright traces on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-traces
+          path: web/test-results
+          if-no-files-found: ignore
