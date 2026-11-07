@@ -296,3 +296,41 @@ def test_old_compatible_snapshot_still_pulls(populated_db, monkeypatch):
     restored = sync.export_ledger_snapshot()
     assert restored["version"] == "2.1"
     assert restored["current_balance_cents"] == 0
+
+
+def test_pull_fingerprint_describes_the_remapped_local_ledger(populated_db, monkeypatch):
+    """Web string ids become Python integers; ancestry must match what is stored."""
+    remote = _empty_snapshot()
+    remote["current_balance_cents"] = 100_000
+    remote["transactions"] = [
+        {
+            "id": "tx-web-1",
+            "amount_cents": 100_000,
+            "category": "System",
+            "type": "Adjustment",
+            "date": "2026-10-01",
+            "description": "Opening",
+        }
+    ]
+    server = FakeVaultServer().set_from_snapshot("passphrase", remote, revision=4)
+    monkeypatch.setattr(sync, "_request_json", server.request)
+    _cfg(server, "passphrase", 4, ancestry=True, fingerprint="stale")
+
+    sync.sync_pull(passphrase="passphrase", allow_local_overwrite=True)
+    cfg = sync.load_sync_config()
+    local_fingerprint = sync._local_ledger_fingerprint()
+    assert cfg["synced_fingerprint"] == local_fingerprint
+    assert cfg["synced_fingerprint"] != sync._snapshot_fingerprint(remote)
+
+    # An immediate second pull without edits is a no-op, not a false conflict.
+    sync.sync_pull(passphrase="passphrase")
+
+    # A real local edit is still detected.
+    db_manager.add_transaction(-500, "Coffee", "local", t_type="Expense", date_str="2026-10-02")
+    with pytest.raises(ValueError, match="never synchronized"):
+        sync.sync_pull(passphrase="passphrase")
+
+    # A compatible push after the pull uses the recorded base.
+    result = sync.sync_push(passphrase="passphrase")
+    assert result["revision"] == 5
+    assert server.revision == 5

@@ -1027,9 +1027,17 @@ def sync_pull(
     if local_changed:
         _pre_pull_backup()
     restore_ledger_snapshot(snapshot)
+    # Restore may remap string identifiers to integers, so the ancestry fingerprint
+    # must describe the canonical local export rather than the received payload.
+    local_fingerprint = _local_ledger_fingerprint()
+    if local_fingerprint is None:
+        raise ValueError(
+            "Vault restored but the local ledger could not be fingerprinted; "
+            "run `sync pull` again before pushing."
+        )
 
     cfg["revision"] = int(res.get("revision", cfg.get("revision", 1)))
-    cfg["synced_fingerprint"] = _snapshot_fingerprint(snapshot)
+    cfg["synced_fingerprint"] = local_fingerprint
     cfg["ancestry_established"] = True
     try:
         save_sync_config(cfg)
