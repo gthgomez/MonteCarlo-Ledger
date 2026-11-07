@@ -9,6 +9,7 @@ import {
   ContractError,
   roundHalfAway,
   scaleCentsByPercent,
+  toSafeNumber,
 } from "./money";
 import { SplitMix64 } from "./prng";
 
@@ -332,11 +333,43 @@ export function forecast(start: bigint, asOf: Date, ordered: InternalEvent[]): a
   }
 
   return {
-    minimum_balance_cents: Number(minimum),
+    minimum_balance_cents: toSafeNumber(minimum),
     minimum_balance_date: formatDate(minimumDate),
-    ending_balance_cents: Number(ending),
+    ending_balance_cents: toSafeNumber(ending),
     first_negative_date: firstNegative,
   };
+}
+
+export interface TimelineRow {
+  date: string;
+  name: string;
+  type: string;
+  sequence: number;
+  amount_cents: number;
+  balance_after_cents: number;
+}
+
+/**
+ * Canonical per-event running balances in contract order. Presentation must use
+ * these rows rather than re-sorting and re-accumulating events in the UI.
+ */
+export function timelineRows(scenario: any): TimelineRow[] {
+  const { events } = expand(scenario);
+  const ordered = sortEvents(events);
+  let balance = BigInt(scenario.starting_balance_cents);
+  const rows: TimelineRow[] = [];
+  for (const ev of ordered) {
+    balance = checkedAdd(balance, ev.amount);
+    rows.push({
+      date: formatDate(ev.date),
+      name: ev.name,
+      type: ev.type,
+      sequence: ev.sequence,
+      amount_cents: toSafeNumber(ev.amount),
+      balance_after_cents: toSafeNumber(balance),
+    });
+  }
+  return rows;
 }
 
 export function nearestRank(sortedValues: number[], num: number, den: number): number {
@@ -491,16 +524,20 @@ export function runScenario(scenario: any): any {
 
   const pct = (arr: number[], num: number, den: number) => nearestRank(arr, num, den);
 
+  const safePct = (arr: number[], num: number, den: number) =>
+    toSafeNumber(BigInt(pct(arr, num, den)));
   result.risk = {
     negative_balance_probability_ppm: Number(roundHalfAway(BigInt(negativeRuns) * 1000000n, BigInt(p.runs))),
-    minimum_balance_p10_cents: pct(minimums, 1, 10),
-    minimum_balance_p50_cents: pct(minimums, 1, 2),
-    minimum_balance_p90_cents: pct(minimums, 9, 10),
-    ending_balance_p10_cents: pct(endings, 1, 10),
-    ending_balance_p50_cents: pct(endings, 1, 2),
-    ending_balance_p90_cents: pct(endings, 9, 10),
+    minimum_balance_p10_cents: safePct(minimums, 1, 10),
+    minimum_balance_p50_cents: safePct(minimums, 1, 2),
+    minimum_balance_p90_cents: safePct(minimums, 9, 10),
+    ending_balance_p10_cents: safePct(endings, 1, 10),
+    ending_balance_p50_cents: safePct(endings, 1, 2),
+    ending_balance_p90_cents: safePct(endings, 9, 10),
     projected_low_point_cents: result.forecast.minimum_balance_cents,
-    safe_to_spend_cents: pct(minimums, p.quantile_num, p.quantile_den) - p.reserve_cents,
+    safe_to_spend_cents: toSafeNumber(
+      BigInt(pct(minimums, p.quantile_num, p.quantile_den) - p.reserve_cents)
+    ),
   };
 
   return result;

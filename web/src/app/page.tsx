@@ -9,7 +9,8 @@ import { LedgerManager } from "@/components/LedgerManager";
 import { SyncModal } from "@/components/SyncModal";
 import { LedgerState, SAMPLE_LEDGER_STATE } from "@/lib/types";
 import { buildScenarioFromLedger } from "@/lib/scenario-builder";
-import { runScenario } from "@/contract/engine";
+import { runScenario, timelineRows } from "@/contract/engine";
+import { parseLedgerState } from "@/lib/validate";
 import { ContractError } from "@/contract/money";
 
 const STORAGE_KEY = "montecarlo_ledger_state_v2";
@@ -32,7 +33,12 @@ export type SimulateDelayResult =
   | { status: "error"; code: string };
 
 export default function Home() {
+  // `usingDemo` is true only for a genuine first run or an explicit reset. Stored
+  // personal data is never silently replaced by plausible-looking sample numbers.
   const [state, setState] = useState<LedgerState>(SAMPLE_LEDGER_STATE);
+  const [usingDemo, setUsingDemo] = useState(false);
+  const [storageError, setStorageError] = useState<string | null>(null);
+  const [storedRaw, setStoredRaw] = useState<string | null>(null);
   const [isLoaded, setIsLoaded] = useState(false);
   const [isSyncModalOpen, setIsSyncModalOpen] = useState(false);
   const [currentVaultId, setCurrentVaultId] = useState<string | undefined>();
@@ -42,14 +48,40 @@ export default function Home() {
     try {
       const saved = localStorage.getItem(STORAGE_KEY);
       if (saved) {
-        setState(JSON.parse(saved));
+        setStoredRaw(saved);
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(saved);
+        } catch {
+          setStorageError(
+            "The saved ledger is not valid JSON. Your raw data is preserved on this device."
+          );
+          setStoredRaw(saved);
+          setIsLoaded(true);
+          return;
+        }
+        const validated = parseLedgerState(parsed);
+        if (!validated.ok) {
+          setStorageError(
+            `The saved ledger could not be loaded (${validated.error}). Your raw data is preserved on this device.`
+          );
+          setIsLoaded(true);
+          return;
+        }
+        setState(validated.state);
+        setUsingDemo(false);
+      } else {
+        // First run: an explicit, clearly-labelled demonstration ledger.
+        setUsingDemo(true);
       }
       const savedVault = localStorage.getItem("montecarlo_vault_id");
       if (savedVault) {
         setCurrentVaultId(savedVault);
       }
-    } catch {
-      // fallback to sample state
+    } catch (err: any) {
+      setStorageError(
+        `Local storage is unavailable (${err?.message ?? "unknown error"}). Changes cannot be persisted safely.`
+      );
     }
     setIsLoaded(true);
   }, []);
@@ -57,13 +89,21 @@ export default function Home() {
   // Persist to local storage
   const handleUpdateState = (nextState: LedgerState) => {
     setState(nextState);
+    setUsingDemo(false);
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(nextState));
-    } catch {}
+      setStorageError(null);
+    } catch (err: any) {
+      setStorageError(
+        `Could not save your ledger to local storage (${err?.message ?? "quota or browser restriction"}). The change is visible but not durable.`
+      );
+    }
   };
 
   const handleApplyState = (nextState: LedgerState, vaultId?: string) => {
     setState(nextState);
+    setUsingDemo(false);
+    setStorageError(null);
     if (vaultId) {
       setCurrentVaultId(vaultId);
       try {
@@ -76,11 +116,15 @@ export default function Home() {
   };
 
   const handleResetDemo = () => {
-    if (confirm("Reset ledger to sample demo data? Your local changes will be replaced.")) {
+    if (confirm("Replace this ledger with the sample demo data? Your local changes will be replaced.")) {
       setState(SAMPLE_LEDGER_STATE);
+      setUsingDemo(true);
+      setStorageError(null);
       try {
         localStorage.setItem(STORAGE_KEY, JSON.stringify(SAMPLE_LEDGER_STATE));
-      } catch {}
+      } catch (err: any) {
+        setStorageError(`Could not save the demo ledger (${err?.message ?? "storage error"}).`);
+      }
     }
   };
 
@@ -121,30 +165,26 @@ export default function Home() {
     }
   }, [canonicalScenario]);
 
-  // Event sequence for timeline chart
+  // Canonical timeline rows: ordering and running balances come from the contract
+  // engine, not from a UI re-implementation with a non-total date comparator.
   const timelineEvents = useMemo(() => {
-    if (!canonicalScenario || !canonicalScenario.events) return [];
-    let running = state.current_balance_cents;
-    const sorted = [...canonicalScenario.events].sort((a: any, b: any) => (a.date < b.date ? -1 : 1));
-
-    return sorted.map((ev: any) => {
-      running += ev.amount_cents;
-      return {
-        date: ev.date,
-        name: ev.name,
-        type: ev.type,
-        amount_cents: ev.amount_cents,
-        balance_after_cents: running,
-      };
-    });
-  }, [canonicalScenario, state.current_balance_cents]);
+    try {
+      return timelineRows(canonicalScenario);
+    } catch (err) {
+      console.error("Timeline expansion failed:", err);
+      return [];
+    }
+  }, [canonicalScenario]);
 
   // Decision Simulator Hooks — typed results; failures are surfaced, never zero-filled.
   const handleSimulatePurchase = (amountCents: number, date: string): SimulatePurchaseResult => {
+    if (!Number.isInteger(amountCents) || amountCents <= 0) {
+      return { status: "error", code: "INVALID_AMOUNT" };
+    }
     const cloned = JSON.parse(JSON.stringify(canonicalScenario));
     cloned.events.push({
       date,
-      amount_cents: -Math.abs(amountCents),
+      amount_cents: -amountCents,
       type: "expense",
       name: "Simulated Purchase",
     });
@@ -189,6 +229,49 @@ export default function Home() {
     return (
       <div className="min-h-screen flex items-center justify-center bg-slate-950 text-slate-400 text-sm">
         Loading Monte Carlo Contract Engine...
+      </div>
+    );
+  }
+
+  if (storageError) {
+    return (
+      <div className="min-h-screen flex flex-col items-center justify-center bg-slate-950 text-slate-200 p-6">
+        <div className="max-w-xl w-full rounded-2xl border border-amber-800/60 bg-amber-950/20 p-6 space-y-4">
+          <h1 className="text-base font-bold text-amber-300 uppercase tracking-wider">
+            Saved Ledger Not Loaded
+          </h1>
+          <p className="text-sm text-slate-300">{storageError}</p>
+          <p className="text-xs text-slate-400">
+            No forecast is shown because the stored financial data could not be validated.
+            The raw data has not been deleted or replaced.
+          </p>
+          <div className="flex flex-wrap gap-3 pt-1">
+            {storedRaw && (
+              <a
+                href={
+                  "data:text/json;charset=utf-8," +
+                  encodeURIComponent(storedRaw)
+                }
+                download="montecarlo-ledger-recovery.json"
+                className="px-4 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold"
+              >
+                Download raw data
+              </a>
+            )}
+            <button
+              onClick={handleResetDemo}
+              className="px-4 py-2 rounded-lg bg-amber-600 hover:bg-amber-500 text-white text-xs font-semibold"
+            >
+              Replace with sample data (explicit)
+            </button>
+            <a
+              href="/"
+              className="px-4 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold"
+            >
+              Retry
+            </a>
+          </div>
+        </div>
       </div>
     );
   }
@@ -252,6 +335,13 @@ export default function Home() {
       />
 
       <main className="flex-1 max-w-7xl w-full mx-auto p-4 sm:p-8 space-y-6">
+        {usingDemo && (
+          <div className="rounded-xl border border-sky-700/50 bg-sky-950/30 px-4 py-3 text-xs text-sky-200">
+            <strong className="font-semibold">Demo data — not your finances.</strong>{" "}
+            This is a sample household to explore the engine. Add your own ledger below, or
+            import a backup / pull a vault to replace it.
+          </div>
+        )}
         <SafeSpendHero
           currentBalanceCents={state.current_balance_cents}
           safeSpendCents={risk.safe_to_spend_cents}

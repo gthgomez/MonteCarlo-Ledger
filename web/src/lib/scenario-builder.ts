@@ -52,16 +52,29 @@ export function buildScenarioFromLedger(
   // 1. Materialize Income Occurrences
   for (const inc of state.incomes) {
     let current = inc.next_payday;
-    const incomeAnchorDay = Number(inc.next_payday.split("-")[2]);
+    // Anchor on the original last_payday day, not the possibly clamped next_payday
+    // (MCD-0022). A deliberately moved next payday becomes the new anchor.
+    const lastAnchorDay = Number(inc.last_payday.split("-")[2]);
+    const nextDay = Number(inc.next_payday.split("-")[2]);
+    const [ny, nm] = inc.next_payday.split("-").map(Number);
+    const lastOfNextMonth = new Date(Date.UTC(ny, nm, 0)).getUTCDate();
+    const incomeAnchorDay =
+      nextDay === Math.min(lastAnchorDay, lastOfNextMonth) ? lastAnchorDay : nextDay;
+    let firstInWindow = true;
     let guard = 0;
     while (current < windowEnd && guard < 1000) {
       if (current >= asOf) {
+        const amount =
+          firstInWindow && inc.expected_amount !== undefined && inc.expected_amount !== null
+            ? inc.expected_amount
+            : inc.amount_cents;
         events.push({
           date: current,
-          amount_cents: inc.amount_cents,
+          amount_cents: amount,
           type: "income",
           name: inc.name,
         });
+        firstInWindow = false;
       }
       const nextDate = getNextDate(current, inc.frequency, incomeAnchorDay);
       if (nextDate <= current) break;
@@ -95,7 +108,7 @@ export function buildScenarioFromLedger(
           if (!paidSet.has(`${pmt.id}::${dueIso}`)) {
             events.push({
               date: dueIso,
-              amount_cents: -Math.abs(pmt.amount_cents),
+              amount_cents: -pmt.amount_cents,
               type: "expense",
               name: pmt.name,
             });
@@ -111,7 +124,7 @@ export function buildScenarioFromLedger(
           if (!paidSet.has(`${pmt.id}::${current}`)) {
             events.push({
               date: current,
-              amount_cents: -Math.abs(pmt.amount_cents),
+              amount_cents: -pmt.amount_cents,
               type: "expense",
               name: pmt.name,
             });

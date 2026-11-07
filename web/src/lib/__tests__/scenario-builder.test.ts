@@ -159,3 +159,46 @@ test("monthly payment with due_day clamps to month end without drift", () => {
   const dates = scenario.events.map((e: any) => e.date).sort();
   assert.deepEqual(dates, ["2027-01-31", "2027-02-28", "2027-03-31"]);
 });
+
+test("a clamped stored next_payday does not erase the original anchor", () => {
+  const state = emptyState({
+    incomes: [
+      {
+        id: "inc-1",
+        name: "Monthly Salary",
+        amount_cents: 100000,
+        frequency: "Monthly",
+        last_payday: "2027-01-31",
+        next_payday: "2027-02-28", // stored clamped occurrence
+      },
+    ],
+  });
+  const scenario = buildScenarioFromLedger(state, "2027-02-01", 90);
+  const incomeDates = scenario.events
+    .filter((e: any) => e.type === "income")
+    .map((e: any) => e.date)
+    .sort();
+  assert.deepEqual(incomeDates, ["2027-02-28", "2027-03-31", "2027-04-30"]);
+});
+
+test("expected_amount overrides only the first projected paycheck", () => {
+  const state = emptyState({
+    incomes: [
+      {
+        id: "inc-1",
+        name: "Monthly Salary",
+        amount_cents: 220000,
+        expected_amount: 235000,
+        frequency: "Monthly",
+        last_payday: "2027-01-31",
+        next_payday: "2027-02-28",
+      },
+    ],
+  });
+  const scenario = buildScenarioFromLedger(state, "2027-02-01", 120);
+  const amounts = scenario.events
+    .filter((e: any) => e.type === "income")
+    .map((e: any) => e.amount_cents);
+  assert.equal(amounts[0], 235000);
+  assert.deepEqual(amounts.slice(1), [220000, 220000, 220000]);
+});

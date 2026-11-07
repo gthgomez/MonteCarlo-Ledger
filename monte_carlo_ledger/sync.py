@@ -17,6 +17,7 @@ import json
 import os
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import date, datetime, timezone
 from typing import Any, Dict, Optional, Tuple
@@ -460,6 +461,79 @@ def save_sync_config(config: Dict[str, Any]) -> None:
         json.dump(config, f, indent=2)
 
 
+def _request_json(
+    url: str,
+    *,
+    method: str = "GET",
+    payload: Optional[Dict[str, Any]] = None,
+    auth_token: Optional[str] = None,
+    timeout: int = 30,
+) -> Tuple[int, Dict[str, Any]]:
+    """Perform one vault request, returning (status, parsed body) without raising on 4xx."""
+    data = json.dumps(payload).encode("utf-8") if payload is not None else None
+    headers: Dict[str, str] = {}
+    if data is not None:
+        headers["Content-Type"] = "application/json"
+    if auth_token:
+        headers["Authorization"] = f"Bearer {auth_token}"
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            status = getattr(resp, "status", None)
+            if status is None:
+                status = resp.getcode() if hasattr(resp, "getcode") else 200
+            return int(status or 200), json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        try:
+            body = json.loads(exc.read().decode("utf-8"))
+        except Exception:
+            body = {}
+        return exc.code, body
+
+
+def _vault_urls(server_url: str, vault_id: str) -> Tuple[str, str]:
+    base = server_url.rstrip("/")
+    quoted = urllib.parse.quote(vault_id, safe="")
+    return f"{base}/api/vault/{quoted}", f"{base}/api/vault/{quoted}/metadata"
+
+
+def _join_existing_vault(
+    vault_id: str, passphrase: str, server_url: str
+) -> Dict[str, Any]:
+    """Attach to an existing vault (e.g. one created by the Web UI).
+
+    The KDF salt is public metadata; deriving with it produces the same auth token
+    the creating client registered. The passphrase is verified with an authenticated
+    read before the local config is saved.
+    """
+    record_url, metadata_url = _vault_urls(server_url, vault_id)
+    status, meta = _request_json(metadata_url)
+    if status != 200 or not isinstance(meta.get("kdf_salt_b64"), str):
+        raise ValueError(
+            f"Could not read metadata for existing vault {vault_id!r} (HTTP {status})."
+        )
+    try:
+        salt = base64.b64decode(meta["kdf_salt_b64"], validate=True)
+    except Exception as exc:
+        raise ValueError("Existing vault has invalid KDF metadata.") from exc
+    auth_token, _ = derive_keys(passphrase, salt)
+    read_status, _ = _request_json(record_url, auth_token=auth_token)
+    if read_status == 401:
+        raise ValueError(
+            f"A vault with id {vault_id!r} already exists but the passphrase is wrong."
+        )
+    if read_status != 200:
+        raise ValueError(f"Could not authenticate to existing vault (HTTP {read_status}).")
+    cfg = {
+        "vault_id": vault_id,
+        "salt_b64": meta["kdf_salt_b64"],
+        "server_url": server_url,
+        "revision": int(meta.get("revision", 1)),
+    }
+    save_sync_config(cfg)
+    return cfg
+
+
 def sync_init(vault_id: str, passphrase: Optional[str] = None, server_url: str = DEFAULT_SERVER_URL) -> Dict[str, Any]:
     """Create a vault. The passphrase is resolved per credential policy and never stored."""
     passphrase = resolve_passphrase(
@@ -483,15 +557,13 @@ def sync_init(vault_id: str, passphrase: Optional[str] = None, server_url: str =
     }
 
     url = f"{server_url.rstrip('/')}/api/vault"
-    req = urllib.request.Request(
-        url,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-
-    with urllib.request.urlopen(req) as resp:
-        res = json.loads(resp.read().decode("utf-8"))
+    status, res = _request_json(url, method="POST", payload=payload)
+    if status == 409:
+        # The vault already exists (possibly created by the Web UI). Attach to it
+        # with its stored salt instead of overwriting it or failing opaquely.
+        return _join_existing_vault(vault_id, passphrase, server_url)
+    if status not in (200, 201):
+        raise ValueError(f"Vault creation failed (HTTP {status}): {res.get('error', 'unknown')}")
 
     # Deliberately no "passphrase" here: credentials live in the user's head or
     # environment, not on disk. sync_push/sync_pull re-resolve it every run.
@@ -536,18 +608,18 @@ def sync_push(server_url: Optional[str] = None, passphrase: Optional[str] = None
         "kdf_salt_b64": cfg["salt_b64"],
     }
 
-    req = urllib.request.Request(
-        url,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {auth_token}",
-        },
-        method="PUT",
-    )
-
-    with urllib.request.urlopen(req) as resp:
-        res = json.loads(resp.read().decode("utf-8"))
+    status, res = _request_json(url, method="PUT", payload=payload, auth_token=auth_token)
+    if status == 401:
+        raise ValueError("Authentication failed: wrong vault passphrase.")
+    if status == 409:
+        raise ValueError(
+            "Sync conflict: this vault was modified by another client "
+            f"(current revision {res.get('current_revision')}). "
+            "Run `monte-carlo-ledger sync pull` before pushing again; "
+            "your local ledger has not been overwritten."
+        )
+    if status not in (200, 201):
+        raise ValueError(f"Vault push failed (HTTP {status}): {res.get('error', 'unknown')}")
 
     cfg["revision"] = res.get("revision", cfg.get("revision", 1) + 1)
     save_sync_config(cfg)
@@ -566,14 +638,11 @@ def sync_pull(server_url: Optional[str] = None, passphrase: Optional[str] = None
     url_base = (server_url or cfg.get("server_url", DEFAULT_SERVER_URL)).rstrip("/")
     url = f"{url_base}/api/vault/{cfg['vault_id']}"
 
-    req = urllib.request.Request(
-        url,
-        headers={"Authorization": f"Bearer {auth_token}"},
-        method="GET",
-    )
-
-    with urllib.request.urlopen(req) as resp:
-        res = json.loads(resp.read().decode("utf-8"))
+    status, res = _request_json(url, auth_token=auth_token)
+    if status == 401:
+        raise ValueError("Authentication failed: wrong vault passphrase.")
+    if status != 200:
+        raise ValueError(f"Vault pull failed (HTTP {status}): {res.get('error', 'unknown')}")
 
     snapshot = decrypt_payload(res["ciphertext_b64"], res["nonce_b64"], enc_key)
     restore_ledger_snapshot(snapshot)

@@ -1,45 +1,57 @@
 import { NextResponse } from "next/server";
-import { getVaultRecord, hashAuthToken, saveVaultRecord } from "@/lib/turso";
+import { createVaultRecord, hashAuthToken, storageAvailable } from "@/lib/turso";
+import {
+  isAuthToken,
+  isCiphertext,
+  isNonce,
+  isSalt,
+  isValidVaultId,
+} from "@/lib/vault-protocol";
+
+function unavailable() {
+  return NextResponse.json({ error: "STORAGE_UNAVAILABLE" }, { status: 503 });
+}
 
 export async function POST(req: Request) {
+  let body: any;
   try {
-    const body = await req.json();
-    const { vault_id, auth_token, ciphertext_b64, nonce_b64, kdf_salt_b64 } = body;
+    body = await req.json();
+  } catch {
+    return NextResponse.json({ error: "MALFORMED_JSON" }, { status: 400 });
+  }
 
-    if (!vault_id || !auth_token || !ciphertext_b64 || !nonce_b64 || !kdf_salt_b64) {
-      return NextResponse.json(
-        { error: "MISSING_REQUIRED_FIELDS" },
-        { status: 400 }
-      );
-    }
+  const { vault_id, auth_token, ciphertext_b64, nonce_b64, kdf_salt_b64 } = body ?? {};
+  if (!isValidVaultId(vault_id)) {
+    return NextResponse.json({ error: "INVALID_VAULT_ID" }, { status: 400 });
+  }
+  if (
+    !isAuthToken(auth_token) ||
+    !isCiphertext(ciphertext_b64) ||
+    !isNonce(nonce_b64) ||
+    !isSalt(kdf_salt_b64)
+  ) {
+    return NextResponse.json({ error: "INVALID_VAULT_PAYLOAD" }, { status: 400 });
+  }
 
-    const existing = await getVaultRecord(vault_id);
-    if (existing) {
-      return NextResponse.json(
-        { error: "VAULT_ALREADY_EXISTS" },
-        { status: 409 }
-      );
-    }
+  if (!storageAvailable()) {
+    return unavailable();
+  }
 
-    const authKeyHash = hashAuthToken(auth_token);
-    await saveVaultRecord({
+  try {
+    const created = await createVaultRecord({
       vault_id,
-      auth_key_hash: authKeyHash,
+      auth_key_hash: hashAuthToken(auth_token),
       revision: 1,
       ciphertext_b64,
       nonce_b64,
       kdf_salt_b64,
     });
-
-    return NextResponse.json({
-      success: true,
-      vault_id,
-      revision: 1,
-    });
-  } catch (err: any) {
-    return NextResponse.json(
-      { error: err.message || "INTERNAL_ERROR" },
-      { status: 500 }
-    );
+    if (!created) {
+      return NextResponse.json({ error: "VAULT_ALREADY_EXISTS" }, { status: 409 });
+    }
+    return NextResponse.json({ success: true, vault_id, revision: 1 }, { status: 201 });
+  } catch (err) {
+    console.error("[vault] create failed:", err instanceof Error ? err.name : "unknown");
+    return NextResponse.json({ error: "INTERNAL_ERROR" }, { status: 500 });
   }
 }

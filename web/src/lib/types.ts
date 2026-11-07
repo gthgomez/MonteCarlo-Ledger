@@ -5,6 +5,7 @@ export interface IncomeItem {
   frequency: "Weekly" | "Bi-weekly" | "Monthly" | "One-time";
   last_payday: string;
   next_payday: string;
+  expected_amount?: number | null;
 }
 
 export interface PaymentItem {
@@ -47,7 +48,7 @@ export interface LiabilityItem {
 }
 
 export interface LedgerState {
-  version: "2.0";
+  version: "2.0" | "2.1";
   updated_at: string;
   current_balance_cents: number;
   incomes: IncomeItem[];
