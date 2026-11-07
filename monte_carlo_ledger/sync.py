@@ -22,6 +22,7 @@ import urllib.request
 from datetime import date, datetime, timezone
 from typing import Any, Dict, Optional, Tuple
 
+from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from . import db_manager
@@ -361,15 +362,12 @@ _SNAPSHOT_PAYMENT_RECURRENCES = frozenset({"Monthly", "One-time", "Weekly", "Bi-
 _SNAPSHOT_TRANSACTION_TYPES = frozenset({"Income", "Expense", "Adjustment"})
 
 
-def restore_ledger_snapshot(snapshot: Dict[str, Any]) -> None:
-    """Atomically restore a ledger snapshot into the local database.
+def _validate_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
+    """Fully validate a snapshot without touching the database.
 
-    The whole replacement runs in one SQLite transaction and the snapshot's internal
-    consistency (declared balance == sum of its transactions) is checked *before*
-    commit. A rejected or interrupted restore therefore leaves the pre-existing ledger
-    exactly as it was. Every field is validated before any row is written, non-integer
-    identifiers are remapped deterministically, and data the Python ledger cannot
-    represent (liabilities) is rejected instead of being silently discarded.
+    Returns the validated collections and id maps. Callers use this both to restore
+    and to prove compatibility (join/push preflight) before any data is exchanged.
+    Nothing here mutates persistent state.
     """
     if not isinstance(snapshot, dict):
         raise ValueError("Snapshot must be an object")
@@ -496,10 +494,39 @@ def restore_ledger_snapshot(snapshot: Dict[str, Any]) -> None:
             f"declared balance is {declared_balance}"
         )
 
-    income_ids = _id_map(incomes, "incomes")
-    payment_ids = _id_map(payments, "payments")
-    transaction_ids = _id_map(transactions, "transactions")
-    occurrence_ids = _id_map(occurrences, "bill_occurrences")
+    return {
+        "declared_balance": declared_balance,
+        "incomes": incomes,
+        "payments": payments,
+        "transactions": transactions,
+        "occurrences": occurrences,
+        "income_ids": _id_map(incomes, "incomes"),
+        "payment_ids": _id_map(payments, "payments"),
+        "transaction_ids": _id_map(transactions, "transactions"),
+        "occurrence_ids": _id_map(occurrences, "bill_occurrences"),
+    }
+
+
+def restore_ledger_snapshot(snapshot: Dict[str, Any]) -> None:
+    """Atomically restore a ledger snapshot into the local database.
+
+    The whole replacement runs in one SQLite transaction and the snapshot's internal
+    consistency (declared balance == sum of its transactions) is checked *before*
+    commit. A rejected or interrupted restore therefore leaves the pre-existing ledger
+    exactly as it was. Every field is validated before any row is written, non-integer
+    identifiers are remapped deterministically, and data the Python ledger cannot
+    represent (liabilities) is rejected instead of being silently discarded.
+    """
+    validated = _validate_snapshot(snapshot)
+    declared_balance: int = validated["declared_balance"]
+    incomes: list = validated["incomes"]
+    payments: list = validated["payments"]
+    transactions: list = validated["transactions"]
+    occurrences: list = validated["occurrences"]
+    income_ids: Dict[str, int] = validated["income_ids"]
+    payment_ids: Dict[str, int] = validated["payment_ids"]
+    transaction_ids: Dict[str, int] = validated["transaction_ids"]
+    occurrence_ids: Dict[str, int] = validated["occurrence_ids"]
 
     # A consistent snapshot is kept as a last-resort recovery aid for tooling. The
     # transaction below is what guarantees atomicity.
@@ -605,6 +632,63 @@ def save_sync_config(config: Dict[str, Any]) -> None:
         json.dump(config, f, indent=2)
 
 
+def _snapshot_fingerprint(snapshot: Dict[str, Any]) -> str:
+    """Stable content fingerprint, excluding the export timestamp."""
+    core = {key: value for key, value in snapshot.items() if key != "updated_at"}
+    encoded = json.dumps(core, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _local_ledger_fingerprint() -> Optional[str]:
+    try:
+        return _snapshot_fingerprint(export_ledger_snapshot())
+    except ValueError:
+        # A desynchronized local ledger cannot be exported; treat it as changed.
+        return None
+
+
+def _local_ledger_has_content() -> bool:
+    stats = db_manager.get_ledger_stats()
+    return bool(
+        stats["transaction_count"] or stats["income_source_count"] or stats["payment_count"]
+    )
+
+
+def _require_remote_compatible(snapshot: Dict[str, Any], vault_id: str) -> None:
+    """Refuse to touch a vault whose financial data Python cannot represent.
+
+    This is a preflight: it validates the decrypted remote snapshot without modifying
+    either side. Liabilities and unknown fields are the concrete incompatibilities.
+    """
+    try:
+        _validate_snapshot(snapshot)
+    except ValueError as exc:
+        raise ValueError(
+            f"Vault {vault_id!r} contains financial data the Python ledger cannot "
+            f"represent safely ({exc}). Refusing to overwrite it; use the Web or "
+            "Android client for this vault."
+        ) from exc
+
+
+def _decrypt_remote_record(record: Dict[str, Any], enc_key: bytes, vault_id: str) -> Dict[str, Any]:
+    try:
+        return decrypt_payload(record["ciphertext_b64"], record["nonce_b64"], enc_key)
+    except (KeyError, TypeError, ValueError, InvalidTag) as exc:
+        raise ValueError(
+            f"Vault {vault_id!r} returned a payload that could not be decrypted or parsed."
+        ) from exc
+
+
+def _pre_pull_backup() -> Optional[str]:
+    """Preserve the local ledger before a potentially destructive pull."""
+    db_path = db_manager.DB_PATH
+    if not os.path.exists(db_path):
+        return None
+    backup_path = f"{db_path}.pre-pull-backup"
+    _sqlite_backup(db_path, backup_path)
+    return backup_path
+
+
 def _request_json(
     url: str,
     *,
@@ -660,19 +744,28 @@ def _join_existing_vault(
         salt = base64.b64decode(meta["kdf_salt_b64"], validate=True)
     except Exception as exc:
         raise ValueError("Existing vault has invalid KDF metadata.") from exc
-    auth_token, _ = derive_keys(passphrase, salt)
-    read_status, _ = _request_json(record_url, auth_token=auth_token)
+    auth_token, enc_key = derive_keys(passphrase, salt)
+    read_status, record = _request_json(record_url, auth_token=auth_token)
     if read_status == 401:
         raise ValueError(
             f"A vault with id {vault_id!r} already exists but the passphrase is wrong."
         )
     if read_status != 200:
         raise ValueError(f"Could not authenticate to existing vault (HTTP {read_status}).")
+
+    # Authentication proves the passphrase, not that this client can represent the
+    # remote data. Refuse before saving any config if the vault is incompatible.
+    remote_snapshot = _decrypt_remote_record(record, enc_key, vault_id)
+    _require_remote_compatible(remote_snapshot, vault_id)
+
+    # Joining does NOT establish ancestry: the local ledger has not been reconciled
+    # with this revision. A push is refused until a pull has actually happened.
     cfg = {
         "vault_id": vault_id,
         "salt_b64": meta["kdf_salt_b64"],
         "server_url": server_url,
-        "revision": int(meta.get("revision", 1)),
+        "revision": int(record.get("revision", meta.get("revision", 1))),
+        "ancestry_established": False,
     }
     save_sync_config(cfg)
     return cfg
@@ -716,6 +809,9 @@ def sync_init(vault_id: str, passphrase: Optional[str] = None, server_url: str =
         "salt_b64": salt_b64,
         "server_url": server_url,
         "revision": res.get("revision", 1),
+        # A creation uploads this local ledger, so it is the synchronization base.
+        "ancestry_established": True,
+        "synced_fingerprint": _snapshot_fingerprint(snapshot),
     }
     save_sync_config(cfg)
     return cfg
@@ -735,6 +831,13 @@ def sync_push(server_url: Optional[str] = None, passphrase: Optional[str] = None
     if not cfg:
         raise ValueError("Sync not initialized. Run `monte-carlo-ledger sync init` first.")
 
+    if not cfg.get("ancestry_established", False):
+        raise ValueError(
+            "This vault was joined or its ancestry is unknown. Run "
+            "`monte-carlo-ledger sync pull` first so the local ledger is based on the "
+            "remote revision; refusing to overwrite data this client has not observed."
+        )
+
     passphrase = _passphrase_for_operation(passphrase, cfg)
     salt = base64.b64decode(cfg["salt_b64"])
     auth_token, enc_key = derive_keys(passphrase, salt)
@@ -745,8 +848,28 @@ def sync_push(server_url: Optional[str] = None, passphrase: Optional[str] = None
     url_base = (server_url or cfg.get("server_url", DEFAULT_SERVER_URL)).rstrip("/")
     url = f"{url_base}/api/vault/{cfg['vault_id']}"
 
+    # Preflight: inspect the current remote snapshot before any write. This proves
+    # both ancestry (same revision) and compatibility (nothing Python cannot persist).
+    status, current = _request_json(url, auth_token=auth_token)
+    if status == 401:
+        raise ValueError("Authentication failed: wrong vault passphrase.")
+    if status != 200:
+        raise ValueError(f"Vault preflight failed (HTTP {status}): {current.get('error', 'unknown')}")
+    remote_snapshot = _decrypt_remote_record(current, enc_key, cfg["vault_id"])
+    _require_remote_compatible(remote_snapshot, cfg["vault_id"])
+
+    base_revision = int(cfg.get("revision", 1))
+    remote_revision = int(current.get("revision", base_revision))
+    if remote_revision != base_revision:
+        raise ValueError(
+            "Sync conflict: this vault was modified by another client "
+            f"(current revision {remote_revision}, local base {base_revision}). "
+            "Run `monte-carlo-ledger sync pull` before pushing again; "
+            "your local ledger has not been overwritten."
+        )
+
     payload = {
-        "expected_revision": cfg.get("revision", 1),
+        "expected_revision": base_revision,
         "ciphertext_b64": ct_b64,
         "nonce_b64": nonce_b64,
         "kdf_salt_b64": cfg["salt_b64"],
@@ -765,12 +888,18 @@ def sync_push(server_url: Optional[str] = None, passphrase: Optional[str] = None
     if status not in (200, 201):
         raise ValueError(f"Vault push failed (HTTP {status}): {res.get('error', 'unknown')}")
 
-    cfg["revision"] = res.get("revision", cfg.get("revision", 1) + 1)
+    cfg["revision"] = res.get("revision", base_revision + 1)
+    cfg["synced_fingerprint"] = _snapshot_fingerprint(snapshot)
+    cfg["ancestry_established"] = True
     save_sync_config(cfg)
     return res
 
 
-def sync_pull(server_url: Optional[str] = None, passphrase: Optional[str] = None) -> Dict[str, Any]:
+def sync_pull(
+    server_url: Optional[str] = None,
+    passphrase: Optional[str] = None,
+    allow_local_overwrite: bool = False,
+) -> Dict[str, Any]:
     cfg = load_sync_config()
     if not cfg:
         raise ValueError("Sync not initialized. Run `monte-carlo-ledger sync init` first.")
@@ -778,6 +907,23 @@ def sync_pull(server_url: Optional[str] = None, passphrase: Optional[str] = None
     passphrase = _passphrase_for_operation(passphrase, cfg)
     salt = base64.b64decode(cfg["salt_b64"])
     auth_token, enc_key = derive_keys(passphrase, salt)
+
+    # Detect whether this pull would discard unsynchronized local data.
+    local_fingerprint = _local_ledger_fingerprint()
+    if not cfg.get("ancestry_established", False):
+        local_changed = _local_ledger_has_content()
+    elif "synced_fingerprint" in cfg:
+        local_changed = local_fingerprint is None or local_fingerprint != cfg["synced_fingerprint"]
+    else:
+        local_changed = True
+
+    if local_changed and not allow_local_overwrite:
+        backup = _pre_pull_backup()
+        raise ValueError(
+            "Local ledger has changes that were never synchronized. Pulling would "
+            f"replace them. A recovery copy was written to {backup!r}; export it or "
+            "rerun `sync pull --force` to accept the replacement."
+        )
 
     url_base = (server_url or cfg.get("server_url", DEFAULT_SERVER_URL)).rstrip("/")
     url = f"{url_base}/api/vault/{cfg['vault_id']}"
@@ -788,11 +934,23 @@ def sync_pull(server_url: Optional[str] = None, passphrase: Optional[str] = None
     if status != 200:
         raise ValueError(f"Vault pull failed (HTTP {status}): {res.get('error', 'unknown')}")
 
-    snapshot = decrypt_payload(res["ciphertext_b64"], res["nonce_b64"], enc_key)
+    snapshot = _decrypt_remote_record(res, enc_key, cfg["vault_id"])
+    # restore_ledger_snapshot validates fully before touching the database and rolls
+    # back atomically, so an invalid payload leaves the local ledger untouched.
+    if local_changed:
+        _pre_pull_backup()
     restore_ledger_snapshot(snapshot)
 
-    cfg["revision"] = res.get("revision", cfg.get("revision", 1))
-    save_sync_config(cfg)
+    cfg["revision"] = int(res.get("revision", cfg.get("revision", 1)))
+    cfg["synced_fingerprint"] = _snapshot_fingerprint(snapshot)
+    cfg["ancestry_established"] = True
+    try:
+        save_sync_config(cfg)
+    except OSError as exc:
+        raise ValueError(
+            "The ledger was restored but the sync revision could not be saved. "
+            "Run `sync pull` again before pushing."
+        ) from exc
     return {
         "status": "restored",
         "revision": cfg["revision"],
