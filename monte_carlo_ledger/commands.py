@@ -99,6 +99,11 @@ def _build_parser() -> argparse.ArgumentParser:
     p_sync_push.add_argument("--server", default=None)
     p_sync_pull = sync_sub.add_parser("pull", help="pull and decrypt snapshot from cloud vault")
     p_sync_pull.add_argument("--server", default=None)
+    p_sync_pull.add_argument(
+        "--force",
+        action="store_true",
+        help="replace unsynchronized local changes (a recovery copy is written first)",
+    )
     sync_sub.add_parser(
         "lock",
         help="remove any plaintext passphrase from the local sync config (deprecated field)",
@@ -226,7 +231,7 @@ def _dispatch(args) -> int:
             print(f"Pushed to vault: rev {res.get('revision')}")
             return 0
         elif args.sync_action == "pull":
-            res = sync.sync_pull(args.server)
+            res = sync.sync_pull(args.server, allow_local_overwrite=args.force)
             print(f"Pulled from vault: restored {res['transactions_count']} transactions, balance: {_format_money(res['balance_cents'])}")
             return 0
         elif args.sync_action == "lock":
