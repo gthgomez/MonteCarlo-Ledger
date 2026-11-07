@@ -177,14 +177,15 @@ class SnapshotFidelityTest(unittest.TestCase):
             sync.restore_ledger_snapshot(snapshot)
         self.assertEqual(_db_state(), before)
 
-    def test_duplicate_identifiers_roll_back(self):
+    def test_duplicate_identifiers_are_rejected_before_mutation(self):
         self._seed_full_ledger()
         before = _db_state()
         snapshot = sync.export_ledger_snapshot()
         snapshot["transactions"].append(json.loads(json.dumps(snapshot["transactions"][0])))
         snapshot["current_balance_cents"] += snapshot["transactions"][0]["amount_cents"]
-        with self.assertRaises(sqlite3.IntegrityError):
+        with self.assertRaises(ValueError) as ctx:
             sync.restore_ledger_snapshot(snapshot)
+        self.assertIn("duplicate identifier", str(ctx.exception))
         self.assertEqual(_db_state(), before)
 
     def test_version_2_0_snapshot_restores_without_expected_amount(self):
