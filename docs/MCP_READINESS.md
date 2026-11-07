@@ -41,6 +41,11 @@ engine output (validated by `schemas/result.schema.json`):
   `ending_balance_p10/p50/p90_cents`, `projected_low_point_cents`, `safe_to_spend_cents`.
 - `debt` (when liabilities are declared): `strategy`, `months_to_payoff`, `payoff_date`,
   `total_interest_cents`, `total_paid_cents`, `did_not_converge`, `schedule[]`.
+- `ledger` (every decision op): `source`, `read_only`, `ledger_balance_cents`,
+  `stored_balance_cents`, `balance_consistent`, `bank_balance_cents` (nullable),
+  `reconciled_with_bank`. This is provenance, not a financial input: the forecast always uses
+  the authoritative transaction sum, and an unexplained cache/bank difference is surfaced so an
+  adapter does not present it as trustworthy spending capacity.
 
 Money is **integer cents** (MCD-0007 rounding, MCD-0020 overflow-is-error), probabilities are **ppm**
 (MCD-0004), quantiles use nearest-rank (MCD-0005), and time is **explicit `as_of` date-only**
@@ -130,7 +135,7 @@ def handle(name, args):
 
 ## 6. Adapter-facing evidence
 
-`tests/test_mcp_adapter_contract.py` (28 tests) pins, against the real core:
+`tests/test_mcp_adapter_contract.py` (29 tests) pins, against the real core:
 
 - capability shape + agreement with `contracts/version.json`,
 - bit-for-bit reproducible forecast/risk for a fixed seed,
