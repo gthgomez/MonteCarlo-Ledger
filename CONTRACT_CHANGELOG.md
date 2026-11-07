@@ -4,7 +4,13 @@ All material changes to financial semantics are recorded here. A change that alt
 conclusion for an existing valid scenario requires a MAJOR version bump; a backward-compatible
 clarification requires a MINOR bump. Every entry links to an MCD where applicable.
 
-## 2.0 — 2026-10-07 (draft)
+## 2.0 — 2026-11-07 (released)
+
+Released after fresh three-engine conformance on the merged default branches: 38/38 fixtures
+(31 valid, 7 invalid) agreed bit-for-bit between the Python reference, the Kotlin engine at
+`6418cd2acf68474e02a43138a9cd330dd6ff6fb4`, and the TypeScript engine, with zero divergences.
+The release covers contract *semantics*; Android app-binary verification (instrumented/device)
+remains a separate product gate and is not claimed by this release.
 
 MAJOR: adds a new liability/amortization conclusion domain and supersedes the deferred-liabilities
 clause of MCD-0012. No existing scenario's forecast, risk, or result changes.
