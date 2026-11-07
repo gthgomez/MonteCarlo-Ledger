@@ -2,16 +2,32 @@
 
 import React, { useState } from "react";
 import { X, Cloud, Lock, Terminal, Upload, Download, Check, AlertCircle, RefreshCw } from "lucide-react";
-import { pushVault, pullVault } from "@/lib/vault-client";
+import {
+  pushVault,
+  pullVault,
+  VaultLocalChangesError,
+} from "@/lib/vault-client";
 import { LedgerState } from "@/lib/types";
 import { parseLedgerState } from "@/lib/validate";
+import { PersistenceResult } from "@/lib/sync-state";
 
 interface SyncModalProps {
   isOpen: boolean;
   onClose: () => void;
   currentState: LedgerState;
-  onApplyState: (nextState: LedgerState, vaultId?: string) => void;
+  onApplyState: (
+    nextState: LedgerState,
+    vaultId?: string,
+    syncRevision?: number
+  ) => PersistenceResult;
   currentVaultId?: string;
+}
+
+/** An unguessable default vault id (the metadata endpoint reveals existence). */
+function randomVaultId(): string {
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  return `vault-${Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("")}`;
 }
 
 export function SyncModal({
@@ -23,12 +39,13 @@ export function SyncModal({
 }: SyncModalProps) {
   const [tab, setTab] = useState<"cloud" | "file" | "cli">("cloud");
 
-  // Cloud Sync form
-  const [vaultId, setVaultId] = useState(currentVaultId || "my-ledger-vault");
+  // Cloud Sync form. The default id is random so vaults are not enumerable.
+  const [vaultId, setVaultId] = useState(() => currentVaultId || randomVaultId());
   const [passphrase, setPassphrase] = useState("");
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
+  const [pullConflict, setPullConflict] = useState(false);
 
   if (!isOpen) return null;
 
@@ -44,9 +61,16 @@ export function SyncModal({
     try {
       // Salt discovery happens inside pushVault: an existing vault is always
       // authenticated with its stored KDF salt, never a freshly generated one.
-      const { revision } = await pushVault(vaultId.trim(), passphrase, currentState);
+      // The push is based on this device's recorded revision, never the latest one.
+      const { revision, ancestryPersisted } = await pushVault(
+        vaultId.trim(),
+        passphrase,
+        currentState
+      );
       setStatusMessage(
-        `Successfully pushed encrypted snapshot to Cloud Vault (rev ${revision})!`
+        ancestryPersisted
+          ? `Successfully pushed encrypted snapshot to Cloud Vault (rev ${revision})!`
+          : `Pushed to Cloud Vault (rev ${revision}), but the local sync ancestry could not be saved. Pull before the next push.`
       );
     } catch (err: any) {
       setErrorMessage(err.message || "Failed to push to vault.");
@@ -55,7 +79,7 @@ export function SyncModal({
     }
   };
 
-  const handlePullFromCloud = async () => {
+  const handlePullFromCloud = async (allowOverwriteLocal = false) => {
     if (!vaultId.trim() || !passphrase.trim()) {
       setErrorMessage("Please enter both Vault ID and Passphrase.");
       return;
@@ -63,13 +87,31 @@ export function SyncModal({
     setIsLoading(true);
     setErrorMessage(null);
     setStatusMessage(null);
+    setPullConflict(false);
 
     try {
-      const { state, revision } = await pullVault(vaultId.trim(), passphrase);
-      onApplyState(state, vaultId.trim());
-      setStatusMessage(`Successfully pulled and decrypted vault (rev ${revision})!`);
+      const { state, revision } = await pullVault(
+        vaultId.trim(),
+        passphrase,
+        currentState,
+        { allowOverwriteLocal }
+      );
+      // Do not claim success unless the browser durably stored the restored ledger.
+      const applied = onApplyState(state, vaultId.trim(), revision);
+      if (!applied.ok) {
+        setErrorMessage(
+          `Vault decrypted but the restore was not persisted: ${applied.error}`
+        );
+        return;
+      }
+      setStatusMessage(`Successfully pulled, decrypted and saved vault (rev ${revision})!`);
     } catch (err: any) {
-      setErrorMessage(err.message || "Failed to pull from vault. Check passphrase.");
+      if (err instanceof VaultLocalChangesError && !allowOverwriteLocal) {
+        setPullConflict(true);
+        setErrorMessage(err.message);
+      } else {
+        setErrorMessage(err.message || "Failed to pull from vault. Check passphrase.");
+      }
     } finally {
       setIsLoading(false);
     }
@@ -87,7 +129,10 @@ export function SyncModal({
         if (!validated.ok) {
           throw new Error(validated.error);
         }
-        onApplyState(validated.state);
+        const applied = onApplyState(validated.state);
+        if (!applied.ok) {
+          throw new Error(applied.error);
+        }
         setStatusMessage("Successfully imported ledger backup file!");
       } catch (err: any) {
         setErrorMessage("Import rejected (your current ledger is unchanged): " + err.message);
@@ -207,7 +252,7 @@ export function SyncModal({
               </button>
 
               <button
-                onClick={handlePullFromCloud}
+                onClick={() => handlePullFromCloud(false)}
                 disabled={isLoading}
                 className="flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-slate-200 font-semibold border border-slate-700 transition"
               >
@@ -215,6 +260,22 @@ export function SyncModal({
                 <span>{isLoading ? "Decrypting..." : "Pull (Download)"}</span>
               </button>
             </div>
+
+            {pullConflict && (
+              <div className="rounded-xl border border-amber-700/60 bg-amber-950/30 p-3 space-y-2">
+                <p className="text-amber-200">
+                  This device has ledger edits that were never synchronized. Pulling now
+                  would replace them. Export a backup from the header first, then confirm.
+                </p>
+                <button
+                  onClick={() => handlePullFromCloud(true)}
+                  disabled={isLoading}
+                  className="px-3 py-2 rounded-lg bg-amber-600 hover:bg-amber-500 disabled:opacity-50 text-white font-semibold"
+                >
+                  Replace local ledger with the vault
+                </button>
+              </div>
+            )}
           </div>
         )}
 

@@ -8,6 +8,39 @@ const INCOME_FREQUENCIES = new Set(["Weekly", "Bi-weekly", "Monthly", "One-time"
 const PAYMENT_RECURRENCES = new Set(["Monthly", "One-time", "Weekly", "Bi-weekly"]);
 const TRANSACTION_TYPES = new Set(["Income", "Expense", "Adjustment"]);
 
+/**
+ * The snapshot format defines these collections. A missing collection is an
+ * incomplete snapshot, not an empty one; defaulting it to `[]` would delete data.
+ */
+const REQUIRED_FIELDS = [
+  "version",
+  "current_balance_cents",
+  "incomes",
+  "payments",
+  "transactions",
+  "bill_occurrences",
+  "liabilities",
+] as const;
+const KNOWN_TOP_LEVEL = new Set<string>([...REQUIRED_FIELDS, "updated_at"]);
+
+/** Exact row shapes. Unknown fields are rejected rather than silently dropped. */
+const ROW_FIELDS: Record<string, Set<string>> = {
+  incomes: new Set([
+    "id", "name", "amount_cents", "frequency", "last_payday", "next_payday", "expected_amount",
+  ]),
+  payments: new Set([
+    "id", "name", "amount_cents", "due_day", "recurrence", "due_date", "is_auto_withdraw",
+  ]),
+  transactions: new Set([
+    "id", "amount_cents", "category", "type", "date", "description",
+  ]),
+  bill_occurrences: new Set(["id", "payment_id", "due_date", "paid", "transaction_id"]),
+  liabilities: new Set([
+    "id", "name", "balance_cents", "apr_basis_points", "min_payment_cents",
+    "kind", "min_payment_percent_bps", "min_payment_floor_cents", "due_day_of_month",
+  ]),
+};
+
 export type ParseResult =
   | { ok: true; state: LedgerState }
   | { ok: false; error: string };
@@ -35,12 +68,35 @@ function fail(path: string, message: string): ParseResult {
   return { ok: false, error: `${path}: ${message}` };
 }
 
+/** Reject fields the validator cannot preserve. */
+function checkRowFields(
+  row: Record<string, any>,
+  collection: string,
+  index: number
+): ParseResult | null {
+  const allowed = ROW_FIELDS[collection];
+  const unknown = Object.keys(row).filter((key) => !allowed.has(key));
+  if (unknown.length > 0) {
+    return fail(
+      `${collection}[${index}]`,
+      `contains unsupported fields (${unknown.sort().join(", ")}); refusing to discard financial information`
+    );
+  }
+  return null;
+}
+
 function ids(rows: any[], path: string): Set<string> | ParseResult {
   const seen = new Set<string>();
   for (const [index, row] of rows.entries()) {
     if (!isObject(row)) return fail(`${path}[${index}]`, "must be an object");
     if (row.id === undefined || row.id === null) {
       return fail(`${path}[${index}].id`, "is required");
+    }
+    if (
+      (typeof row.id !== "number" || !isSafeInt(row.id)) &&
+      (typeof row.id !== "string" || row.id.length === 0)
+    ) {
+      return fail(`${path}[${index}].id`, "must be an integer or a non-empty string");
     }
     const key = String(row.id);
     if (seen.has(key)) return fail(`${path}[${index}].id`, `duplicate id ${key}`);
@@ -51,6 +107,23 @@ function ids(rows: any[], path: string): Set<string> | ParseResult {
 
 export function parseLedgerState(raw: unknown): ParseResult {
   if (!isObject(raw)) return { ok: false, error: "ledger must be a JSON object" };
+
+  for (const field of REQUIRED_FIELDS) {
+    if (!(field in raw)) {
+      return fail(
+        field,
+        "is required; refusing to treat an incomplete snapshot as an empty ledger"
+      );
+    }
+  }
+  const unknownTopLevel = Object.keys(raw).filter((key) => !KNOWN_TOP_LEVEL.has(key));
+  if (unknownTopLevel.length > 0) {
+    return fail(
+      "(root)",
+      `contains unsupported fields (${unknownTopLevel.sort().join(", ")}); refusing to discard data the Web ledger cannot represent`
+    );
+  }
+
   if (!ACCEPTED_VERSIONS.has(String(raw.version))) {
     return fail("version", `unsupported ledger version ${JSON.stringify(raw.version)}`);
   }
@@ -59,20 +132,22 @@ export function parseLedgerState(raw: unknown): ParseResult {
   }
 
   for (const key of ["incomes", "payments", "transactions", "bill_occurrences", "liabilities"]) {
-    if (raw[key] !== undefined && !Array.isArray(raw[key])) {
+    if (!Array.isArray(raw[key])) {
       return fail(key, "must be an array");
     }
   }
-  const incomes = raw.incomes ?? [];
-  const payments = raw.payments ?? [];
-  const transactions = raw.transactions ?? [];
-  const occurrences = raw.bill_occurrences ?? [];
-  const liabilities = raw.liabilities ?? [];
+  const incomes = raw.incomes;
+  const payments = raw.payments;
+  const transactions = raw.transactions;
+  const occurrences = raw.bill_occurrences;
+  const liabilities = raw.liabilities;
 
   const incomeIds = ids(incomes, "incomes");
   if ("ok" in incomeIds) return incomeIds;
   for (const [index, inc] of incomes.entries()) {
     const path = `incomes[${index}]`;
+    const fieldError = checkRowFields(inc, "incomes", index);
+    if (fieldError) return fieldError;
     if (typeof inc.name !== "string" || inc.name.length === 0) return fail(`${path}.name`, "must be a non-empty string");
     if (!isSafeInt(inc.amount_cents) || inc.amount_cents <= 0) return fail(`${path}.amount_cents`, "must be positive integer cents");
     if (!INCOME_FREQUENCIES.has(inc.frequency)) return fail(`${path}.frequency`, "is unsupported");
@@ -88,6 +163,8 @@ export function parseLedgerState(raw: unknown): ParseResult {
   if ("ok" in paymentIds) return paymentIds;
   for (const [index, pmt] of payments.entries()) {
     const path = `payments[${index}]`;
+    const fieldError = checkRowFields(pmt, "payments", index);
+    if (fieldError) return fieldError;
     if (typeof pmt.name !== "string" || pmt.name.length === 0) return fail(`${path}.name`, "must be a non-empty string");
     if (!isSafeInt(pmt.amount_cents) || pmt.amount_cents <= 0) return fail(`${path}.amount_cents`, "must be positive integer cents");
     if (!PAYMENT_RECURRENCES.has(pmt.recurrence)) return fail(`${path}.recurrence`, "is unsupported");
@@ -108,6 +185,8 @@ export function parseLedgerState(raw: unknown): ParseResult {
   let sum = 0;
   for (const [index, tx] of transactions.entries()) {
     const path = `transactions[${index}]`;
+    const fieldError = checkRowFields(tx, "transactions", index);
+    if (fieldError) return fieldError;
     if (!isSafeInt(tx.amount_cents)) return fail(`${path}.amount_cents`, "must be integer cents");
     if (!TRANSACTION_TYPES.has(tx.type)) return fail(`${path}.type`, "is unsupported");
     if (!isDate(tx.date)) return fail(`${path}.date`, "must be a valid date");
@@ -126,10 +205,12 @@ export function parseLedgerState(raw: unknown): ParseResult {
     );
   }
 
+  const occurrenceIds = ids(occurrences, "bill_occurrences");
+  if ("ok" in occurrenceIds) return occurrenceIds;
   for (const [index, occ] of occurrences.entries()) {
     const path = `bill_occurrences[${index}]`;
-    if (!isObject(occ)) return fail(path, "must be an object");
-    if (occ.id === undefined || occ.id === null) return fail(`${path}.id`, "is required");
+    const fieldError = checkRowFields(occ, "bill_occurrences", index);
+    if (fieldError) return fieldError;
     if (occ.payment_id === undefined || occ.payment_id === null) return fail(`${path}.payment_id`, "is required");
     if (!paymentIds.has(String(occ.payment_id))) return fail(`${path}.payment_id`, "references an unknown payment");
     if (!isDate(occ.due_date)) return fail(`${path}.due_date`, "must be a valid date");
@@ -140,14 +221,19 @@ export function parseLedgerState(raw: unknown): ParseResult {
     }
   }
 
+  const liabilityIds = ids(liabilities, "liabilities");
+  if ("ok" in liabilityIds) return liabilityIds;
   for (const [index, liability] of liabilities.entries()) {
     const path = `liabilities[${index}]`;
-    if (!isObject(liability)) return fail(path, "must be an object");
-    if (liability.id === undefined || liability.id === null) return fail(`${path}.id`, "is required");
+    const fieldError = checkRowFields(liability, "liabilities", index);
+    if (fieldError) return fieldError;
     if (typeof liability.name !== "string" || liability.name.length === 0) return fail(`${path}.name`, "must be a non-empty string");
     if (!isSafeInt(liability.balance_cents) || liability.balance_cents < 0) return fail(`${path}.balance_cents`, "must be non-negative integer cents");
     if (!isSafeInt(liability.apr_basis_points) || liability.apr_basis_points < 0) return fail(`${path}.apr_basis_points`, "must be non-negative basis points");
     if (!isSafeInt(liability.min_payment_cents) || liability.min_payment_cents < 0) return fail(`${path}.min_payment_cents`, "must be non-negative integer cents");
+    if (liability.kind !== undefined && liability.kind !== "installment" && liability.kind !== "revolving") {
+      return fail(`${path}.kind`, "must be installment or revolving");
+    }
   }
 
   return {
