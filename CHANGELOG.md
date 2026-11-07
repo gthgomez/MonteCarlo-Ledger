@@ -8,6 +8,35 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+- MCP-ready read-only decision surface (`financial_snapshot`, `forecast`, `overdraft_risk`,
+  `simulate_purchase`, `simulate_paycheck_delay`, `compare_debt_strategies`, `validate_scenario`,
+  `engine_capabilities`) with typed failures, fail-closed validation, assumptions and provenance.
+- Synthetic-household CLI journeys executed in subprocesses, plus desktop/mobile browser E2E
+  journeys against a production build.
+- Property/metamorphic contract tests (trough monotonicity, seed replay, order independence,
+  zero-interest debt, exclusions, overflow).
+
+### Changed
+- **Contract 2.0 released** (2026-11-07) after fresh three-engine conformance: 38/38 fixtures,
+  0 divergences; six injected divergences were all detected.
+- One contract-version policy across Python, Kotlin and TypeScript: a version-less scenario means
+  the latest released version; canonical inputs must declare a version; malformed explicit values
+  are rejected everywhere.
+- Decision/MCP operations are read-only end to end (no bill-occurrence side effects).
+- Widget and dashboard share one canonical simulation configuration (same runs, seed, calibration).
+
+### Fixed
+- `validate_scenario` could report `valid: true` without running schema validation; it now fails
+  closed and reports which stages ran.
+- Schemas ship inside the distribution, so runtime validation works in a real install.
+- The `overdraft` CLI command exited 2 on success.
+- Ledger restore is transactional and snapshot-version checked; rejected or interrupted restores
+  preserve the existing ledger exactly.
+- Web no longer claims a positive P10 floor means "without risking negative balance".
+- Android no longer silently defaults a malformed `contract_version`; product scenarios stamp the
+  released version.
+
 ---
 
 ## [0.3.0] — 2026-04-09

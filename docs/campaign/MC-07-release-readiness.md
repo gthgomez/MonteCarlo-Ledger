@@ -3,7 +3,7 @@
 **Decision: Contract 2.0 is `released` (2026-11-07). Every contract-level release condition is met.**
 
 Promoted after the merge campaign, with fresh three-engine execution on the merged default
-branches (Python reference, Kotlin `6418cd2`, TypeScript): 38/38 fixtures agreed, 0 divergences,
+branches (Python reference, Kotlin `898e74c`, TypeScript): 38/38 fixtures agreed, 0 divergences,
 and six deliberate divergences were injected in an isolated copy and all were detected.
 
 Updated after MC-11 (contract 2.0, debt domain). The three previously-blocking items — the C5
@@ -37,9 +37,11 @@ end-to-end.
    scale, recurrence anchoring, debt interest rounding, version rejection, invalid-expense
    acceptance) were each detected by the comparer; the mutations were confined to an isolated copy
    and never touched the released sources.
-3. **Android app-binary verification — NOT RUN.** No emulator or physical device is available in
-   this environment, so instrumented tests (`:app:connectedDebugAndroidTest`) were not executed.
-   JVM unit tests, `assembleDebug` and `assembleRelease` (unsigned) were executed.
+3. **Android verification.** JVM unit tests (435), `assembleDebug` and `assembleRelease`
+   (unsigned) were executed locally. Instrumented tests were executed in GitHub Actions on an
+   **API 34 emulator** (`:app:connectedDebugAndroidTest`, 39 tests, including the Room 16→17
+   migration coverage) and passed. **No physical-device run was performed**, and no Play Store
+   release is claimed.
 
 ## Deferred (not release blockers for 2.0)
 
@@ -52,4 +54,5 @@ workflow's `ANDROID_PIN_SHA` is advanced to the merged Android `main`.
 
 **Boundary:** the remaining items above concern the Android *application* (device verification,
 naming). They do not block the contract release, and this repository does not claim a verified
-Play Store release. Android app-binary verification is reported separately as NOT RUN.
+Play Store release. Android is verified on an emulator in CI; physical-device verification is NOT
+RUN.
