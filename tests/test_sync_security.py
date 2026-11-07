@@ -14,6 +14,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+from typing import Optional
 from unittest.mock import patch
 
 import pytest
@@ -54,6 +55,71 @@ def _fake_urlopen(payload, calls):
         return _Resp()
 
     return _handler
+
+
+class FakeVaultServer:
+    """In-memory server implementing the Web vault route semantics."""
+
+    def __init__(self):
+        self.exists = False
+        self.create_conflict = False
+        self.salt: Optional[bytes] = None
+        self.auth: Optional[str] = None
+        self.key: Optional[bytes] = None
+        self.revision = 1
+        self.ciphertext_b64: Optional[str] = None
+        self.nonce_b64: Optional[str] = None
+        self.calls = []
+
+    def set_from_snapshot(self, passphrase, snapshot, revision=1):
+        self.salt = os.urandom(16)
+        self.auth, self.key = sync.derive_keys(passphrase, self.salt)
+        self.ciphertext_b64, self.nonce_b64 = sync.encrypt_payload(snapshot, self.key)
+        self.revision = revision
+        self.exists = True
+        return self
+
+    def request(self, url, *, method="GET", payload=None, auth_token=None, timeout=30):
+        self.calls.append((method, url, auth_token, payload))
+        if url.endswith("/metadata"):
+            if not self.exists:
+                return 404, {"error": "VAULT_NOT_FOUND"}
+            return 200, {
+                "kdf_salt_b64": base64.b64encode(self.salt).decode("ascii"),
+                "revision": self.revision,
+            }
+        if method == "POST":
+            if self.create_conflict:
+                return 409, {"error": "VAULT_ALREADY_EXISTS"}
+            self.exists = True
+            self.create_conflict = True
+            self.salt = base64.b64decode(payload["kdf_salt_b64"])
+            self.auth = payload["auth_token"]
+            self.revision = 1
+            self.ciphertext_b64 = payload["ciphertext_b64"]
+            self.nonce_b64 = payload["nonce_b64"]
+            return 201, {"revision": 1}
+        if not self.exists:
+            return 404, {"error": "VAULT_NOT_FOUND"}
+        if auth_token != self.auth:
+            return 401, {"error": "UNAUTHORIZED"}
+        if method == "GET":
+            return 200, {
+                "revision": self.revision,
+                "ciphertext_b64": self.ciphertext_b64,
+                "nonce_b64": self.nonce_b64,
+            }
+        if method == "PUT":
+            if payload["expected_revision"] != self.revision:
+                return 409, {"error": "REVISION_CONFLICT", "current_revision": self.revision}
+            self.revision += 1
+            self.ciphertext_b64 = payload["ciphertext_b64"]
+            self.nonce_b64 = payload["nonce_b64"]
+            return 200, {"revision": self.revision}
+        return 404, {"error": "NOT_FOUND"}
+
+    def snapshot(self, passphrase):
+        return sync.decrypt_payload(self.ciphertext_b64, self.nonce_b64, self.key)
 
 
 def _minimal_snapshot():
@@ -100,49 +166,41 @@ def test_init_with_env_passphrase_stores_no_credential(sync_config):
 
 
 def test_push_resolves_env_passphrase_when_nothing_is_stored(sync_config):
-    calls = []
+    server = FakeVaultServer()
     with patch.object(sync, "export_ledger_snapshot", _minimal_snapshot):
-        with patch.object(
-            sync.urllib.request, "urlopen", _fake_urlopen({"revision": 1}, calls)
-        ):
+        with patch.object(sync, "_request_json", server.request):
             with patch.dict(os.environ, {sync.PASSPHRASE_ENV: "env-secret"}):
                 sync.sync_init("vault-1", None, "https://sync.example.test")
             # patch.dict unsets the var on exit; push must resolve it from the env again.
             with patch.dict(os.environ, {sync.PASSPHRASE_ENV: "env-secret"}):
-                with patch.object(
-                    sync.urllib.request, "urlopen", _fake_urlopen({"revision": 2}, calls)
-                ):
-                    sync.sync_push("https://sync.example.test")
+                sync.sync_push("https://sync.example.test")
 
-    put = calls[-1]
+    put = [call for call in server.calls if call[0] == "PUT"][-1]
     auth_token, _ = sync.derive_keys(
         "env-secret", base64.b64decode(json.loads(sync_config.read_text())["salt_b64"])
     )
-    assert put.get_header("Authorization") == f"Bearer {auth_token}"
+    assert put[2] == auth_token
 
 
 def test_wrong_passphrase_push_fails_and_never_stores_it(sync_config):
-    calls = []
+    server = FakeVaultServer()
     with patch.object(sync, "export_ledger_snapshot", _minimal_snapshot):
-        with patch.object(
-            sync.urllib.request, "urlopen", _fake_urlopen({"revision": 1}, calls)
-        ):
+        with patch.object(sync, "_request_json", server.request):
             with patch.dict(os.environ, {sync.PASSPHRASE_ENV: "right"}):
                 sync.sync_init("vault-1", None, "https://sync.example.test")
-        with patch.dict(os.environ, {sync.PASSPHRASE_ENV: "wrong"}):
-            with patch.object(
-                sync.urllib.request, "urlopen", _fake_urlopen({"revision": 2}, calls)
-            ):
-                # A wrong passphrase derives a different auth token; the server would
-                # reject it. The client must still send a request (server decides), and
-                # the local config must not have absorbed the wrong credential.
-                sync.sync_push("https://sync.example.test")
+            with patch.dict(os.environ, {sync.PASSPHRASE_ENV: "wrong"}):
+                with pytest.raises(ValueError, match="Authentication failed"):
+                    sync.sync_push("https://sync.example.test")
     stored = json.loads(sync_config.read_text())
     assert "passphrase" not in stored
 
 
-def test_pull_with_wrong_passphrase_never_touches_local_ledger(sync_config):
+def test_pull_with_wrong_passphrase_never_touches_local_ledger(
+    sync_config, tmp_path, monkeypatch
+):
     """A payload encrypted under passphrase A must not decrypt under passphrase B."""
+    monkeypatch.setattr(db_manager, "DB_PATH", str(tmp_path / "ledger.db"))
+    db_manager.init_db()
     calls = []
     salt = os.urandom(16)
     cfg = {
@@ -171,25 +229,26 @@ def test_pull_with_wrong_passphrase_never_touches_local_ledger(sync_config):
 
 
 def test_legacy_config_passphrase_still_works_with_warning(sync_config, capsys):
-    salt = os.urandom(16)
+    snapshot = _minimal_snapshot()
+    server = FakeVaultServer().set_from_snapshot("legacy-secret", snapshot, revision=3)
     legacy = {
         "vault_id": "vault-legacy",
         "passphrase": "legacy-secret",
-        "salt_b64": base64.b64encode(salt).decode("ascii"),
+        "salt_b64": base64.b64encode(server.salt).decode("ascii"),
         "server_url": "https://sync.example.test",
         "revision": 3,
+        "ancestry_established": True,
+        "synced_fingerprint": sync._snapshot_fingerprint(snapshot),
     }
     sync_config.write_text(json.dumps(legacy))
 
-    calls = []
     with patch.object(sync, "export_ledger_snapshot", _minimal_snapshot):
-        with patch.object(
-            sync.urllib.request, "urlopen", _fake_urlopen({"revision": 4}, calls)
-        ):
+        with patch.object(sync, "_request_json", server.request):
             sync.sync_push("https://sync.example.test")
 
-    auth_token, _ = sync.derive_keys("legacy-secret", salt)
-    assert calls[-1].get_header("Authorization") == f"Bearer {auth_token}"
+    auth_token, _ = sync.derive_keys("legacy-secret", server.salt)
+    puts = [call for call in server.calls if call[0] == "PUT"]
+    assert puts and puts[-1][2] == auth_token
     err = capsys.readouterr().err
     assert "deprecated" in err and "sync lock" in err
 
@@ -435,45 +494,27 @@ def test_sync_init_joins_existing_vault_using_public_metadata(monkeypatch, tmp_p
     monkeypatch.chdir(tmp_path)
     db_manager.DB_PATH = str(tmp_path / "ledger.db")
     db_manager.init_db()
-    salt_b64 = base64.b64encode(os.urandom(16)).decode("ascii")
-    calls = []
+    server = FakeVaultServer().set_from_snapshot("passphrase", _minimal_snapshot(), revision=7)
+    server.create_conflict = True
+    monkeypatch.setattr(sync, "_request_json", server.request)
 
-    def fake_request(url, *, method="GET", payload=None, auth_token=None, timeout=30):
-        calls.append((method, url, auth_token))
-        if method == "POST":
-            return 409, {"error": "VAULT_ALREADY_EXISTS"}
-        if url.endswith("/metadata"):
-            return 200, {"kdf_salt_b64": salt_b64, "revision": 7}
-        return 200, {"revision": 7}
-
-    monkeypatch.setattr(sync, "_request_json", fake_request)
     cfg = sync.sync_init("shared-vault", "passphrase", "http://vault.test")
 
-    assert cfg == {
-        "vault_id": "shared-vault",
-        "salt_b64": salt_b64,
-        "server_url": "http://vault.test",
-        "revision": 7,
-    }
-    # The join proves the passphrase with an authenticated read derived from the
-    # metadata salt (the original bug derived a fresh salt and got a 401).
-    assert any(token for (_, _, token) in calls)
+    assert cfg["vault_id"] == "shared-vault"
+    assert cfg["salt_b64"] == base64.b64encode(server.salt).decode("ascii")
+    assert cfg["revision"] == 7
+    # Joining proves the passphrase but does NOT establish push ancestry.
+    assert cfg["ancestry_established"] is False
+    assert any(token for (_, _, token, _) in server.calls)
 
 
 def test_sync_init_join_with_wrong_passphrase_is_explicit(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     db_manager.DB_PATH = str(tmp_path / "ledger.db")
     db_manager.init_db()
-    salt_b64 = base64.b64encode(os.urandom(16)).decode("ascii")
-
-    def fake_request(url, *, method="GET", payload=None, auth_token=None, timeout=30):
-        if method == "POST":
-            return 409, {"error": "VAULT_ALREADY_EXISTS"}
-        if url.endswith("/metadata"):
-            return 200, {"kdf_salt_b64": salt_b64, "revision": 3}
-        return 401, {"error": "UNAUTHORIZED"}
-
-    monkeypatch.setattr(sync, "_request_json", fake_request)
+    server = FakeVaultServer().set_from_snapshot("right", _minimal_snapshot(), revision=3)
+    server.create_conflict = True
+    monkeypatch.setattr(sync, "_request_json", server.request)
     with pytest.raises(ValueError, match="passphrase is wrong"):
         sync.sync_init("shared-vault", "wrong", "http://vault.test")
 
@@ -483,23 +524,25 @@ def test_sync_push_conflict_is_explicit_and_preserves_local_ledger(monkeypatch, 
     db_manager.DB_PATH = str(tmp_path / "ledger.db")
     db_manager.init_db()
     db_manager.add_transaction(500_000, "System", "Opening", t_type="Adjustment", date_str="2026-10-01")
+    snapshot = sync.export_ledger_snapshot()
+    server = FakeVaultServer().set_from_snapshot("passphrase", snapshot, revision=1)
+    # Another client advanced the remote vault after this device's last sync.
+    server.revision = 2
+    monkeypatch.setattr(sync, "_request_json", server.request)
     sync.save_sync_config({
         "vault_id": "v",
-        "salt_b64": base64.b64encode(os.urandom(16)).decode("ascii"),
+        "salt_b64": base64.b64encode(server.salt).decode("ascii"),
         "server_url": "http://vault.test",
         "revision": 1,
+        "ancestry_established": True,
+        "synced_fingerprint": sync._snapshot_fingerprint(snapshot),
     })
 
-    def fake_request(url, *, method="GET", payload=None, auth_token=None, timeout=30):
-        assert method == "PUT"
-        assert payload["expected_revision"] == 1  # mandatory conditional write
-        return 409, {"error": "REVISION_CONFLICT", "current_revision": 2}
-
-    monkeypatch.setattr(sync, "_request_json", fake_request)
     with pytest.raises(ValueError, match="Sync conflict"):
         sync.sync_push(passphrase="passphrase")
 
-    # The local ledger and the recorded revision are untouched.
+    # No PUT was attempted and the local ledger/revision are untouched.
+    assert not [call for call in server.calls if call[0] == "PUT"]
     assert db_manager.get_ledger_balance() == 500_000
     assert sync.load_sync_config()["revision"] == 1
 
@@ -509,11 +552,15 @@ def test_sync_pull_wrong_passphrase_does_not_touch_the_ledger(monkeypatch, tmp_p
     db_manager.DB_PATH = str(tmp_path / "ledger.db")
     db_manager.init_db()
     db_manager.add_transaction(123_456, "System", "Opening", t_type="Adjustment", date_str="2026-10-01")
+    local = sync.export_ledger_snapshot()
+    server = FakeVaultServer().set_from_snapshot("right", local, revision=4)
     sync.save_sync_config({
         "vault_id": "v",
-        "salt_b64": base64.b64encode(os.urandom(16)).decode("ascii"),
+        "salt_b64": base64.b64encode(server.salt).decode("ascii"),
         "server_url": "http://vault.test",
         "revision": 4,
+        "ancestry_established": True,
+        "synced_fingerprint": sync._snapshot_fingerprint(local),
     })
 
     monkeypatch.setattr(

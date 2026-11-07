@@ -22,9 +22,11 @@ import urllib.request
 from datetime import date, datetime, timezone
 from typing import Any, Dict, Optional, Tuple
 
+from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from . import db_manager
+from .contract.money import MAX_MONEY_CENTS, MIN_MONEY_CENTS
 
 SYNC_CONFIG_FILE = ".ledger-sync.json"
 DEFAULT_SERVER_URL = "https://montecarlo-ledger.vercel.app"
@@ -172,18 +174,36 @@ def export_ledger_snapshot() -> Dict[str, Any]:
 SNAPSHOT_VERSION = "2.1"
 # 2.0 snapshots predate incomes[].expected_amount; they restore with a null override.
 SUPPORTED_SNAPSHOT_VERSIONS = ("2.0", "2.1")
-_SNAPSHOT_FIELDS = frozenset(
-    {
-        "version",
-        "updated_at",
-        "current_balance_cents",
-        "incomes",
-        "payments",
-        "transactions",
-        "bill_occurrences",
-        "liabilities",
-    }
+# Collections that every supported snapshot must carry. A missing collection is an
+# incomplete snapshot, never an empty one: treating it as empty is the defect that
+# allowed `{"version": "2.1"}` to wipe a populated ledger.
+REQUIRED_SNAPSHOT_FIELDS = (
+    "version",
+    "current_balance_cents",
+    "incomes",
+    "payments",
+    "transactions",
+    "bill_occurrences",
 )
+OPTIONAL_SNAPSHOT_FIELDS = ("updated_at", "liabilities")
+_SNAPSHOT_FIELDS = frozenset(REQUIRED_SNAPSHOT_FIELDS) | frozenset(OPTIONAL_SNAPSHOT_FIELDS)
+
+# Exact row shapes the Python ledger can persist. Anything else (e.g. an embedded
+# liability field) would be silently discarded on restore, so it is rejected.
+_ROW_FIELDS = {
+    "incomes": frozenset(
+        {"id", "name", "amount_cents", "frequency", "last_payday", "next_payday", "expected_amount"}
+    ),
+    "payments": frozenset(
+        {"id", "name", "amount_cents", "due_day", "recurrence", "due_date", "is_auto_withdraw"}
+    ),
+    "transactions": frozenset(
+        {"id", "amount_cents", "category", "type", "date", "description"}
+    ),
+    "bill_occurrences": frozenset(
+        {"id", "payment_id", "due_date", "paid", "transaction_id"}
+    ),
+}
 
 
 def _require_str(value: Any, field: str) -> str:
@@ -192,14 +212,45 @@ def _require_str(value: Any, field: str) -> str:
     return value
 
 
-def _require_int(value: Any, field: str, *, allow_none: bool = False, minimum: Optional[int] = None) -> Optional[int]:
+def _require_int(
+    value: Any,
+    field: str,
+    *,
+    allow_none: bool = False,
+    minimum: Optional[int] = None,
+    maximum: Optional[int] = None,
+) -> Optional[int]:
     if value is None and allow_none:
         return None
     if not isinstance(value, int) or isinstance(value, bool):
         raise ValueError(f"Snapshot {field} must be an integer, got {value!r}")
     if minimum is not None and value < minimum:
         raise ValueError(f"Snapshot {field} must be >= {minimum}, got {value}")
+    if maximum is not None and value > maximum:
+        raise ValueError(f"Snapshot {field} must be <= {maximum}, got {value}")
     return value
+
+
+def _require_money(value: Any, field: str, *, minimum: Optional[int] = None) -> int:
+    """Exact integer cents within the contract's supported range."""
+    return _require_int(
+        value, field, minimum=minimum, maximum=MAX_MONEY_CENTS
+    )  # type: ignore[return-value]
+
+
+def _require_bool(value: Any, field: str) -> bool:
+    if not isinstance(value, bool):
+        raise ValueError(f"Snapshot {field} must be a boolean, got {value!r}")
+    return value
+
+
+def _require_present(snapshot: Dict[str, Any], key: str) -> Any:
+    if key not in snapshot:
+        raise ValueError(
+            f"Snapshot is missing required field {key!r}; refusing to treat an "
+            "incomplete snapshot as an empty ledger"
+        )
+    return snapshot[key]
 
 
 def _require_date(value: Any, field: str, *, allow_none: bool = False) -> Optional[str]:
@@ -214,11 +265,39 @@ def _require_date(value: Any, field: str, *, allow_none: bool = False) -> Option
     return value
 
 
-def _require_rows(snapshot: Dict[str, Any], key: str) -> list:
-    value = snapshot.get(key, [])
-    if not isinstance(value, list) or any(not isinstance(row, dict) for row in value):
-        raise ValueError(f"Snapshot {key} must be a list of objects")
+def _require_timestamp(value: Any, field: str) -> str:
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"Snapshot {field} must be a timestamp string, got {value!r}")
+    try:
+        datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(f"Snapshot {field} is not a valid timestamp: {value!r}") from exc
     return value
+
+
+def _require_rows(snapshot: Dict[str, Any], key: str) -> list:
+    """Return a required collection of objects.
+
+    A missing key is an incomplete snapshot, not an empty collection. Treating it as
+    empty is what allowed a version-only snapshot to replace a populated ledger.
+    """
+    value = _require_present(snapshot, key)
+    if not isinstance(value, list):
+        raise ValueError(f"Snapshot {key} must be a list, got {type(value).__name__}")
+    for index, row in enumerate(value):
+        if not isinstance(row, dict):
+            raise ValueError(f"Snapshot {key}[{index}] must be an object, got {row!r}")
+    return value
+
+
+def _validate_row_fields(row: Dict[str, Any], collection: str, index: int) -> None:
+    allowed = _ROW_FIELDS[collection]
+    unknown = set(row) - allowed
+    if unknown:
+        raise ValueError(
+            f"Snapshot {collection}[{index}] contains unsupported fields: "
+            f"{sorted(unknown)}; refusing to discard financial information"
+        )
 
 
 def _id_map(rows: list, collection: str) -> Dict[str, int]:
@@ -239,16 +318,18 @@ def _id_map(rows: list, collection: str) -> Dict[str, int]:
         if "id" not in row or row["id"] is None:
             raise ValueError(f"Snapshot {collection} row is missing its id")
         old = row["id"]
+        if isinstance(old, bool) or not isinstance(old, (int, str)) or old == "":
+            raise ValueError(
+                f"Snapshot {collection} has an invalid identifier {old!r}; "
+                "only integers and non-empty strings are supported"
+            )
         key = str(old)
         if key in mapping:
-            # Integer duplicates are left to the primary-key constraint (which rolls
-            # the transaction back). A mixed "1" / 1 collision would otherwise be
-            # silently merged into one row, so reject it explicitly.
-            if not (isinstance(old, int) and not isinstance(old, bool) and mapping[key] == old):
-                raise ValueError(
-                    f"Snapshot {collection} has colliding identifiers after normalization: {old!r}"
-                )
-            continue
+            # Reject duplicates during validation, before any database mutation.
+            # A mixed "1" / 1 pair would otherwise be silently merged into one row.
+            raise ValueError(
+                f"Snapshot {collection} has duplicate identifier {old!r}"
+            )
         if isinstance(old, int) and not isinstance(old, bool):
             mapping[key] = old
         else:
@@ -281,15 +362,12 @@ _SNAPSHOT_PAYMENT_RECURRENCES = frozenset({"Monthly", "One-time", "Weekly", "Bi-
 _SNAPSHOT_TRANSACTION_TYPES = frozenset({"Income", "Expense", "Adjustment"})
 
 
-def restore_ledger_snapshot(snapshot: Dict[str, Any]) -> None:
-    """Atomically restore a ledger snapshot into the local database.
+def _validate_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
+    """Fully validate a snapshot without touching the database.
 
-    The whole replacement runs in one SQLite transaction and the snapshot's internal
-    consistency (declared balance == sum of its transactions) is checked *before*
-    commit. A rejected or interrupted restore therefore leaves the pre-existing ledger
-    exactly as it was. Every field is validated before any row is written, non-integer
-    identifiers are remapped deterministically, and data the Python ledger cannot
-    represent (liabilities) is rejected instead of being silently discarded.
+    Returns the validated collections and id maps. Callers use this both to restore
+    and to prove compatibility (join/push preflight) before any data is exchanged.
+    Nothing here mutates persistent state.
     """
     if not isinstance(snapshot, dict):
         raise ValueError("Snapshot must be an object")
@@ -301,13 +379,18 @@ def restore_ledger_snapshot(snapshot: Dict[str, Any]) -> None:
             "refusing to discard data the Python ledger cannot represent"
         )
 
-    version = snapshot.get("version")
+    version = _require_str(_require_present(snapshot, "version"), "version")
     if version not in SUPPORTED_SNAPSHOT_VERSIONS:
         raise ValueError(
             f"Unsupported snapshot version: {version!r}; supported: {SUPPORTED_SNAPSHOT_VERSIONS}"
         )
 
-    liabilities = _require_rows(snapshot, "liabilities")
+    if "updated_at" in snapshot:
+        _require_timestamp(snapshot["updated_at"], "updated_at")
+
+    # Liabilities are optional (older snapshots may omit them) but an empty list is
+    # the only value the Python ledger can faithfully persist.
+    liabilities = _require_rows(snapshot, "liabilities") if "liabilities" in snapshot else []
     if liabilities:
         raise ValueError(
             f"Snapshot contains {len(liabilities)} liabilit"
@@ -316,9 +399,14 @@ def restore_ledger_snapshot(snapshot: Dict[str, Any]) -> None:
             "silently dropping debt records."
         )
 
+    # A missing balance is an incomplete snapshot, never a zero balance.
     declared_balance = _require_int(
-        snapshot.get("current_balance_cents", 0), "current_balance_cents"
+        _require_present(snapshot, "current_balance_cents"),
+        "current_balance_cents",
+        minimum=MIN_MONEY_CENTS,
+        maximum=MAX_MONEY_CENTS,
     )
+    assert declared_balance is not None
 
     incomes = _require_rows(snapshot, "incomes")
     payments = _require_rows(snapshot, "payments")
@@ -327,33 +415,77 @@ def restore_ledger_snapshot(snapshot: Dict[str, Any]) -> None:
 
     # Validate everything before opening the write transaction, so a malformed
     # snapshot never even starts replacing the ledger.
-    for inc in incomes:
-        _require_str(inc.get("name"), "incomes.name")
-        _require_int(inc.get("amount_cents"), "incomes.amount_cents", minimum=1)
-        _require_int(inc.get("expected_amount"), "incomes.expected_amount", allow_none=True, minimum=1)
+    for index, inc in enumerate(incomes):
+        _validate_row_fields(inc, "incomes", index)
+        _require_str(inc.get("name"), f"incomes[{index}].name")
+        _require_money(inc.get("amount_cents"), f"incomes[{index}].amount_cents", minimum=1)
+        _require_int(
+            inc.get("expected_amount"),
+            f"incomes[{index}].expected_amount",
+            allow_none=True,
+            minimum=1,
+            maximum=MAX_MONEY_CENTS,
+        )
         if inc.get("frequency") not in _SNAPSHOT_INCOME_FREQUENCIES:
-            raise ValueError(f"Snapshot incomes.frequency is unsupported: {inc.get('frequency')!r}")
-        _require_date(inc.get("last_payday"), "incomes.last_payday")
-        _require_date(inc.get("next_payday"), "incomes.next_payday")
+            raise ValueError(
+                f"Snapshot incomes[{index}].frequency is unsupported: {inc.get('frequency')!r}"
+            )
+        _require_date(inc.get("last_payday"), f"incomes[{index}].last_payday")
+        _require_date(inc.get("next_payday"), f"incomes[{index}].next_payday")
+        if "id" not in inc or inc["id"] is None:
+            raise ValueError(f"Snapshot incomes[{index}] is missing its id")
 
-    for pmt in payments:
-        _require_str(pmt.get("name"), "payments.name")
-        _require_int(pmt.get("amount_cents"), "payments.amount_cents", minimum=1)
+    for index, pmt in enumerate(payments):
+        _validate_row_fields(pmt, "payments", index)
+        _require_str(pmt.get("name"), f"payments[{index}].name")
+        _require_money(pmt.get("amount_cents"), f"payments[{index}].amount_cents", minimum=1)
         if pmt.get("recurrence") not in _SNAPSHOT_PAYMENT_RECURRENCES:
-            raise ValueError(f"Snapshot payments.recurrence is unsupported: {pmt.get('recurrence')!r}")
-        due_day = _require_int(pmt.get("due_day"), "payments.due_day", allow_none=True)
+            raise ValueError(
+                f"Snapshot payments[{index}].recurrence is unsupported: {pmt.get('recurrence')!r}"
+            )
+        due_day = _require_int(pmt.get("due_day"), f"payments[{index}].due_day", allow_none=True)
         if due_day is not None and not 1 <= due_day <= 31:
-            raise ValueError(f"Snapshot payments.due_day must be 1..31, got {due_day}")
-        _require_date(pmt.get("due_date"), "payments.due_date", allow_none=True)
+            raise ValueError(f"Snapshot payments[{index}].due_day must be 1..31, got {due_day}")
+        _require_date(pmt.get("due_date"), f"payments[{index}].due_date", allow_none=True)
+        if "is_auto_withdraw" in pmt:
+            _require_bool(pmt["is_auto_withdraw"], f"payments[{index}].is_auto_withdraw")
+        if "id" not in pmt or pmt["id"] is None:
+            raise ValueError(f"Snapshot payments[{index}] is missing its id")
 
-    for tx in transactions:
-        _require_int(tx.get("amount_cents"), "transactions.amount_cents")
-        if tx.get("type", "Expense") not in _SNAPSHOT_TRANSACTION_TYPES:
-            raise ValueError(f"Snapshot transactions.type is unsupported: {tx.get('type')!r}")
-        _require_date(tx.get("date"), "transactions.date")
+    for index, tx in enumerate(transactions):
+        _validate_row_fields(tx, "transactions", index)
+        _require_int(
+            tx.get("amount_cents"),
+            f"transactions[{index}].amount_cents",
+            minimum=MIN_MONEY_CENTS,
+            maximum=MAX_MONEY_CENTS,
+        )
+        if tx.get("type") not in _SNAPSHOT_TRANSACTION_TYPES:
+            raise ValueError(
+                f"Snapshot transactions[{index}].type is unsupported: {tx.get('type')!r}"
+            )
+        _require_date(tx.get("date"), f"transactions[{index}].date")
+        for field in ("category", "description"):
+            if field in tx and tx[field] is not None and not isinstance(tx[field], str):
+                raise ValueError(f"Snapshot transactions[{index}].{field} must be a string")
+        if "id" not in tx or tx["id"] is None:
+            raise ValueError(f"Snapshot transactions[{index}] is missing its id")
 
-    for occ in occurrences:
-        _require_date(occ.get("due_date"), "bill_occurrences.due_date")
+    for index, occ in enumerate(occurrences):
+        _validate_row_fields(occ, "bill_occurrences", index)
+        if "id" not in occ or occ["id"] is None:
+            raise ValueError(f"Snapshot bill_occurrences[{index}] is missing its id")
+        if occ.get("payment_id") is None:
+            raise ValueError(f"Snapshot bill_occurrences[{index}] is missing its payment_id")
+        _require_date(occ.get("due_date"), f"bill_occurrences[{index}].due_date")
+        _require_bool(occ.get("paid"), f"bill_occurrences[{index}].paid")
+        if occ.get("transaction_id") is not None and not isinstance(
+            occ.get("transaction_id"), (int, str)
+        ):
+            raise ValueError(
+                f"Snapshot bill_occurrences[{index}].transaction_id is invalid: "
+                f"{occ.get('transaction_id')!r}"
+            )
 
     declared_sum = sum(tx["amount_cents"] for tx in transactions)
     if declared_sum != declared_balance:
@@ -362,10 +494,39 @@ def restore_ledger_snapshot(snapshot: Dict[str, Any]) -> None:
             f"declared balance is {declared_balance}"
         )
 
-    income_ids = _id_map(incomes, "incomes")
-    payment_ids = _id_map(payments, "payments")
-    transaction_ids = _id_map(transactions, "transactions")
-    occurrence_ids = _id_map(occurrences, "bill_occurrences")
+    return {
+        "declared_balance": declared_balance,
+        "incomes": incomes,
+        "payments": payments,
+        "transactions": transactions,
+        "occurrences": occurrences,
+        "income_ids": _id_map(incomes, "incomes"),
+        "payment_ids": _id_map(payments, "payments"),
+        "transaction_ids": _id_map(transactions, "transactions"),
+        "occurrence_ids": _id_map(occurrences, "bill_occurrences"),
+    }
+
+
+def restore_ledger_snapshot(snapshot: Dict[str, Any]) -> None:
+    """Atomically restore a ledger snapshot into the local database.
+
+    The whole replacement runs in one SQLite transaction and the snapshot's internal
+    consistency (declared balance == sum of its transactions) is checked *before*
+    commit. A rejected or interrupted restore therefore leaves the pre-existing ledger
+    exactly as it was. Every field is validated before any row is written, non-integer
+    identifiers are remapped deterministically, and data the Python ledger cannot
+    represent (liabilities) is rejected instead of being silently discarded.
+    """
+    validated = _validate_snapshot(snapshot)
+    declared_balance: int = validated["declared_balance"]
+    incomes: list = validated["incomes"]
+    payments: list = validated["payments"]
+    transactions: list = validated["transactions"]
+    occurrences: list = validated["occurrences"]
+    income_ids: Dict[str, int] = validated["income_ids"]
+    payment_ids: Dict[str, int] = validated["payment_ids"]
+    transaction_ids: Dict[str, int] = validated["transaction_ids"]
+    occurrence_ids: Dict[str, int] = validated["occurrence_ids"]
 
     # A consistent snapshot is kept as a last-resort recovery aid for tooling. The
     # transaction below is what guarantees atomicity.
@@ -471,6 +632,63 @@ def save_sync_config(config: Dict[str, Any]) -> None:
         json.dump(config, f, indent=2)
 
 
+def _snapshot_fingerprint(snapshot: Dict[str, Any]) -> str:
+    """Stable content fingerprint, excluding the export timestamp."""
+    core = {key: value for key, value in snapshot.items() if key != "updated_at"}
+    encoded = json.dumps(core, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _local_ledger_fingerprint() -> Optional[str]:
+    try:
+        return _snapshot_fingerprint(export_ledger_snapshot())
+    except ValueError:
+        # A desynchronized local ledger cannot be exported; treat it as changed.
+        return None
+
+
+def _local_ledger_has_content() -> bool:
+    stats = db_manager.get_ledger_stats()
+    return bool(
+        stats["transaction_count"] or stats["income_source_count"] or stats["payment_count"]
+    )
+
+
+def _require_remote_compatible(snapshot: Dict[str, Any], vault_id: str) -> None:
+    """Refuse to touch a vault whose financial data Python cannot represent.
+
+    This is a preflight: it validates the decrypted remote snapshot without modifying
+    either side. Liabilities and unknown fields are the concrete incompatibilities.
+    """
+    try:
+        _validate_snapshot(snapshot)
+    except ValueError as exc:
+        raise ValueError(
+            f"Vault {vault_id!r} contains financial data the Python ledger cannot "
+            f"represent safely ({exc}). Refusing to overwrite it; use the Web or "
+            "Android client for this vault."
+        ) from exc
+
+
+def _decrypt_remote_record(record: Dict[str, Any], enc_key: bytes, vault_id: str) -> Dict[str, Any]:
+    try:
+        return decrypt_payload(record["ciphertext_b64"], record["nonce_b64"], enc_key)
+    except (KeyError, TypeError, ValueError, InvalidTag) as exc:
+        raise ValueError(
+            f"Vault {vault_id!r} returned a payload that could not be decrypted or parsed."
+        ) from exc
+
+
+def _pre_pull_backup() -> Optional[str]:
+    """Preserve the local ledger before a potentially destructive pull."""
+    db_path = db_manager.DB_PATH
+    if not os.path.exists(db_path):
+        return None
+    backup_path = f"{db_path}.pre-pull-backup"
+    _sqlite_backup(db_path, backup_path)
+    return backup_path
+
+
 def _request_json(
     url: str,
     *,
@@ -526,19 +744,28 @@ def _join_existing_vault(
         salt = base64.b64decode(meta["kdf_salt_b64"], validate=True)
     except Exception as exc:
         raise ValueError("Existing vault has invalid KDF metadata.") from exc
-    auth_token, _ = derive_keys(passphrase, salt)
-    read_status, _ = _request_json(record_url, auth_token=auth_token)
+    auth_token, enc_key = derive_keys(passphrase, salt)
+    read_status, record = _request_json(record_url, auth_token=auth_token)
     if read_status == 401:
         raise ValueError(
             f"A vault with id {vault_id!r} already exists but the passphrase is wrong."
         )
     if read_status != 200:
         raise ValueError(f"Could not authenticate to existing vault (HTTP {read_status}).")
+
+    # Authentication proves the passphrase, not that this client can represent the
+    # remote data. Refuse before saving any config if the vault is incompatible.
+    remote_snapshot = _decrypt_remote_record(record, enc_key, vault_id)
+    _require_remote_compatible(remote_snapshot, vault_id)
+
+    # Joining does NOT establish ancestry: the local ledger has not been reconciled
+    # with this revision. A push is refused until a pull has actually happened.
     cfg = {
         "vault_id": vault_id,
         "salt_b64": meta["kdf_salt_b64"],
         "server_url": server_url,
-        "revision": int(meta.get("revision", 1)),
+        "revision": int(record.get("revision", meta.get("revision", 1))),
+        "ancestry_established": False,
     }
     save_sync_config(cfg)
     return cfg
@@ -582,6 +809,9 @@ def sync_init(vault_id: str, passphrase: Optional[str] = None, server_url: str =
         "salt_b64": salt_b64,
         "server_url": server_url,
         "revision": res.get("revision", 1),
+        # A creation uploads this local ledger, so it is the synchronization base.
+        "ancestry_established": True,
+        "synced_fingerprint": _snapshot_fingerprint(snapshot),
     }
     save_sync_config(cfg)
     return cfg
@@ -601,6 +831,13 @@ def sync_push(server_url: Optional[str] = None, passphrase: Optional[str] = None
     if not cfg:
         raise ValueError("Sync not initialized. Run `monte-carlo-ledger sync init` first.")
 
+    if not cfg.get("ancestry_established", False):
+        raise ValueError(
+            "This vault was joined or its ancestry is unknown. Run "
+            "`monte-carlo-ledger sync pull` first so the local ledger is based on the "
+            "remote revision; refusing to overwrite data this client has not observed."
+        )
+
     passphrase = _passphrase_for_operation(passphrase, cfg)
     salt = base64.b64decode(cfg["salt_b64"])
     auth_token, enc_key = derive_keys(passphrase, salt)
@@ -611,8 +848,28 @@ def sync_push(server_url: Optional[str] = None, passphrase: Optional[str] = None
     url_base = (server_url or cfg.get("server_url", DEFAULT_SERVER_URL)).rstrip("/")
     url = f"{url_base}/api/vault/{cfg['vault_id']}"
 
+    # Preflight: inspect the current remote snapshot before any write. This proves
+    # both ancestry (same revision) and compatibility (nothing Python cannot persist).
+    status, current = _request_json(url, auth_token=auth_token)
+    if status == 401:
+        raise ValueError("Authentication failed: wrong vault passphrase.")
+    if status != 200:
+        raise ValueError(f"Vault preflight failed (HTTP {status}): {current.get('error', 'unknown')}")
+    remote_snapshot = _decrypt_remote_record(current, enc_key, cfg["vault_id"])
+    _require_remote_compatible(remote_snapshot, cfg["vault_id"])
+
+    base_revision = int(cfg.get("revision", 1))
+    remote_revision = int(current.get("revision", base_revision))
+    if remote_revision != base_revision:
+        raise ValueError(
+            "Sync conflict: this vault was modified by another client "
+            f"(current revision {remote_revision}, local base {base_revision}). "
+            "Run `monte-carlo-ledger sync pull` before pushing again; "
+            "your local ledger has not been overwritten."
+        )
+
     payload = {
-        "expected_revision": cfg.get("revision", 1),
+        "expected_revision": base_revision,
         "ciphertext_b64": ct_b64,
         "nonce_b64": nonce_b64,
         "kdf_salt_b64": cfg["salt_b64"],
@@ -631,12 +888,18 @@ def sync_push(server_url: Optional[str] = None, passphrase: Optional[str] = None
     if status not in (200, 201):
         raise ValueError(f"Vault push failed (HTTP {status}): {res.get('error', 'unknown')}")
 
-    cfg["revision"] = res.get("revision", cfg.get("revision", 1) + 1)
+    cfg["revision"] = res.get("revision", base_revision + 1)
+    cfg["synced_fingerprint"] = _snapshot_fingerprint(snapshot)
+    cfg["ancestry_established"] = True
     save_sync_config(cfg)
     return res
 
 
-def sync_pull(server_url: Optional[str] = None, passphrase: Optional[str] = None) -> Dict[str, Any]:
+def sync_pull(
+    server_url: Optional[str] = None,
+    passphrase: Optional[str] = None,
+    allow_local_overwrite: bool = False,
+) -> Dict[str, Any]:
     cfg = load_sync_config()
     if not cfg:
         raise ValueError("Sync not initialized. Run `monte-carlo-ledger sync init` first.")
@@ -644,6 +907,23 @@ def sync_pull(server_url: Optional[str] = None, passphrase: Optional[str] = None
     passphrase = _passphrase_for_operation(passphrase, cfg)
     salt = base64.b64decode(cfg["salt_b64"])
     auth_token, enc_key = derive_keys(passphrase, salt)
+
+    # Detect whether this pull would discard unsynchronized local data.
+    local_fingerprint = _local_ledger_fingerprint()
+    if not cfg.get("ancestry_established", False):
+        local_changed = _local_ledger_has_content()
+    elif "synced_fingerprint" in cfg:
+        local_changed = local_fingerprint is None or local_fingerprint != cfg["synced_fingerprint"]
+    else:
+        local_changed = True
+
+    if local_changed and not allow_local_overwrite:
+        backup = _pre_pull_backup()
+        raise ValueError(
+            "Local ledger has changes that were never synchronized. Pulling would "
+            f"replace them. A recovery copy was written to {backup!r}; export it or "
+            "rerun `sync pull --force` to accept the replacement."
+        )
 
     url_base = (server_url or cfg.get("server_url", DEFAULT_SERVER_URL)).rstrip("/")
     url = f"{url_base}/api/vault/{cfg['vault_id']}"
@@ -654,11 +934,23 @@ def sync_pull(server_url: Optional[str] = None, passphrase: Optional[str] = None
     if status != 200:
         raise ValueError(f"Vault pull failed (HTTP {status}): {res.get('error', 'unknown')}")
 
-    snapshot = decrypt_payload(res["ciphertext_b64"], res["nonce_b64"], enc_key)
+    snapshot = _decrypt_remote_record(res, enc_key, cfg["vault_id"])
+    # restore_ledger_snapshot validates fully before touching the database and rolls
+    # back atomically, so an invalid payload leaves the local ledger untouched.
+    if local_changed:
+        _pre_pull_backup()
     restore_ledger_snapshot(snapshot)
 
-    cfg["revision"] = res.get("revision", cfg.get("revision", 1))
-    save_sync_config(cfg)
+    cfg["revision"] = int(res.get("revision", cfg.get("revision", 1)))
+    cfg["synced_fingerprint"] = _snapshot_fingerprint(snapshot)
+    cfg["ancestry_established"] = True
+    try:
+        save_sync_config(cfg)
+    except OSError as exc:
+        raise ValueError(
+            "The ledger was restored but the sync revision could not be saved. "
+            "Run `sync pull` again before pushing."
+        ) from exc
     return {
         "status": "restored",
         "revision": cfg["revision"],
