@@ -195,8 +195,12 @@ def test_wrong_passphrase_push_fails_and_never_stores_it(sync_config):
     assert "passphrase" not in stored
 
 
-def test_pull_with_wrong_passphrase_never_touches_local_ledger(sync_config):
+def test_pull_with_wrong_passphrase_never_touches_local_ledger(
+    sync_config, tmp_path, monkeypatch
+):
     """A payload encrypted under passphrase A must not decrypt under passphrase B."""
+    monkeypatch.setattr(db_manager, "DB_PATH", str(tmp_path / "ledger.db"))
+    db_manager.init_db()
     calls = []
     salt = os.urandom(16)
     cfg = {
