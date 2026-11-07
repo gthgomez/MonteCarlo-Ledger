@@ -53,10 +53,25 @@ comparison and the live Kotlin job. Its `ANDROID_PIN_SHA` still points at `6cadf
 Android `main`). Advance it to the merged Android `main` that vendored released Contract 2.0:
 
 ```text
-ANDROID_PIN_SHA: 898e74ccab45e57017b4eb9807668d227bce0e34
+ANDROID_PIN_SHA: cbf0769668214c3f71bc6533f953064bc6fd53e3
 ```
 
 `docs/ci/contract-conformance-pin.patch` contains that exact change. It is not applied here for the
 same `workflow`-scope reason as the two workflow files above. Until it is applied, the live job
 still runs and passes (the 38 fixtures and the Kotlin engine are unchanged), but its recorded
 provenance is older than the merged Android `main`; the report must be read accordingly.
+
+## Branch protection (installed 2026-11-07)
+
+Required status checks are enabled on both default branches with `enforce_admins=true`:
+
+- Ledger `master`: `test (3.10)`, `test (3.11)`, `conformance`.
+- Android `main`: `Unit tests + assembleDebug`, `assembleRelease (R8/minify)`,
+  `connectedDebugAndroidTest (API 34 emulator)`.
+
+`conformance-live` is deliberately **not** required: it is a cross-repository, heavyweight job and
+its failure modes are covered by the always-on `conformance` job. The instrumented Android job is
+required because it runs on every pull request and its opt-out variable still reports a passing
+(not skipped) job with an explicit notice.
+
+Because `enforce_admins=true`, a failing required check blocks even the repository owner's merge.
