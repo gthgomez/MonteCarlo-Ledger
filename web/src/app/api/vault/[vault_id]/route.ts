@@ -1,36 +1,57 @@
 import { NextResponse } from "next/server";
-import { getVaultRecord, hashAuthToken, saveVaultRecord } from "@/lib/turso";
+import {
+  getVaultRecord,
+  hashAuthToken,
+  storageAvailable,
+  timingSafeEqualStrings,
+  updateVaultRecordAtomic,
+} from "@/lib/turso";
+import {
+  authThrottled,
+  bearerToken,
+  clearAuthFailures,
+  isCiphertext,
+  isExpectedRevision,
+  isNonce,
+  isSalt,
+  isValidVaultId,
+  recordAuthFailure,
+} from "@/lib/vault-protocol";
 
-function getBearerToken(req: Request): string | null {
-  const auth = req.headers.get("authorization");
-  if (!auth || !auth.startsWith("Bearer ")) {
-    return null;
-  }
-  return auth.slice(7).trim();
+export const runtime = "nodejs";
+
+function unauthorized() {
+  // Deliberately identical for "missing vault" and "wrong passphrase" so an
+  // unauthenticated caller cannot enumerate vault identifiers.
+  return NextResponse.json({ error: "UNAUTHORIZED" }, { status: 401 });
+}
+
+function unavailable() {
+  return NextResponse.json({ error: "STORAGE_UNAVAILABLE" }, { status: 503 });
 }
 
 export async function GET(
   req: Request,
-  { params }: { params: { vault_id: string } }
+  { params }: { params: Promise<{ vault_id: string }> }
 ) {
+  const { vault_id: vaultId } = await params;
+  if (!isValidVaultId(vaultId)) {
+    return NextResponse.json({ error: "INVALID_VAULT_ID" }, { status: 400 });
+  }
+  const token = bearerToken(req);
+  if (!token) return unauthorized();
+  if (authThrottled(vaultId)) {
+    return NextResponse.json({ error: "TOO_MANY_ATTEMPTS" }, { status: 429 });
+  }
+  if (!storageAvailable()) return unavailable();
+
   try {
-    const vaultId = params.vault_id;
-    const token = getBearerToken(req);
-
-    if (!token) {
-      return NextResponse.json({ error: "UNAUTHORIZED" }, { status: 401 });
-    }
-
     const vault = await getVaultRecord(vaultId);
-    if (!vault) {
-      return NextResponse.json({ error: "VAULT_NOT_FOUND" }, { status: 404 });
+    if (!vault || !timingSafeEqualStrings(hashAuthToken(token), vault.auth_key_hash)) {
+      recordAuthFailure(vaultId);
+      return unauthorized();
     }
-
-    const tokenHash = hashAuthToken(token);
-    if (tokenHash !== vault.auth_key_hash) {
-      return NextResponse.json({ error: "UNAUTHORIZED" }, { status: 401 });
-    }
-
+    clearAuthFailures(vaultId);
     return NextResponse.json({
       vault_id: vault.vault_id,
       revision: vault.revision,
@@ -39,69 +60,89 @@ export async function GET(
       kdf_salt_b64: vault.kdf_salt_b64,
       updated_at: vault.updated_at,
     });
-  } catch (err: any) {
-    return NextResponse.json(
-      { error: err.message || "INTERNAL_ERROR" },
-      { status: 500 }
-    );
+  } catch (err) {
+    console.error("[vault] read failed:", err instanceof Error ? err.name : "unknown");
+    return NextResponse.json({ error: "INTERNAL_ERROR" }, { status: 500 });
   }
 }
 
 export async function PUT(
   req: Request,
-  { params }: { params: { vault_id: string } }
+  { params }: { params: Promise<{ vault_id: string }> }
 ) {
+  const { vault_id: vaultId } = await params;
+  if (!isValidVaultId(vaultId)) {
+    return NextResponse.json({ error: "INVALID_VAULT_ID" }, { status: 400 });
+  }
+  const token = bearerToken(req);
+  if (!token) return unauthorized();
+  if (authThrottled(vaultId)) {
+    return NextResponse.json({ error: "TOO_MANY_ATTEMPTS" }, { status: 429 });
+  }
+  if (!storageAvailable()) return unavailable();
+
+  let body: any;
   try {
-    const vaultId = params.vault_id;
-    const token = getBearerToken(req);
+    body = await req.json();
+  } catch {
+    return NextResponse.json({ error: "MALFORMED_JSON" }, { status: 400 });
+  }
+  const { expected_revision, ciphertext_b64, nonce_b64, kdf_salt_b64 } = body ?? {};
 
-    if (!token) {
-      return NextResponse.json({ error: "UNAUTHORIZED" }, { status: 401 });
-    }
+  // Revision is mandatory: an update without it would allow a lost update.
+  if (!isExpectedRevision(expected_revision)) {
+    return NextResponse.json({ error: "EXPECTED_REVISION_REQUIRED" }, { status: 400 });
+  }
+  if (!isCiphertext(ciphertext_b64) || !isNonce(nonce_b64)) {
+    return NextResponse.json({ error: "INVALID_VAULT_PAYLOAD" }, { status: 400 });
+  }
+  if (kdf_salt_b64 !== undefined && !isSalt(kdf_salt_b64)) {
+    return NextResponse.json({ error: "INVALID_VAULT_PAYLOAD" }, { status: 400 });
+  }
 
-    const body = await req.json();
-    const { expected_revision, ciphertext_b64, nonce_b64, kdf_salt_b64 } = body;
-
+  try {
     const vault = await getVaultRecord(vaultId);
-    if (!vault) {
-      return NextResponse.json({ error: "VAULT_NOT_FOUND" }, { status: 404 });
+    if (!vault || !timingSafeEqualStrings(hashAuthToken(token), vault.auth_key_hash)) {
+      recordAuthFailure(vaultId);
+      return unauthorized();
+    }
+    // Normal updates must not rotate the KDF salt: doing so changes the auth
+    // token derived from the same passphrase and locks every other client out.
+    if (kdf_salt_b64 !== undefined && !timingSafeEqualStrings(kdf_salt_b64, vault.kdf_salt_b64)) {
+      return NextResponse.json({ error: "SALT_ROTATION_NOT_ALLOWED" }, { status: 400 });
     }
 
-    const tokenHash = hashAuthToken(token);
-    if (tokenHash !== vault.auth_key_hash) {
-      return NextResponse.json({ error: "UNAUTHORIZED" }, { status: 401 });
-    }
+    const outcome = await updateVaultRecordAtomic({
+      vault_id: vaultId,
+      auth_key_hash: vault.auth_key_hash,
+      expected_revision,
+      ciphertext_b64,
+      nonce_b64,
+    });
 
-    if (expected_revision !== undefined && expected_revision !== vault.revision) {
+    if (outcome === "updated") {
+      clearAuthFailures(vaultId);
+      return NextResponse.json({
+        success: true,
+        vault_id: vaultId,
+        revision: expected_revision + 1,
+      });
+    }
+    if (outcome === "conflict") {
+      const current = await getVaultRecord(vaultId);
       return NextResponse.json(
         {
           error: "REVISION_CONFLICT",
-          current_revision: vault.revision,
+          current_revision: current?.revision ?? null,
           detail: "Vault was modified by another client. Pull latest changes first.",
         },
         { status: 409 }
       );
     }
-
-    const nextRevision = vault.revision + 1;
-    await saveVaultRecord({
-      vault_id: vaultId,
-      auth_key_hash: vault.auth_key_hash,
-      revision: nextRevision,
-      ciphertext_b64,
-      nonce_b64,
-      kdf_salt_b64: kdf_salt_b64 || vault.kdf_salt_b64,
-    });
-
-    return NextResponse.json({
-      success: true,
-      vault_id: vaultId,
-      revision: nextRevision,
-    });
-  } catch (err: any) {
-    return NextResponse.json(
-      { error: err.message || "INTERNAL_ERROR" },
-      { status: 500 }
-    );
+    recordAuthFailure(vaultId);
+    return unauthorized();
+  } catch (err) {
+    console.error("[vault] update failed:", err instanceof Error ? err.name : "unknown");
+    return NextResponse.json({ error: "INTERNAL_ERROR" }, { status: 500 });
   }
 }

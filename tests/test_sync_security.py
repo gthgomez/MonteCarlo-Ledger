@@ -380,3 +380,97 @@ def test_restore_round_trip_is_exact_and_idempotent(ledger_db):
 
     assert first == second
     assert first == _without_timestamp(snapshot)
+
+
+# --- vault protocol interoperability (mocked transport) ---------------------
+
+
+def test_sync_init_joins_existing_vault_using_public_metadata(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    salt_b64 = base64.b64encode(os.urandom(16)).decode("ascii")
+    calls = []
+
+    def fake_request(url, *, method="GET", payload=None, auth_token=None, timeout=30):
+        calls.append((method, url, auth_token))
+        if method == "POST":
+            return 409, {"error": "VAULT_ALREADY_EXISTS"}
+        if url.endswith("/metadata"):
+            return 200, {"kdf_salt_b64": salt_b64, "revision": 7}
+        return 200, {"revision": 7}
+
+    monkeypatch.setattr(sync, "_request_json", fake_request)
+    cfg = sync.sync_init("shared-vault", "passphrase", "http://vault.test")
+
+    assert cfg == {
+        "vault_id": "shared-vault",
+        "salt_b64": salt_b64,
+        "server_url": "http://vault.test",
+        "revision": 7,
+    }
+    # The join proves the passphrase with an authenticated read derived from the
+    # metadata salt (the original bug derived a fresh salt and got a 401).
+    assert any(token for (_, _, token) in calls)
+
+
+def test_sync_init_join_with_wrong_passphrase_is_explicit(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    salt_b64 = base64.b64encode(os.urandom(16)).decode("ascii")
+
+    def fake_request(url, *, method="GET", payload=None, auth_token=None, timeout=30):
+        if method == "POST":
+            return 409, {"error": "VAULT_ALREADY_EXISTS"}
+        if url.endswith("/metadata"):
+            return 200, {"kdf_salt_b64": salt_b64, "revision": 3}
+        return 401, {"error": "UNAUTHORIZED"}
+
+    monkeypatch.setattr(sync, "_request_json", fake_request)
+    with pytest.raises(ValueError, match="passphrase is wrong"):
+        sync.sync_init("shared-vault", "wrong", "http://vault.test")
+
+
+def test_sync_push_conflict_is_explicit_and_preserves_local_ledger(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    db_manager.DB_PATH = str(tmp_path / "ledger.db")
+    db_manager.init_db()
+    db_manager.add_transaction(500_000, "System", "Opening", t_type="Adjustment", date_str="2026-10-01")
+    sync.save_sync_config({
+        "vault_id": "v",
+        "salt_b64": base64.b64encode(os.urandom(16)).decode("ascii"),
+        "server_url": "http://vault.test",
+        "revision": 1,
+    })
+
+    def fake_request(url, *, method="GET", payload=None, auth_token=None, timeout=30):
+        assert method == "PUT"
+        assert payload["expected_revision"] == 1  # mandatory conditional write
+        return 409, {"error": "REVISION_CONFLICT", "current_revision": 2}
+
+    monkeypatch.setattr(sync, "_request_json", fake_request)
+    with pytest.raises(ValueError, match="Sync conflict"):
+        sync.sync_push(passphrase="passphrase")
+
+    # The local ledger and the recorded revision are untouched.
+    assert db_manager.get_ledger_balance() == 500_000
+    assert sync.load_sync_config()["revision"] == 1
+
+
+def test_sync_pull_wrong_passphrase_does_not_touch_the_ledger(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    db_manager.DB_PATH = str(tmp_path / "ledger.db")
+    db_manager.init_db()
+    db_manager.add_transaction(123_456, "System", "Opening", t_type="Adjustment", date_str="2026-10-01")
+    sync.save_sync_config({
+        "vault_id": "v",
+        "salt_b64": base64.b64encode(os.urandom(16)).decode("ascii"),
+        "server_url": "http://vault.test",
+        "revision": 4,
+    })
+
+    monkeypatch.setattr(
+        sync,
+        "_request_json",
+        lambda url, **kwargs: (401, {"error": "UNAUTHORIZED"}),
+    )
+    with pytest.raises(ValueError, match="Authentication failed"):
+        sync.sync_pull(passphrase="wrong")
+    assert db_manager.get_ledger_balance() == 123_456

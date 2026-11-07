@@ -8,14 +8,21 @@
     "skipLibCheck": true,
     "esModuleInterop": true,
     "strict": true,
-    "types": ["node"]
+    "types": [
+      "node"
+    ]
   },
   "include": [
     "src/contract/__tests__/**/*.ts",
     "src/contract/*.ts",
     "src/lib/__tests__/**/*.ts",
     "src/lib/scenario-builder.ts",
-    "src/lib/types.ts"
+    "src/lib/types.ts",
+    "src/lib/validate.ts",
+    "src/lib/turso.ts"
   ],
-  "exclude": ["node_modules", "dist-test"]
+  "exclude": [
+    "node_modules",
+    "dist-test"
+  ]
 }

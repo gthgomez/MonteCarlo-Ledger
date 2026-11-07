@@ -2,8 +2,9 @@
 
 import React, { useState } from "react";
 import { X, Cloud, Lock, Terminal, Upload, Download, Check, AlertCircle, RefreshCw } from "lucide-react";
-import { deriveVaultKeys, encryptVault, decryptVault } from "@/lib/crypto";
+import { pushVault, pullVault } from "@/lib/vault-client";
 import { LedgerState } from "@/lib/types";
+import { parseLedgerState } from "@/lib/validate";
 
 interface SyncModalProps {
   isOpen: boolean;
@@ -41,48 +42,12 @@ export function SyncModal({
     setStatusMessage(null);
 
     try {
-      // 1. Derive zero-knowledge keys in browser
-      const { authToken, encKey, saltB64 } = await deriveVaultKeys(passphrase);
-
-      // 2. Encrypt state in browser via AES-GCM
-      const plaintext = JSON.stringify(currentState);
-      const { ciphertext_b64, nonce_b64 } = await encryptVault(plaintext, encKey);
-
-      // 3. Try PUT first (update existing), if 404 try POST (create new)
-      let res = await fetch(`/api/vault/${encodeURIComponent(vaultId)}`, {
-        method: "PUT",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${authToken}`,
-        },
-        body: JSON.stringify({
-          ciphertext_b64,
-          nonce_b64,
-          kdf_salt_b64: saltB64,
-        }),
-      });
-
-      if (res.status === 404) {
-        // Vault doesn't exist yet, create with POST
-        res = await fetch("/api/vault", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            vault_id: vaultId,
-            auth_token: authToken,
-            ciphertext_b64,
-            nonce_b64,
-            kdf_salt_b64: saltB64,
-          }),
-        });
-      }
-
-      const data = await res.json();
-      if (!res.ok) {
-        throw new Error(data.error || "Failed to push to cloud vault");
-      }
-
-      setStatusMessage(`Successfully pushed encrypted snapshot to Cloud Vault (rev ${data.revision})!`);
+      // Salt discovery happens inside pushVault: an existing vault is always
+      // authenticated with its stored KDF salt, never a freshly generated one.
+      const { revision } = await pushVault(vaultId.trim(), passphrase, currentState);
+      setStatusMessage(
+        `Successfully pushed encrypted snapshot to Cloud Vault (rev ${revision})!`
+      );
     } catch (err: any) {
       setErrorMessage(err.message || "Failed to push to vault.");
     } finally {
@@ -100,28 +65,9 @@ export function SyncModal({
     setStatusMessage(null);
 
     try {
-      // 1. Fetch encrypted record from server
-      const { authToken } = await deriveVaultKeys(passphrase);
-      const res = await fetch(`/api/vault/${encodeURIComponent(vaultId)}`, {
-        headers: {
-          Authorization: `Bearer ${authToken}`,
-        },
-      });
-
-      const data = await res.json();
-      if (!res.ok) {
-        throw new Error(data.error || "Failed to pull from vault");
-      }
-
-      // 2. Derive encryption key using salt stored in vault record
-      const { encKey } = await deriveVaultKeys(passphrase, data.kdf_salt_b64);
-
-      // 3. Decrypt ciphertext locally in browser
-      const decryptedJson = await decryptVault(data.ciphertext_b64, data.nonce_b64, encKey);
-      const parsedState: LedgerState = JSON.parse(decryptedJson);
-
-      onApplyState(parsedState, vaultId);
-      setStatusMessage(`Successfully pulled and decrypted vault (rev ${data.revision})!`);
+      const { state, revision } = await pullVault(vaultId.trim(), passphrase);
+      onApplyState(state, vaultId.trim());
+      setStatusMessage(`Successfully pulled and decrypted vault (rev ${revision})!`);
     } catch (err: any) {
       setErrorMessage(err.message || "Failed to pull from vault. Check passphrase.");
     } finally {
@@ -137,13 +83,14 @@ export function SyncModal({
     reader.onload = (event) => {
       try {
         const parsed = JSON.parse(event.target?.result as string);
-        if (!parsed.current_balance_cents || !Array.isArray(parsed.incomes)) {
-          throw new Error("Invalid ledger backup format");
+        const validated = parseLedgerState(parsed);
+        if (!validated.ok) {
+          throw new Error(validated.error);
         }
-        onApplyState(parsed);
+        onApplyState(validated.state);
         setStatusMessage("Successfully imported ledger backup file!");
       } catch (err: any) {
-        setErrorMessage("Failed to parse JSON file: " + err.message);
+        setErrorMessage("Import rejected (your current ledger is unchanged): " + err.message);
       }
     };
     reader.readAsText(file);
@@ -279,14 +226,18 @@ export function SyncModal({
             </p>
 
             <div className="rounded-xl bg-slate-950 p-3 font-mono text-[11px] text-indigo-300 space-y-2 border border-slate-800 overflow-x-auto">
-              <div className="text-slate-500"># 1. Initialize local vault pairing:</div>
-              <div>python -m monte_carlo_ledger sync init &quot;{vaultId}&quot; &quot;&lt;passphrase&gt;&quot;</div>
+              <div className="text-slate-500"># 1. Pair this vault (prompts for the passphrase; never put it in argv):</div>
+              <div>python -m monte_carlo_ledger sync init {vaultId}</div>
+              <div className="text-slate-500">#    or, in unattended scripts:</div>
+              <div>MC_LEDGER_SYNC_PASSPHRASE=... python -m monte_carlo_ledger sync init {vaultId}</div>
 
               <div className="text-slate-500 pt-1"># 2. Push local SQLite ledger to cloud vault:</div>
               <div>python -m monte_carlo_ledger sync push</div>
 
               <div className="text-slate-500 pt-1"># 3. Pull latest changes into local SQLite:</div>
               <div>python -m monte_carlo_ledger sync pull</div>
+
+              <div className="text-slate-500 pt-1"># Existing vaults are joined, not overwritten; the Web UI and CLI share one KDF salt.</div>
             </div>
           </div>
         )}

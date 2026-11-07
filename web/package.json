@@ -8,25 +8,30 @@
     "build": "next build",
     "start": "next start",
     "lint": "tsc --noEmit",
-    "test": "tsc -p tsconfig.test.json && node --test dist-test/contract/__tests__/conformance.test.js dist-test/lib/__tests__/scenario-builder.test.js",
+    "test": "tsc -p tsconfig.test.json && node --test dist-test/contract/__tests__/conformance.test.js dist-test/contract/__tests__/timeline.test.js dist-test/lib/__tests__/scenario-builder.test.js dist-test/lib/__tests__/validate.test.js dist-test/lib/__tests__/storage.test.js",
     "test:e2e": "pnpm build && playwright test"
   },
   "dependencies": {
-    "@libsql/client": "^0.14.0",
+    "@libsql/client": "^0.18.0",
     "lucide-react": "^0.460.0",
-    "next": "^14.2.15",
-    "react": "^18.3.1",
-    "react-dom": "^18.3.1"
+    "next": "^15.5.29",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1"
   },
   "devDependencies": {
     "@playwright/test": "^1.65.0",
     "@types/node": "^20.14.0",
-    "@types/react": "^18.3.3",
-    "@types/react-dom": "^18.3.0",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
     "ajv": "^8.20.0",
     "autoprefixer": "^10.4.20",
-    "postcss": "^8.4.47",
+    "postcss": "^8.5.23",
     "tailwindcss": "^3.4.13",
     "typescript": "^5.6.2"
+  },
+  "pnpm": {
+    "overrides": {
+      "postcss": "^8.5.23"
+    }
   }
 }
