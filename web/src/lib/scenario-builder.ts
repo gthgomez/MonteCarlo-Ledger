@@ -6,7 +6,22 @@ function addDays(iso: string, days: number): string {
   return date.toISOString().split("T")[0];
 }
 
-function getNextDate(iso: string, frequency: string): string {
+// Advance by whole months while preserving the day-of-month anchor: Jan 31 monthly
+// becomes Feb 28/29, then Mar 31 — it must never drift into a different day (MCD-0022).
+// `anchorDay` carries the recurrence's original day through clamped months; without it,
+// a clamped occurrence (Feb 28) would redefine the anchor and erase the 31st forever.
+function addMonthsClamped(iso: string, months: number, anchorDay?: number): string {
+  const [y, m] = iso.split("-").map(Number);
+  const d = anchorDay ?? Number(iso.split("-")[2]);
+  const targetMonth0 = m - 1 + months;
+  const ny = y + Math.floor(targetMonth0 / 12);
+  const nm = (targetMonth0 % 12) + 1;
+  const lastDay = new Date(Date.UTC(ny, nm, 0)).getUTCDate();
+  const nd = Math.min(d, lastDay);
+  return `${ny}-${String(nm).padStart(2, "0")}-${String(nd).padStart(2, "0")}`;
+}
+
+function getNextDate(iso: string, frequency: string, anchorDay?: number): string {
   const [y, m, d] = iso.split("-").map(Number);
   const date = new Date(Date.UTC(y, m - 1, d));
 
@@ -18,8 +33,7 @@ function getNextDate(iso: string, frequency: string): string {
       date.setUTCDate(date.getUTCDate() + 14);
       break;
     case "Monthly":
-      date.setUTCMonth(date.getUTCMonth() + 1);
-      break;
+      return addMonthsClamped(iso, 1, anchorDay);
     default:
       return "9999-12-31";
   }
@@ -38,6 +52,7 @@ export function buildScenarioFromLedger(
   // 1. Materialize Income Occurrences
   for (const inc of state.incomes) {
     let current = inc.next_payday;
+    const incomeAnchorDay = Number(inc.next_payday.split("-")[2]);
     let guard = 0;
     while (current < windowEnd && guard < 1000) {
       if (current >= asOf) {
@@ -48,7 +63,7 @@ export function buildScenarioFromLedger(
           name: inc.name,
         });
       }
-      const nextDate = getNextDate(current, inc.frequency);
+      const nextDate = getNextDate(current, inc.frequency, incomeAnchorDay);
       if (nextDate <= current) break;
       current = nextDate;
       guard++;
@@ -89,6 +104,7 @@ export function buildScenarioFromLedger(
       }
     } else if (pmt.due_date) {
       let current = pmt.due_date;
+      const paymentAnchorDay = Number(pmt.due_date.split("-")[2]);
       let guard = 0;
       while (current < windowEnd && guard < 1000) {
         if (current >= asOf) {
@@ -102,7 +118,7 @@ export function buildScenarioFromLedger(
           }
         }
         if (pmt.recurrence === "One-time") break;
-        const nxt = getNextDate(current, pmt.recurrence);
+        const nxt = getNextDate(current, pmt.recurrence, paymentAnchorDay);
         if (nxt <= current) break;
         current = nxt;
         guard++;
