@@ -107,3 +107,41 @@ test.describe("ledger editing", () => {
     await expect(page.getByText("Calculation Failed")).toHaveCount(0);
   });
 });
+
+test.describe("local-first privacy", () => {
+  test("dashboard and decisions make no remote network calls", async ({ page }) => {
+    const remote: string[] = [];
+    page.on("request", (req) => {
+      const url = req.url();
+      const local =
+        url.startsWith("http://127.0.0.1:3100") ||
+        url.startsWith("data:") ||
+        url.startsWith("blob:");
+      if (!local) remote.push(url);
+    });
+
+    await page.goto("/");
+    await expect(page.getByText("Safe to Spend (P10)")).toBeVisible();
+    await page.getByRole("button", { name: /Late Paycheck/ }).click();
+    await expect(page.getByText("Fragility Under Payroll Variance")).toBeVisible();
+    await page.getByRole("button", { name: /Debt Snowball vs Avalanche/ }).click();
+    await expect(page.getByText("Payoff Strategy")).toBeVisible();
+
+    expect(remote, `unexpected remote requests: ${remote.join(", ")}`).toEqual([]);
+  });
+
+  test("cloud vault is optional and opening it sends nothing", async ({ page }) => {
+    const vaultCalls: string[] = [];
+    page.on("request", (req) => {
+      if (req.url().includes("/api/vault")) vaultCalls.push(req.url());
+    });
+
+    await page.goto("/");
+    await page.getByRole("button", { name: /Cloud Vault/ }).click();
+    await expect(page.getByText(/Cloud Vault & CLI Synchronization/)).toBeVisible();
+    await expect(page.getByText(/zero-knowledge end-to-end encryption/i)).toBeVisible();
+    // Opening the optional sync surface must not by itself send the ledger anywhere.
+    expect(vaultCalls).toEqual([]);
+    await expect(page.getByText("Safe to Spend (P10)")).toBeVisible();
+  });
+});
