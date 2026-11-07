@@ -1,4 +1,4 @@
-"""MonteCarlo Contract 1.0 reference implementation (pure, clock-free)."""
+"""MonteCarlo semantic contract reference implementation (pure, clock-free)."""
 
 from __future__ import annotations
 
