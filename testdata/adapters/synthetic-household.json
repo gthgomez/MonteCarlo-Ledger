@@ -1,0 +1,126 @@
+{
+  "description": "Shared persisted-ledger adapter corpus: monthly income anchored to Jan 31 with an expected-amount override, biweekly income, rent before income, a paid recurring bill, a one-time bill, a credit-card expense and a negative balance.",
+  "as_of": "2026-10-01",
+  "horizon_days": 90,
+  "simulation": {
+    "runs": 500,
+    "seed": 42,
+    "quantile_num": 1,
+    "quantile_den": 10
+  },
+  "ledger": {
+    "version": "2.1",
+    "updated_at": "2026-10-01T00:00:00+00:00",
+    "current_balance_cents": -20000,
+    "incomes": [
+      {
+        "id": "inc-monthly",
+        "name": "Monthly Salary",
+        "amount_cents": 400000,
+        "frequency": "Monthly",
+        "last_payday": "2026-01-31",
+        "next_payday": "2026-02-28",
+        "expected_amount": 410000
+      },
+      {
+        "id": "inc-biweekly",
+        "name": "Biweekly Pay",
+        "amount_cents": 150000,
+        "frequency": "Bi-weekly",
+        "last_payday": "2026-09-18",
+        "next_payday": "2026-10-02"
+      }
+    ],
+    "payments": [
+      {
+        "id": "pmt-rent",
+        "name": "Rent",
+        "amount_cents": 135000,
+        "due_day": 1,
+        "recurrence": "Monthly",
+        "due_date": null,
+        "is_auto_withdraw": true
+      },
+      {
+        "id": "pmt-util",
+        "name": "Utilities",
+        "amount_cents": 14000,
+        "due_day": 18,
+        "recurrence": "Monthly",
+        "due_date": null,
+        "is_auto_withdraw": true
+      },
+      {
+        "id": "pmt-once",
+        "name": "Annual Insurance",
+        "amount_cents": 60000,
+        "recurrence": "One-time",
+        "due_date": "2026-11-20",
+        "is_auto_withdraw": false
+      }
+    ],
+    "transactions": [
+      {
+        "id": "tx-open",
+        "amount_cents": 500000,
+        "category": "System",
+        "type": "Adjustment",
+        "date": "2026-09-01",
+        "description": "Opening"
+      },
+      {
+        "id": "tx-rent",
+        "amount_cents": -380000,
+        "category": "Rent",
+        "type": "Expense",
+        "date": "2026-09-15",
+        "description": "Rent"
+      },
+      {
+        "id": "tx-card",
+        "amount_cents": -45000,
+        "category": "Card",
+        "type": "Expense",
+        "date": "2026-09-20",
+        "description": "Credit card"
+      },
+      {
+        "id": "tx-adj",
+        "amount_cents": -95000,
+        "category": "System",
+        "type": "Adjustment",
+        "date": "2026-09-30",
+        "description": "Reconcile"
+      }
+    ],
+    "bill_occurrences": [
+      {
+        "id": "occ-util-paid",
+        "payment_id": "pmt-util",
+        "due_date": "2026-10-18",
+        "paid": true,
+        "transaction_id": null
+      }
+    ],
+    "liabilities": []
+  },
+  "expected": {
+    "forecast": {
+      "minimum_balance_cents": -155000,
+      "minimum_balance_date": "2026-10-01",
+      "ending_balance_cents": 1347000,
+      "first_negative_date": "2026-10-01"
+    },
+    "risk": {
+      "negative_balance_probability_ppm": 1000000,
+      "minimum_balance_p10_cents": -155000,
+      "minimum_balance_p50_cents": -155000,
+      "minimum_balance_p90_cents": -155000,
+      "ending_balance_p10_cents": 1296302,
+      "ending_balance_p50_cents": 1338430,
+      "ending_balance_p90_cents": 1383000,
+      "projected_low_point_cents": -155000,
+      "safe_to_spend_cents": -155000
+    }
+  }
+}
