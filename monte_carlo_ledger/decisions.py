@@ -7,11 +7,13 @@ here; the engine owns the answer (MCD-0006..0010).
 
 from __future__ import annotations
 
+import copy
 from datetime import date, timedelta
 from typing import Any, Dict, List, Optional
 
 from . import scenario as scenario_mod
-from .contract import run_scenario
+from .contract import ContractError, run_scenario
+from .contract.engine import SUPPORTED_CONTRACT_VERSIONS
 
 DEFAULT_HORIZON_DAYS = 90
 DEFAULT_SIM: Dict[str, int] = {"runs": 500, "seed": 42}
@@ -190,4 +192,134 @@ def overdraft_risk(
         "safe_to_spend_cents": risk_block["safe_to_spend_cents"],
         "forecast": forecast,
         "risk": risk_block,
+    }
+
+
+# ---------------------------------------------------------------------------
+# MCP-ready structured surface (docs/MCP_READINESS.md)
+#
+# These operations exist so a future MCP adapter can be thin: each returns a
+# stable, versioned, JSON-serialisable structure produced by the canonical
+# engine, or raises a typed error — it never returns a fabricated number. All
+# of them are read-only or purely hypothetical (no ledger writes, no sync).
+
+
+def financial_snapshot() -> Dict[str, Any]:
+    """Balances, reconciliation state and data freshness for the local ledger.
+
+    Read-only. Exposes no transaction details — only balances, counts and the
+    newest ledger date so a caller can judge freshness.
+    """
+    from . import db_manager
+
+    is_sync, ledger_balance, stored_balance = db_manager.validate_balance_consistency()
+    incomes = db_manager.get_all_income()
+    payments = db_manager.get_all_payments()
+    history = db_manager.get_transaction_history(limit=1_000_000)
+    with db_manager.get_db_connection() as conn:
+        row = conn.execute("SELECT value FROM settings WHERE key = 'bank_balance_cents'").fetchone()
+    bank_balance = int(row["value"]) if row and row["value"] is not None else None
+    newest_txn_date = max((t.date for t in history), default=None)
+    return {
+        "ledger_balance_cents": ledger_balance,
+        "stored_balance_cents": stored_balance,
+        "bank_balance_cents": bank_balance,
+        "reconciled_with_bank": bool(bank_balance is not None and bank_balance == ledger_balance),
+        "balance_consistent": bool(is_sync),
+        "counts": {
+            "transactions": len(history),
+            "income_sources": len(incomes),
+            "payments": len(payments),
+        },
+        "newest_transaction_date": newest_txn_date,
+        # A future adapter must present this basis, not just the numbers.
+        "data_source": "local sqlite ledger (monte_carlo_ledger/db_manager)",
+    }
+
+
+def compare_debt_strategies(
+    liabilities: List[Dict[str, Any]],
+    as_of: str,
+    extra_monthly_payment_cents: int = 0,
+) -> Dict[str, Any]:
+    """Compare canonical snowball vs avalanche payoff for the same liabilities.
+
+    Deterministic amortization only. The result explicitly states that these
+    payments are NOT injected into the cash-flow forecast: affordability of an
+    extra payment must be checked with simulate_purchase/forecast separately.
+    """
+    if not isinstance(liabilities, list) or not liabilities:
+        raise ContractError("SCHEMA_INVALID", "liabilities must be a non-empty array")
+    results: Dict[str, Any] = {}
+    for strategy in ("snowball", "avalanche"):
+        scenario = scenario_mod.build_scenario(as_of, DEFAULT_HORIZON_DAYS)
+        scenario["liabilities"] = copy.deepcopy(liabilities)
+        scenario["debt_strategy"] = strategy
+        scenario["extra_monthly_payment_cents"] = max(0, int(extra_monthly_payment_cents))
+        results[strategy] = run_scenario(scenario)["debt"]
+    return {
+        "as_of": as_of,
+        "strategies": results,
+        # Honest interplay note: amortization and cash flow are separate models.
+        "cash_flow_note": (
+            "Deterministic payoff schedules only; these payments are not included in the "
+            "cash-flow forecast or overdraft estimate. Affordability of any extra payment "
+            "must be validated separately via simulate_purchase/forecast."
+        ),
+    }
+
+
+def validate_scenario(scenario: Dict[str, Any]) -> Dict[str, Any]:
+    """Structurally and semantically validate a canonical scenario without side effects.
+
+    Mirrors the cross-engine pipeline: JSON-schema first (SCHEMA_INVALID), then a typed
+    engine dry-run. Returns a machine-readable verdict; never raises for invalid input.
+    """
+    import json
+    import pathlib
+
+    schema_path = pathlib.Path(__file__).resolve().parents[1] / "schemas" / "scenario.schema.json"
+    errors: List[Dict[str, str]] = []
+    schema_valid = True
+    try:
+        import jsonschema
+
+        validator = jsonschema.Draft202012Validator(json.loads(schema_path.read_text()))
+        for err in validator.iter_errors(scenario):
+            schema_valid = False
+            errors.append({"code": "SCHEMA_INVALID", "path": ".".join(str(p) for p in err.absolute_path) or "(root)", "message": err.message})
+    except ImportError:  # pragma: no cover - jsonschema is a dev dependency
+        schema_valid = None  # unknown, not failed
+    if schema_valid is True and not errors:
+        try:
+            run_scenario(scenario)
+        except ContractError as exc:
+            errors.append({"code": exc.code, "path": "(engine)", "message": str(exc)})
+        except (KeyError, TypeError, ValueError, OverflowError, ArithmeticError) as exc:
+            errors.append({"code": "UNKNOWN_ERROR", "path": "(engine)", "message": str(exc)})
+    return {
+        "valid": not errors,
+        "errors": errors,
+        "schema_checked": schema_valid is not False,
+    }
+
+
+def engine_capabilities() -> Dict[str, Any]:
+    """Static descriptor of what this engine supports (contract version, bounds, operations)."""
+    from . import contract
+
+    return {
+        "contract_version": contract.CONTRACT_VERSION,
+        "supported_contract_versions": list(SUPPORTED_CONTRACT_VERSIONS),
+        "operations": [
+            "forecast", "risk", "overdraft_risk", "safe_to_spend",
+            "simulate_purchase", "simulate_paycheck_delay", "compare_scenarios",
+            "compare_debt_strategies", "financial_snapshot", "validate_scenario",
+            "engine_capabilities",
+        ],
+        "money": {"unit": "cents", "currency": "USD", "single_currency": True,
+                  "overflow_is_error": True},
+        "time": {"as_of_required": True, "horizon_half_open": True},
+        "simulation": dict(DEFAULT_SIM),
+        "writes": {"allowed": False},
     }
