@@ -2,18 +2,24 @@
 
 Provides zero-knowledge backup and bidirectional sync between local SQLite (`ledger.db`)
 and the Turso-backed edge vault API. Plaintext financial records never leave the local machine.
+
+Credential policy: the vault passphrase is never accepted as a command-line argument
+(shell history / process listing would leak it) and is never persisted. Supply it via
+the MC_LEDGER_SYNC_PASSPHRASE environment variable or the hidden interactive prompt.
 """
 
 from __future__ import annotations
 
 import base64
+import getpass
 import hashlib
 import json
 import os
 import shutil
+import sys
 import urllib.error
 import urllib.request
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional, Tuple
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -22,6 +28,44 @@ from . import db_manager
 
 SYNC_CONFIG_FILE = ".ledger-sync.json"
 DEFAULT_SERVER_URL = "https://montecarlo-ledger.vercel.app"
+PASSPHRASE_ENV = "MC_LEDGER_SYNC_PASSPHRASE"
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _warn_stored_passphrase() -> None:
+    print(
+        "warning: .ledger-sync.json contains a plaintext passphrase (deprecated and "
+        "insecure); run `monte-carlo-ledger sync lock` to remove it from disk. "
+        "Push/pull will prompt for the passphrase after that.",
+        file=sys.stderr,
+    )
+
+
+def resolve_passphrase(
+    supplied: Optional[str] = None, confirm: bool = False, prompt: str = "Vault passphrase: "
+) -> str:
+    """Resolve the vault passphrase without ever accepting it from argv.
+
+    Order: explicit argument (programmatic callers) -> MC_LEDGER_SYNC_PASSPHRASE
+    environment variable -> hidden interactive prompt (with confirmation when
+    creating a new vault).
+    """
+    if supplied:
+        return supplied
+    env_passphrase = os.environ.get(PASSPHRASE_ENV)
+    if env_passphrase:
+        return env_passphrase
+    passphrase = getpass.getpass(prompt)
+    if confirm:
+        repeated = getpass.getpass("Repeat vault passphrase: ")
+        if passphrase != repeated:
+            raise ValueError("Passphrases do not match.")
+    if not passphrase:
+        raise ValueError("Passphrase must not be empty.")
+    return passphrase
 
 
 def derive_keys(passphrase: str, salt: bytes) -> Tuple[str, bytes]:
@@ -114,7 +158,7 @@ def export_ledger_snapshot() -> Dict[str, Any]:
 
     return {
         "version": "2.0",
-        "updated_at": datetime.utcnow().isoformat() + "Z",
+        "updated_at": _utc_now_iso(),
         "current_balance_cents": ledger_balance,
         "incomes": incomes,
         "payments": payments,
@@ -192,7 +236,13 @@ def save_sync_config(config: Dict[str, Any]) -> None:
         json.dump(config, f, indent=2)
 
 
-def sync_init(vault_id: str, passphrase: str, server_url: str = DEFAULT_SERVER_URL) -> Dict[str, Any]:
+def sync_init(vault_id: str, passphrase: Optional[str] = None, server_url: str = DEFAULT_SERVER_URL) -> Dict[str, Any]:
+    """Create a vault. The passphrase is resolved per credential policy and never stored."""
+    passphrase = resolve_passphrase(
+        supplied=passphrase,
+        confirm=passphrase is None,
+        prompt="Choose a vault passphrase: ",
+    )
     salt = os.urandom(16)
     salt_b64 = base64.b64encode(salt).decode("ascii")
     auth_token, enc_key = derive_keys(passphrase, salt)
@@ -219,9 +269,10 @@ def sync_init(vault_id: str, passphrase: str, server_url: str = DEFAULT_SERVER_U
     with urllib.request.urlopen(req) as resp:
         res = json.loads(resp.read().decode("utf-8"))
 
+    # Deliberately no "passphrase" here: credentials live in the user's head or
+    # environment, not on disk. sync_push/sync_pull re-resolve it every run.
     cfg = {
         "vault_id": vault_id,
-        "passphrase": passphrase,
         "salt_b64": salt_b64,
         "server_url": server_url,
         "revision": res.get("revision", 1),
@@ -230,13 +281,23 @@ def sync_init(vault_id: str, passphrase: str, server_url: str = DEFAULT_SERVER_U
     return cfg
 
 
-def sync_push(server_url: Optional[str] = None) -> Dict[str, Any]:
+def _passphrase_for_operation(supplied: Optional[str], cfg: Dict[str, Any]) -> str:
+    """Resolve the passphrase for push/pull, honouring legacy plaintext configs with a warning."""
+    stored = cfg.get("passphrase")
+    if stored and not supplied:
+        _warn_stored_passphrase()
+        return stored
+    return resolve_passphrase(supplied=supplied)
+
+
+def sync_push(server_url: Optional[str] = None, passphrase: Optional[str] = None) -> Dict[str, Any]:
     cfg = load_sync_config()
     if not cfg:
         raise ValueError("Sync not initialized. Run `monte-carlo-ledger sync init` first.")
 
+    passphrase = _passphrase_for_operation(passphrase, cfg)
     salt = base64.b64decode(cfg["salt_b64"])
-    auth_token, enc_key = derive_keys(cfg["passphrase"], salt)
+    auth_token, enc_key = derive_keys(passphrase, salt)
 
     snapshot = export_ledger_snapshot()
     ct_b64, nonce_b64 = encrypt_payload(snapshot, enc_key)
@@ -269,13 +330,14 @@ def sync_push(server_url: Optional[str] = None) -> Dict[str, Any]:
     return res
 
 
-def sync_pull(server_url: Optional[str] = None) -> Dict[str, Any]:
+def sync_pull(server_url: Optional[str] = None, passphrase: Optional[str] = None) -> Dict[str, Any]:
     cfg = load_sync_config()
     if not cfg:
         raise ValueError("Sync not initialized. Run `monte-carlo-ledger sync init` first.")
 
+    passphrase = _passphrase_for_operation(passphrase, cfg)
     salt = base64.b64decode(cfg["salt_b64"])
-    auth_token, enc_key = derive_keys(cfg["passphrase"], salt)
+    auth_token, enc_key = derive_keys(passphrase, salt)
 
     url_base = (server_url or cfg.get("server_url", DEFAULT_SERVER_URL)).rstrip("/")
     url = f"{url_base}/api/vault/{cfg['vault_id']}"
@@ -300,3 +362,20 @@ def sync_pull(server_url: Optional[str] = None) -> Dict[str, Any]:
         "balance_cents": snapshot.get("current_balance_cents"),
         "transactions_count": len(snapshot.get("transactions", [])),
     }
+
+
+def sync_lock() -> Dict[str, Any]:
+    """Remove any plaintext passphrase from the local sync config.
+
+    Legacy configs stored the passphrase on disk; this removes it without touching the
+    server-side vault (the passphrase itself remains the user's encryption key). Push/pull
+    will prompt or read MC_LEDGER_SYNC_PASSPHRASE afterwards.
+    """
+    cfg = load_sync_config()
+    if not cfg:
+        raise ValueError("Sync not initialized. Run `monte-carlo-ledger sync init` first.")
+    had_passphrase = "passphrase" in cfg
+    if had_passphrase:
+        del cfg["passphrase"]
+        save_sync_config(cfg)
+    return {"locked": True, "removed_stored_passphrase": had_passphrase, "vault_id": cfg.get("vault_id")}

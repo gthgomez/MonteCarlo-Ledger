@@ -37,10 +37,44 @@ app.add_middleware(
         "https://montecarlo-ledger.vercel.app",
         "https://montecarlo-ledger-jonathan-gomez-aguilars-projects.vercel.app",
     ],
-    allow_credentials=True,
+    # The API is unauthenticated; it never needs or uses credentials.
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+_LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost", "testclient"}
+
+
+class LoopbackOnlyMiddleware:
+    """Runtime guard for the unauthenticated local API.
+
+    The intended deployment binds uvicorn to 127.0.0.1 (see README); this middleware is the
+    in-app backstop that refuses requests from any non-loopback client so an accidental
+    0.0.0.0 bind or port forward cannot silently expose unauthenticated financial data.
+    "testclient" is the Starlette TestClient peer name and exists for the test suite only.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") in ("http", "websocket"):
+            client = scope.get("client") or (None, None)
+            host = client[0] if client else None
+            if host not in _LOOPBACK_HOSTS:
+                from fastapi.responses import JSONResponse
+
+                response = JSONResponse(
+                    {"detail": "MonteCarlo-Ledger local API is loopback-only (127.0.0.1)."},
+                    status_code=403,
+                )
+                await response(scope, receive, send)
+                return
+        await self.app(scope, receive, send)
+
+
+app.add_middleware(LoopbackOnlyMiddleware)
 
 
 def _require_sync() -> None:

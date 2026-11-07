@@ -123,14 +123,22 @@ A zero-knowledge, end-to-end encrypted web companion is deployed at:
 The web app runs Contract 2.0 TypeScript simulations client-side with zero data egress. You can synchronize your local CLI ledger with the edge vault (backed by Turso libSQL):
 
 ```bash
-# 1. Initialize a private vault (derives local PBKDF2 keys, never sent to server)
-python -m monte_carlo_ledger sync init <vault_id> <passphrase>
+# 1. Initialize a private vault (derives local PBKDF2 keys, never sent to server).
+#    The passphrase is never a command-line argument (that would leak it into shell
+#    history) and is never stored on disk: use MC_LEDGER_SYNC_PASSPHRASE or the
+#    hidden prompt.
+export MC_LEDGER_SYNC_PASSPHRASE   # optional; otherwise you'll be prompted (hidden)
+python -m monte_carlo_ledger sync init <vault_id>
 
 # 2. Push encrypted ledger snapshot to the cloud vault
 python -m monte_carlo_ledger sync push
 
 # 3. Pull and decrypt vault state on another machine
 python -m monte_carlo_ledger sync pull
+
+# Legacy configs that stored a plaintext passphrase still work with a warning;
+# remove the credential from disk with:
+python -m monte_carlo_ledger sync lock
 ```
 
 ### Example Endpoint
