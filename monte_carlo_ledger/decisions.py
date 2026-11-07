@@ -529,28 +529,23 @@ def financial_snapshot() -> Dict[str, Any]:
     Read-only. Exposes no transaction details — only balances, counts and the
     newest ledger date so a caller can judge freshness.
     """
-    from . import db_manager
-
-    is_sync, ledger_balance, stored_balance = db_manager.validate_balance_consistency()
-    # Bounded aggregate: counts and freshness come from SQL, never from materializing the
-    # ledger. A large history must not make this operation load every transaction.
-    stats = db_manager.get_ledger_stats()
-    with db_manager.get_db_connection() as conn:
-        row = conn.execute("SELECT value FROM settings WHERE key = 'bank_balance_cents'").fetchone()
-    bank_balance = int(row["value"]) if row and row["value"] is not None else None
+    meta = db_manager.read_ledger_metadata()
+    ledger_balance = meta["ledger_balance_cents"]
+    stored_balance = meta["stored_balance_cents"]
+    bank_balance = meta["bank_balance_cents"]
     return {
         "ledger_balance_cents": ledger_balance,
         "stored_balance_cents": stored_balance,
         "cached_balance_cents": stored_balance,
         "bank_balance_cents": bank_balance,
         "reconciled_with_bank": bool(bank_balance is not None and bank_balance == ledger_balance),
-        "balance_consistent": bool(is_sync),
+        "balance_consistent": bool(ledger_balance == stored_balance),
         "counts": {
-            "transactions": stats["transaction_count"],
-            "income_sources": stats["income_source_count"],
-            "payments": stats["payment_count"],
+            "transactions": meta["counts"]["transaction_count"],
+            "income_sources": meta["counts"]["income_source_count"],
+            "payments": meta["counts"]["payment_count"],
         },
-        "newest_transaction_date": stats["newest_date"],
+        "newest_transaction_date": meta["counts"]["newest_date"],
         # A future adapter must present this basis, not just the numbers.
         "data_source": "local sqlite ledger (monte_carlo_ledger/db_manager)",
         "source": "local sqlite ledger",
