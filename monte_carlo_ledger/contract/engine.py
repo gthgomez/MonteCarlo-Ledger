@@ -13,12 +13,21 @@ from datetime import date, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 from .debt import amortize, validate_liabilities
-from .money import ContractError, checked_add, round_half_away, scale_cents_by_percent
+from .money import (
+    MAX_MONEY_CENTS,
+    ContractError,
+    checked_add,
+    checked_sub,
+    require_cents,
+    round_half_away,
+    scale_cents_by_percent,
+)
 from .prng import SplitMix64
 
 CONTRACT_VERSION = "2.0"
 SUPPORTED_CONTRACT_VERSIONS = ("1.0", "1.1", "1.2", "2.0")
 _MAX_OCCURRENCES = 100_000
+_MAX_SIMULATION_RUNS = 100_000
 _MONTH_STEPS = {"monthly": 1, "bimonthly": 2, "quarterly": 3, "semiannually": 6, "annually": 12}
 _FREQUENCIES = {
     "weekly", "biweekly", "semimonthly", "monthly", "bimonthly",
@@ -56,10 +65,8 @@ def _last_day(year: int, month: int) -> int:
 
 
 def _validate_event(ev: Dict[str, Any]) -> None:
-    amount = ev.get("amount_cents")
+    amount = require_cents(ev.get("amount_cents"), "event.amount_cents")
     etype = ev.get("type")
-    if not isinstance(amount, int) or isinstance(amount, bool):
-        raise ContractError("INVALID_AMOUNT", repr(amount))
     if etype == "income" and amount <= 0:
         raise ContractError("INVALID_AMOUNT", f"income {amount}")
     if etype == "expense" and amount >= 0:
@@ -72,9 +79,7 @@ def _validate_event(ev: Dict[str, Any]) -> None:
 
 def _validate_recurrence(rec: Dict[str, Any]) -> None:
     rtype = rec.get("type")
-    amount = rec.get("amount_cents")
-    if not isinstance(amount, int) or isinstance(amount, bool):
-        raise ContractError("INVALID_AMOUNT", repr(amount))
+    amount = require_cents(rec.get("amount_cents"), "recurrence.amount_cents")
     if rtype == "income" and amount <= 0:
         raise ContractError("INVALID_AMOUNT", f"income {amount}")
     if rtype == "expense" and amount >= 0:
@@ -83,6 +88,14 @@ def _validate_recurrence(rec: Dict[str, Any]) -> None:
         raise ContractError("INVALID_EVENT_TYPE", repr(rtype))
     if rec.get("frequency") not in _FREQUENCIES:
         raise ContractError("INVALID_FREQUENCY", repr(rec.get("frequency")))
+    if "expected_amount_cents" in rec:
+        expected = require_cents(
+            rec.get("expected_amount_cents"), "recurrence.expected_amount_cents"
+        )
+        if rtype == "income" and expected <= 0:
+            raise ContractError("INVALID_AMOUNT", f"expected income {expected}")
+        if rtype == "expense" and expected >= 0:
+            raise ContractError("INVALID_AMOUNT", f"expected expense {expected}")
 
 
 def _contract_version(scenario: Dict[str, Any]) -> str:
@@ -254,7 +267,7 @@ def event_rows(scenario: Dict[str, Any]) -> List[Dict[str, Any]]:
     A display adapter over ``ordered_events`` + ``checked_add``; it introduces no
     new financial rule, so every row is consistent with the canonical forecast.
     """
-    balance = int(scenario["starting_balance_cents"])
+    balance = require_cents(scenario.get("starting_balance_cents"), "starting_balance_cents")
     rows: List[Dict[str, Any]] = []
     for ev in ordered_events(scenario):
         balance = checked_add(balance, ev["amount"])
@@ -323,13 +336,42 @@ def _category_ranges(raw: Any) -> Dict[str, Tuple[int, int]]:
 
 
 def _params(simulation: Dict[str, Any]) -> Dict[str, Any]:
+    allowed = set(SIMULATION_DEFAULTS) | {"expense_category_variation"}
+    unknown = set(simulation) - allowed
+    if unknown:
+        raise ContractError("SCHEMA_INVALID", f"unsupported simulation fields: {sorted(unknown)}")
     params: Dict[str, Any] = dict(SIMULATION_DEFAULTS)
     for key, value in simulation.items():
         params[key] = value
-    if not isinstance(params["runs"], int) or params["runs"] < 1:
-        raise ContractError("INVALID_RUNS", repr(params["runs"]))
-    if params["surprise_check_interval_days"] < 1:
-        raise ContractError("INVALID_HORIZON", "check interval")
+
+    def sim_int(key: str, code: str, minimum: int, maximum: int) -> int:
+        value = params[key]
+        if not isinstance(value, int) or isinstance(value, bool):
+            raise ContractError(code, f"{key} must be an integer, got {value!r}")
+        if value < minimum or value > maximum:
+            raise ContractError(
+                code, f"{key} must be in [{minimum}, {maximum}], got {value}"
+            )
+        return value
+
+    sim_int("runs", "INVALID_RUNS", 1, _MAX_SIMULATION_RUNS)
+    sim_int("seed", "INVALID_SEED", 0, (1 << 64) - 1)
+    for low, high in (
+        ("income_variation_min", "income_variation_max"),
+        ("expense_variation_min", "expense_variation_max"),
+        ("surprise_amount_min", "surprise_amount_max"),
+    ):
+        lo = sim_int(low, "INVALID_AMOUNT", -MAX_MONEY_CENTS, MAX_MONEY_CENTS)
+        hi = sim_int(high, "INVALID_AMOUNT", -MAX_MONEY_CENTS, MAX_MONEY_CENTS)
+        if lo > hi:
+            raise ContractError("INVALID_AMOUNT", f"{low} {lo} exceeds {high} {hi}")
+    sim_int("surprise_probability_ppm", "INVALID_AMOUNT", 0, 1_000_000)
+    sim_int("surprise_check_interval_days", "INVALID_HORIZON", 1, 100_000)
+    num = sim_int("quantile_num", "INVALID_QUANTILE", 1, 1_000_000)
+    den = sim_int("quantile_den", "INVALID_QUANTILE", 1, 1_000_000)
+    if num > den:
+        raise ContractError("INVALID_QUANTILE", f"quantile_num {num} exceeds quantile_den {den}")
+    sim_int("reserve_cents", "INVALID_AMOUNT", 0, MAX_MONEY_CENTS)
     params["expense_category_variation"] = _category_ranges(params.get("expense_category_variation"))
     return params
 
@@ -382,7 +424,11 @@ def run_scenario(scenario: Dict[str, Any]) -> Dict[str, Any]:
         # (see contracts/timeline.md, "Result contract version").
         "contract_version": scenario.get("contract_version", CONTRACT_VERSION),
         "scenario_id": scenario.get("scenario_id", ""),
-        "forecast": forecast(int(scenario["starting_balance_cents"]), as_of, base),
+        "forecast": forecast(
+            require_cents(scenario.get("starting_balance_cents"), "starting_balance_cents"),
+            as_of,
+            base,
+        ),
     }
     # Contract 2.0: the deterministic debt block is present iff the scenario declares
     # `liabilities` (an empty array yields a zeroed block). It is independent of forecast,
@@ -399,7 +445,7 @@ def run_scenario(scenario: Dict[str, Any]) -> Dict[str, Any]:
     if simulation is None:
         return result
 
-    start = int(scenario["starting_balance_cents"])
+    start = require_cents(scenario.get("starting_balance_cents"), "starting_balance_cents")
     p = _params(simulation)
     rng = SplitMix64(p["seed"])
     endings: List[int] = []
@@ -426,7 +472,9 @@ def run_scenario(scenario: Dict[str, Any]) -> Dict[str, Any]:
         "ending_balance_p50_cents": pct(endings, 1, 2),
         "ending_balance_p90_cents": pct(endings, 9, 10),
         "projected_low_point_cents": result["forecast"]["minimum_balance_cents"],
-        "safe_to_spend_cents": pct(minimums, p["quantile_num"], p["quantile_den"]) - p["reserve_cents"],
+        "safe_to_spend_cents": checked_sub(
+            pct(minimums, p["quantile_num"], p["quantile_den"]), p["reserve_cents"]
+        ),
     }
     return result
 

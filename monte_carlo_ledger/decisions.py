@@ -259,13 +259,22 @@ def risk(
 
 
 def _shift_first_income(scenario: Dict[str, Any], days: int) -> None:
-    incomes = sorted(
-        (e for e in scenario["events"] if e["type"] == "income"),
-        key=lambda e: e["date"],
-    )
-    if not incomes:
-        return
-    target = incomes[0]
+    """Delay the earliest scheduled paycheck; ties keep scenario order.
+
+    Insertion order is not chronological, so picking the first income event by
+    index could delay a later paycheck. Raises NO_INCOME when nothing is modeled.
+    """
+    indexed = [
+        (index, event)
+        for index, event in enumerate(scenario["events"])
+        if event["type"] == "income"
+    ]
+    if not indexed:
+        raise ContractError(
+            "NO_INCOME",
+            "no in-window income is modeled, so a paycheck delay is meaningless",
+        )
+    _, target = min(indexed, key=lambda pair: (pair[1]["date"], pair[0]))
     target["date"] = (date.fromisoformat(target["date"]) + timedelta(days=days)).isoformat()
 
 
@@ -287,6 +296,17 @@ def simulate_purchase(
     _require_date(purchase_date, "purchase_date")
     _require_date(as_of, "as_of")
     _require_horizon(horizon_days)
+    start = date.fromisoformat(as_of)
+    window_end = start + timedelta(days=horizon_days)
+    purchase_day = date.fromisoformat(purchase_date)
+    if purchase_day < start or purchase_day >= window_end:
+        # The expander would silently drop an out-of-window event, returning an
+        # unchanged baseline as a "successful" purchase comparison.
+        raise ContractError(
+            "EVENT_OUT_OF_HORIZON",
+            f"purchase_date {purchase_date} is outside "
+            f"[{as_of}, {(window_end).isoformat()})",
+        )
     overrides = dict(sim or {})
     overrides.setdefault("expense_variation_min", 0)
     overrides.setdefault("expense_variation_max", 0)
@@ -338,8 +358,11 @@ def simulate_paycheck_delay(
     """Compare baseline vs the next in-window paycheck arriving ``delay_days`` late."""
     _require_date(as_of, "as_of")
     _require_horizon(horizon_days)
-    if not isinstance(delay_days, int) or isinstance(delay_days, bool) or delay_days < 0:
-        raise ContractError("INVALID_HORIZON", f"delay_days must be a non-negative integer, got {delay_days!r}")
+    if not isinstance(delay_days, int) or isinstance(delay_days, bool) or delay_days <= 0:
+        raise ContractError(
+            "INVALID_HORIZON",
+            f"delay_days must be a positive integer, got {delay_days!r}",
+        )
     params = _sim(sim)
     view = _view_for(as_of, horizon_days)
     baseline = run_scenario(_build(as_of, horizon_days, dict(params), ledger=view))
@@ -581,6 +604,21 @@ def compare_debt_strategies(
     # change the caller's meaning and could understate the payoff cost.
     _require_non_negative_int(extra_monthly_payment_cents, "extra_monthly_payment_cents")
     view = _view_for(as_of, DEFAULT_HORIZON_DAYS)
+    model_warnings = []
+    for liability in liabilities:
+        if (
+            isinstance(liability, dict)
+            and liability.get("kind", "installment") == "revolving"
+            and liability.get("balance_cents", 0) > 0
+            and liability.get("min_payment_percent_bps", 0) <= 0
+            and liability.get("min_payment_floor_cents", 0) <= 0
+        ):
+            model_warnings.append(
+                f"Revolving liability {liability.get('id')!r} declares no minimum "
+                "percent or floor. Contract 2.0 models its minimum payment as zero, "
+                "so the balance never amortizes; set min_payment_percent_bps or "
+                "min_payment_floor_cents for a meaningful payoff plan."
+            )
     results: Dict[str, Any] = {}
     for strategy in ("snowball", "avalanche"):
         scenario = _build(as_of, DEFAULT_HORIZON_DAYS, ledger=view)
@@ -592,6 +630,7 @@ def compare_debt_strategies(
         {
             "as_of": as_of,
             "strategies": results,
+            "model_warnings": model_warnings,
             # Honest interplay note: amortization and cash flow are separate models.
             "cash_flow_note": (
                 "Deterministic payoff schedules only; these payments are not included in the "
@@ -741,7 +780,7 @@ def engine_capabilities() -> Dict[str, Any]:
                 "SCHEMA_INVALID", "VALIDATION_UNAVAILABLE", "INTERNAL_ERROR",
                 "MONEY_OVERFLOW", "INVALID_DATE", "INVALID_AMOUNT", "INVALID_HORIZON",
                 "INVALID_EVENT_TYPE", "INVALID_FREQUENCY", "INVALID_RUNS", "MISSING_AS_OF",
-                "INVALID_SEED", "INVALID_QUANTILE", "EVENT_OUT_OF_HORIZON",
+                "INVALID_SEED", "INVALID_QUANTILE", "EVENT_OUT_OF_HORIZON", "NO_INCOME",
             ],
         },
         "writes": {"allowed": False},

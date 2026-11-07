@@ -63,3 +63,28 @@ export function checkedAdd(a: bigint, b: bigint): bigint {
   }
   return r;
 }
+
+export function checkedSub(a: bigint, b: bigint): bigint {
+  const r = a - b;
+  if (r > MAX_MONEY_CENTS || r < MIN_MONEY_CENTS) {
+    throw new ContractError("MONEY_OVERFLOW", `${a} - ${b}`);
+  }
+  return r;
+}
+
+/**
+ * Return `value` only when it is an exact, safe integer number of cents.
+ *
+ * Booleans, floats, numeric strings, null and other types are rejected. JavaScript
+ * cannot represent every signed-64-bit integer exactly, so a value outside the safe
+ * integer range fails closed instead of being silently rounded.
+ */
+export function requireCents(value: any, field: string): number {
+  if (typeof value !== "number" || !Number.isInteger(value)) {
+    throw new ContractError("INVALID_AMOUNT", `${field} must be an integer number of cents, got ${String(value)}`);
+  }
+  if (!Number.isSafeInteger(value)) {
+    throw new ContractError("MONEY_OVERFLOW", `${field} ${value} exceeds the exact JavaScript range`);
+  }
+  return value;
+}

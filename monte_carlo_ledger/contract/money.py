@@ -26,11 +26,18 @@ def round_half_away(n: int, d: int) -> int:
 
 def scale_cents_by_percent(amount_cents: int, percent: int) -> int:
     """Scale an amount by a signed percent variation: (100 + percent)% of the amount."""
-    return round_half_away(amount_cents * (100 + percent), 100)
+    return _checked_round(amount_cents * (100 + percent), 100)
 
 
 def scale_cents_by_basis_points(amount_cents: int, bps: int) -> int:
-    return round_half_away(amount_cents * bps, 10000)
+    return _checked_round(amount_cents * bps, 10000)
+
+
+def _checked_round(numerator: int, denominator: int) -> int:
+    result = round_half_away(numerator, denominator)
+    if result > MAX_MONEY_CENTS or result < MIN_MONEY_CENTS:
+        raise ContractError("MONEY_OVERFLOW", f"scaled money {result}")
+    return result
 
 
 def checked_add(a: int, b: int) -> int:
@@ -38,3 +45,36 @@ def checked_add(a: int, b: int) -> int:
     if r > MAX_MONEY_CENTS or r < MIN_MONEY_CENTS:
         raise ContractError("MONEY_OVERFLOW", f"{a} + {b}")
     return r
+
+
+def checked_sub(a: int, b: int) -> int:
+    """Subtract with the same signed-64-bit overflow policy as ``checked_add``."""
+    r = a - b
+    if r > MAX_MONEY_CENTS or r < MIN_MONEY_CENTS:
+        raise ContractError("MONEY_OVERFLOW", f"{a} - {b}")
+    return r
+
+
+def require_cents(
+    value: object,
+    field: str,
+    *,
+    minimum: int = MIN_MONEY_CENTS,
+    maximum: int = MAX_MONEY_CENTS,
+) -> int:
+    """Return ``value`` only when it is an exact in-range integer number of cents.
+
+    Booleans, floats (including integral floats), numeric strings, null and any
+    other type are rejected. No implicit truncation, rounding or saturation.
+    """
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise ContractError(
+            "INVALID_AMOUNT",
+            f"{field} must be an integer number of cents, got {value!r}",
+        )
+    if value < minimum or value > maximum:
+        raise ContractError(
+            "MONEY_OVERFLOW",
+            f"{field} {value} is outside [{minimum}, {maximum}]",
+        )
+    return value

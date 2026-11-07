@@ -3,7 +3,7 @@
  * Pure and clock-free. Integer cents and roundHalfAway only.
  */
 
-import { ContractError, MAX_MONEY_CENTS, roundHalfAway } from "./money";
+import { checkedAdd, ContractError, MAX_MONEY_CENTS, roundHalfAway, toSafeNumber } from "./money";
 
 export const STRATEGIES = ["snowball", "avalanche"] as const;
 export type DebtStrategy = (typeof STRATEGIES)[number];
@@ -80,6 +80,12 @@ export function validateLiabilities(liabilities: any): void {
         }
       }
     }
+    if ("due_day_of_month" in liability) {
+      const dueDay = liability.due_day_of_month;
+      if (typeof dueDay !== "number" || !Number.isInteger(dueDay) || dueDay < 1 || dueDay > 31) {
+        throw new ContractError("SCHEMA_INVALID", `liability '${lid}' due_day_of_month must be an integer 1..31`);
+      }
+    }
   }
 }
 
@@ -124,6 +130,14 @@ export function amortize(
   const schedule: any[] = [];
   let overflowed = false;
 
+  if (
+    typeof extraMonthlyPaymentCents !== "number" ||
+    !Number.isInteger(extraMonthlyPaymentCents) ||
+    !Number.isSafeInteger(extraMonthlyPaymentCents) ||
+    extraMonthlyPaymentCents < 0
+  ) {
+    throw new ContractError("INVALID_AMOUNT", "extra_monthly_payment_cents must be a non-negative integer");
+  }
   const extraPoolBig = BigInt(extraMonthlyPaymentCents);
 
   while (months < MAX_MONTHS && Object.values(balances).some((b) => b > 0n) && !overflowed) {
@@ -160,20 +174,20 @@ export function amortize(
       }
       const starting = balances[lid];
       balances[lid] += interest;
-      totalInterest += interest;
+      totalInterest = checkedAdd(totalInterest, interest);
       const payment = minimumPayment(liability, balances[lid]);
       balances[lid] -= payment;
-      totalPaid += payment;
+      totalPaid = checkedAdd(totalPaid, payment);
 
       const row = {
         month: months,
         date: monthDate,
         liability_id: lid,
-        starting_balance_cents: Number(starting),
-        payment_cents: Number(payment),
-        interest_cents: Number(interest),
-        principal_cents: Number(payment - interest),
-        ending_balance_cents: Number(balances[lid]),
+        starting_balance_cents: toSafeNumber(starting),
+        payment_cents: toSafeNumber(payment),
+        interest_cents: toSafeNumber(interest),
+        principal_cents: toSafeNumber(payment - interest),
+        ending_balance_cents: toSafeNumber(balances[lid]),
       };
       schedule.push(row);
       monthRows[lid] = row;
@@ -187,11 +201,11 @@ export function amortize(
         const extra = extraPool < balances[lid] ? extraPool : balances[lid];
         balances[lid] -= extra;
         extraPool -= extra;
-        totalPaid += extra;
+        totalPaid = checkedAdd(totalPaid, extra);
         const row = monthRows[lid];
-        row.payment_cents += Number(extra);
-        row.principal_cents += Number(extra);
-        row.ending_balance_cents = Number(balances[lid]);
+        row.payment_cents = toSafeNumber(BigInt(row.payment_cents) + extra);
+        row.principal_cents = toSafeNumber(BigInt(row.principal_cents) + extra);
+        row.ending_balance_cents = toSafeNumber(balances[lid]);
       }
     }
   }
@@ -202,8 +216,8 @@ export function amortize(
     extra_monthly_payment_cents: extraMonthlyPaymentCents,
     months_to_payoff: months,
     payoff_date: addMonths(asOf, months),
-    total_interest_cents: Number(totalInterest),
-    total_paid_cents: Number(totalPaid),
+    total_interest_cents: toSafeNumber(totalInterest),
+    total_paid_cents: toSafeNumber(totalPaid),
     did_not_converge: didNotConverge,
     schedule,
   };

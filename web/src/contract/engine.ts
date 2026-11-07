@@ -6,7 +6,9 @@
 import { amortize, validateLiabilities } from "./debt";
 import {
   checkedAdd,
+  checkedSub,
   ContractError,
+  requireCents,
   roundHalfAway,
   scaleCentsByPercent,
   toSafeNumber,
@@ -16,6 +18,7 @@ import { SplitMix64 } from "./prng";
 export const CONTRACT_VERSION = "2.0";
 export const SUPPORTED_CONTRACT_VERSIONS = ["1.0", "1.1", "1.2", "2.0"] as const;
 const MAX_OCCURRENCES = 100000;
+const MAX_SIMULATION_RUNS = 100000;
 const MONTH_STEPS: Record<string, number> = {
   monthly: 1,
   bimonthly: 2,
@@ -83,11 +86,8 @@ function lastDayOfMonth(year: number, month1Indexed: number): number {
 }
 
 function validateEvent(ev: any): void {
-  const amount = ev.amount_cents;
+  const amount = requireCents(ev.amount_cents, "event.amount_cents");
   const etype = ev.type;
-  if (typeof amount !== "number" || !Number.isInteger(amount)) {
-    throw new ContractError("INVALID_AMOUNT", String(amount));
-  }
   if (etype === "income" && amount <= 0) {
     throw new ContractError("INVALID_AMOUNT", `income ${amount}`);
   }
@@ -104,10 +104,7 @@ function validateEvent(ev: any): void {
 
 function validateRecurrence(rec: any): void {
   const rtype = rec.type;
-  const amount = rec.amount_cents;
-  if (typeof amount !== "number" || !Number.isInteger(amount)) {
-    throw new ContractError("INVALID_AMOUNT", String(amount));
-  }
+  const amount = requireCents(rec.amount_cents, "recurrence.amount_cents");
   if (rtype === "income" && amount <= 0) {
     throw new ContractError("INVALID_AMOUNT", `income ${amount}`);
   }
@@ -119,6 +116,15 @@ function validateRecurrence(rec: any): void {
   }
   if (!FREQUENCIES.has(rec.frequency)) {
     throw new ContractError("INVALID_FREQUENCY", String(rec.frequency));
+  }
+  if ("expected_amount_cents" in rec) {
+    const expected = requireCents(rec.expected_amount_cents, "recurrence.expected_amount_cents");
+    if (rtype === "income" && expected <= 0) {
+      throw new ContractError("INVALID_AMOUNT", `expected income ${expected}`);
+    }
+    if (rtype === "expense" && expected >= 0) {
+      throw new ContractError("INVALID_AMOUNT", `expected expense ${expected}`);
+    }
   }
 }
 
@@ -356,7 +362,7 @@ export interface TimelineRow {
 export function timelineRows(scenario: any): TimelineRow[] {
   const { events } = expand(scenario);
   const ordered = sortEvents(events);
-  let balance = BigInt(scenario.starting_balance_cents);
+  let balance = BigInt(requireCents(scenario.starting_balance_cents, "starting_balance_cents"));
   const rows: TimelineRow[] = [];
   for (const ev of ordered) {
     balance = checkedAdd(balance, ev.amount);
@@ -470,10 +476,45 @@ function simulateOnce(
   return forecast(start, asOf, sortEvents(scenario));
 }
 
+function simInt(p: any, key: string, code: string, min: number, max: number): number {
+  const value = p[key];
+  if (typeof value !== "number" || !Number.isInteger(value) || !Number.isSafeInteger(value)) {
+    throw new ContractError(code, `${key} must be an integer, got ${String(value)}`);
+  }
+  if (value < min || value > max) {
+    throw new ContractError(code, `${key} must be in [${min}, ${max}], got ${value}`);
+  }
+  return value;
+}
+
+function validateSimulationParams(p: any): void {
+  simInt(p, "runs", "INVALID_RUNS", 1, MAX_SIMULATION_RUNS);
+  simInt(p, "seed", "INVALID_SEED", 0, Number.MAX_SAFE_INTEGER);
+  for (const [low, high] of [
+    ["income_variation_min", "income_variation_max"],
+    ["expense_variation_min", "expense_variation_max"],
+    ["surprise_amount_min", "surprise_amount_max"],
+  ]) {
+    const lo = simInt(p, low, "INVALID_AMOUNT", -Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER);
+    const hi = simInt(p, high, "INVALID_AMOUNT", -Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER);
+    if (lo > hi) {
+      throw new ContractError("INVALID_AMOUNT", `${low} ${lo} exceeds ${high} ${hi}`);
+    }
+  }
+  simInt(p, "surprise_probability_ppm", "INVALID_AMOUNT", 0, 1000000);
+  simInt(p, "surprise_check_interval_days", "INVALID_HORIZON", 1, 100000);
+  const num = simInt(p, "quantile_num", "INVALID_QUANTILE", 1, 1000000);
+  const den = simInt(p, "quantile_den", "INVALID_QUANTILE", 1, 1000000);
+  if (num > den) {
+    throw new ContractError("INVALID_QUANTILE", `quantile_num ${num} exceeds quantile_den ${den}`);
+  }
+  simInt(p, "reserve_cents", "INVALID_AMOUNT", 0, Number.MAX_SAFE_INTEGER);
+}
+
 export function runScenario(scenario: any): any {
   const { events, asOf, horizon, windowEnd } = expand(scenario);
   const base = sortEvents(events);
-  const start = BigInt(scenario.starting_balance_cents);
+  const start = BigInt(requireCents(scenario.starting_balance_cents, "starting_balance_cents"));
 
   const result: any = {
     contract_version: "contract_version" in scenario ? scenario.contract_version : CONTRACT_VERSION,
@@ -497,12 +538,13 @@ export function runScenario(scenario: any): any {
   }
 
   const p: any = { ...SIMULATION_DEFAULTS, ...simConfig };
-  if (typeof p.runs !== "number" || p.runs < 1) {
-    throw new ContractError("INVALID_RUNS", String(p.runs));
+  const unknown = Object.keys(simConfig).filter(
+    (key) => !(key in SIMULATION_DEFAULTS) && key !== "expense_category_variation"
+  );
+  if (unknown.length > 0) {
+    throw new ContractError("SCHEMA_INVALID", `unsupported simulation fields: ${unknown.join(", ")}`);
   }
-  if (p.surprise_check_interval_days < 1) {
-    throw new ContractError("INVALID_HORIZON", "check interval");
-  }
+  validateSimulationParams(p);
   p.expense_category_variation = parseCategoryRanges(p.expense_category_variation);
 
   const rng = new SplitMix64(p.seed);
@@ -536,7 +578,7 @@ export function runScenario(scenario: any): any {
     ending_balance_p90_cents: safePct(endings, 9, 10),
     projected_low_point_cents: result.forecast.minimum_balance_cents,
     safe_to_spend_cents: toSafeNumber(
-      BigInt(pct(minimums, p.quantile_num, p.quantile_den) - p.reserve_cents)
+      checkedSub(BigInt(pct(minimums, p.quantile_num, p.quantile_den)), BigInt(p.reserve_cents))
     ),
   };
 
