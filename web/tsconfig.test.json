@@ -19,7 +19,10 @@
     "src/lib/scenario-builder.ts",
     "src/lib/types.ts",
     "src/lib/validate.ts",
-    "src/lib/turso.ts"
+    "src/lib/turso.ts",
+    "src/lib/crypto.ts",
+    "src/lib/sync-state.ts",
+    "src/lib/vault-client.ts"
   ],
   "exclude": [
     "node_modules",
