@@ -12,6 +12,11 @@ import { buildScenarioFromLedger } from "@/lib/scenario-builder";
 import { runScenario, timelineRows } from "@/contract/engine";
 import { parseLedgerState } from "@/lib/validate";
 import { ContractError } from "@/contract/money";
+import {
+  PersistenceResult,
+  VAULT_ID_STORAGE_KEY,
+  commitSynchronizedState,
+} from "@/lib/sync-state";
 
 const STORAGE_KEY = "montecarlo_ledger_state_v2";
 
@@ -74,7 +79,7 @@ export default function Home() {
         // First run: an explicit, clearly-labelled demonstration ledger.
         setUsingDemo(true);
       }
-      const savedVault = localStorage.getItem("montecarlo_vault_id");
+      const savedVault = localStorage.getItem(VAULT_ID_STORAGE_KEY);
       if (savedVault) {
         setCurrentVaultId(savedVault);
       }
@@ -100,19 +105,53 @@ export default function Home() {
     }
   };
 
-  const handleApplyState = (nextState: LedgerState, vaultId?: string) => {
+  /**
+   * Replace the ledger only after the durable write succeeds. A pull/import may not
+   * report success when the browser rejected persistence: the data would vanish on
+   * refresh. Synchronization ancestry is committed only alongside a durable state.
+   */
+  const handleApplyState = (
+    nextState: LedgerState,
+    vaultId?: string,
+    syncRevision?: number
+  ): PersistenceResult => {
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(nextState));
+    } catch (err: any) {
+      const message = `Could not save the imported ledger to local storage (${
+        err?.message ?? "quota or browser restriction"
+      }). The current ledger is unchanged.`;
+      setStorageError(message);
+      return { ok: false, error: message };
+    }
+
+    if (vaultId) {
+      try {
+        localStorage.setItem(VAULT_ID_STORAGE_KEY, vaultId);
+      } catch (err: any) {
+        const message = `The ledger was saved, but the vault id could not be persisted (${
+          err?.message ?? "storage error"
+        }). Pull again before pushing.`;
+        setStorageError(message);
+        return { ok: false, error: message };
+      }
+      if (syncRevision !== undefined) {
+        const persisted = commitSynchronizedState(vaultId, syncRevision, nextState);
+        if (!persisted) {
+          const message =
+            "The ledger was saved, but synchronization ancestry could not be stored. " +
+            "Pull again before pushing so a stale overwrite stays impossible.";
+          setStorageError(message);
+          return { ok: false, error: message };
+        }
+      }
+    }
+
     setState(nextState);
     setUsingDemo(false);
     setStorageError(null);
-    if (vaultId) {
-      setCurrentVaultId(vaultId);
-      try {
-        localStorage.setItem("montecarlo_vault_id", vaultId);
-      } catch {}
-    }
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(nextState));
-    } catch {}
+    if (vaultId) setCurrentVaultId(vaultId);
+    return { ok: true };
   };
 
   const handleResetDemo = () => {

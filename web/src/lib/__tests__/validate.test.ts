@@ -107,6 +107,110 @@ test("rejects impossible calendar dates", () => {
   assert.equal(result.ok, false);
 });
 
+test("rejects a snapshot with a missing required collection", () => {
+  for (const key of ["incomes", "payments", "transactions", "bill_occurrences", "liabilities"]) {
+    const snapshot = base();
+    delete (snapshot as Record<string, unknown>)[key];
+    const result = parseLedgerState(snapshot);
+    assert.equal(result.ok, false, `missing ${key} must be rejected`);
+    if (!result.ok) assert.match(result.error, new RegExp(key));
+  }
+});
+
+test("rejects a missing balance instead of treating it as zero", () => {
+  const snapshot = base();
+  delete (snapshot as Record<string, unknown>).current_balance_cents;
+  const result = parseLedgerState(snapshot);
+  assert.equal(result.ok, false);
+});
+
+test("rejects null or wrongly-typed collections", () => {
+  const nulled = parseLedgerState(base({ transactions: null }));
+  assert.equal(nulled.ok, false);
+  const wrongType = parseLedgerState(base({ payments: { not: "an array" } }));
+  assert.equal(wrongType.ok, false);
+});
+
+test("rejects unknown top-level financial records instead of discarding them", () => {
+  const result = parseLedgerState(base({ debt_accounts: [{ id: "x", balance_cents: 100 }] }));
+  assert.equal(result.ok, false);
+  if (!result.ok) assert.match(result.error, /unsupported fields/);
+});
+
+test("rejects unknown debt-related fields inside a row", () => {
+  const result = parseLedgerState(
+    base({
+      liabilities: [
+        {
+          id: "l1",
+          name: "Card",
+          balance_cents: 100,
+          apr_basis_points: 1999,
+          min_payment_cents: 10,
+          secret_extra_balance_cents: 50,
+        },
+      ],
+    })
+  );
+  assert.equal(result.ok, false);
+  if (!result.ok) assert.match(result.error, /unsupported fields/);
+});
+
+test("rejects duplicate liability identifiers", () => {
+  const liability = {
+    id: "l1",
+    name: "Card",
+    balance_cents: 100,
+    apr_basis_points: 1999,
+    min_payment_cents: 10,
+  };
+  const result = parseLedgerState(base({ liabilities: [liability, { ...liability }] }));
+  assert.equal(result.ok, false);
+});
+
+test("rejects duplicate bill-occurrence identifiers", () => {
+  const result = parseLedgerState(
+    base({
+      payments: [
+        { id: "p1", name: "Rent", amount_cents: 100, recurrence: "Monthly", due_day: 1 },
+      ],
+      bill_occurrences: [
+        { id: "o1", payment_id: "p1", due_date: "2026-10-01", paid: false },
+        { id: "o1", payment_id: "p1", due_date: "2026-11-01", paid: false },
+      ],
+    })
+  );
+  assert.equal(result.ok, false);
+});
+
+test("rejects fractional cents", () => {
+  const result = parseLedgerState(
+    base({
+      current_balance_cents: 1.5,
+      transactions: [{ id: 1, amount_cents: 1.5, type: "Income", date: "2026-10-01" }],
+    })
+  );
+  assert.equal(result.ok, false);
+});
+
+test("rejects an occurrence with an invalid transaction reference", () => {
+  const result = parseLedgerState(
+    base({
+      payments: [
+        { id: "p1", name: "Rent", amount_cents: 100, recurrence: "Monthly", due_day: 1 },
+      ],
+      bill_occurrences: [
+        { id: "o1", payment_id: "p1", due_date: "2026-10-01", paid: true, transaction_id: "nope" },
+      ],
+    })
+  );
+  assert.equal(result.ok, false);
+});
+
+test("rejects a future unsupported snapshot version", () => {
+  assert.equal(parseLedgerState(base({ version: "3.0" })).ok, false);
+});
+
 test("rejects liability amounts that are not non-negative integers", () => {
   const result = parseLedgerState(
     base({
