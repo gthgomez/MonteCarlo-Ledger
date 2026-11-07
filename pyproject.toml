@@ -23,7 +23,10 @@ dependencies = [
   "fastapi>=0.100.0,<1.0.0",
   "uvicorn[standard]>=0.20.0,<1.0.0",
   "httpx>=0.24.0,<1.0.0",
-  "cryptography>=41.0.0"
+  "cryptography>=41.0.0",
+  # Required at runtime: MCP-facing scenario validation is fail-closed and must never
+  # report success without running schema validation (see decisions.validate_scenario).
+  "jsonschema>=4.0.0,<5.0.0"
 ]
 
 [project.optional-dependencies]
@@ -31,8 +34,7 @@ dev = [
   "hypothesis>=6.100.0,<7.0.0",
   "pytest>=8.0.0,<9.0.0",
   "ruff>=0.11.0,<0.12.0",
-  "pyright>=1.1.400,<2.0.0",
-  "jsonschema>=4.0.0"
+  "pyright>=1.1.400,<2.0.0"
 ]
 
 [project.scripts]

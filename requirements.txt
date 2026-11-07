@@ -7,3 +7,6 @@ cryptography>=41.0.0
 
 # Required by FastAPI's TestClient (used in test suite)
 httpx>=0.24.0,<1.0.0
+
+# Runtime: fail-closed scenario validation for the MCP-ready decision surface
+jsonschema>=4.0.0,<5.0.0

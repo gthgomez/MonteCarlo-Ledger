@@ -480,6 +480,26 @@ def add_transaction(amount_cents: int, category: str, description: str, t_type: 
                 raise RuntimeError("Failed to persist transaction row.")
             return int(lastrowid)
 
+def get_ledger_stats() -> Dict[str, Any]:
+    """Bounded aggregate over the ledger: counts and the newest transaction date.
+
+    This exists so callers that only need counts/freshness never materialize the full
+    transaction history. It is an aggregate query, not a financial calculation.
+    """
+    with get_db_connection() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) AS transaction_count, MAX(date) AS newest_date FROM transactions"
+        ).fetchone()
+        income_count = conn.execute("SELECT COUNT(*) AS n FROM income").fetchone()["n"]
+        payment_count = conn.execute("SELECT COUNT(*) AS n FROM payments").fetchone()["n"]
+    return {
+        "transaction_count": int(row["transaction_count"]),
+        "newest_date": row["newest_date"],
+        "income_source_count": int(income_count),
+        "payment_count": int(payment_count),
+    }
+
+
 def get_transaction_history(limit: int = 20) -> List[Transaction]:
     with get_db_connection() as conn:
         rows = conn.execute('SELECT * FROM transactions ORDER BY date DESC, id DESC LIMIT ?', (limit,)).fetchall()

@@ -1,7 +1,9 @@
-"""Pure, clock-free reference engine for MonteCarlo Contract 1.0.
+"""Pure, clock-free reference engine for the MonteCarlo semantic contract (1.0 - 2.0).
 
 This module is the Python reference implementation of the contract. It has no
 database, no wall-clock, and no floating point in any contract-observable value.
+The default contract version for a version-less scenario is the latest released
+version (MCD-0027).
 """
 
 from __future__ import annotations
@@ -14,7 +16,7 @@ from .debt import amortize, validate_liabilities
 from .money import ContractError, checked_add, round_half_away, scale_cents_by_percent
 from .prng import SplitMix64
 
-CONTRACT_VERSION = "1.2"
+CONTRACT_VERSION = "2.0"
 SUPPORTED_CONTRACT_VERSIONS = ("1.0", "1.1", "1.2", "2.0")
 _MAX_OCCURRENCES = 100_000
 _MONTH_STEPS = {"monthly": 1, "bimonthly": 2, "quarterly": 3, "semiannually": 6, "annually": 12}
