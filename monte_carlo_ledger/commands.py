@@ -87,14 +87,20 @@ def _build_parser() -> argparse.ArgumentParser:
 
     p_sync = sub.add_parser("sync", help="encrypted cloud vault synchronization")
     sync_sub = p_sync.add_subparsers(dest="sync_action")
-    p_sync_init = sync_sub.add_parser("init", help="initialize a new cloud vault")
+    p_sync_init = sync_sub.add_parser(
+        "init",
+        help="initialize a new cloud vault (passphrase via MC_LEDGER_SYNC_PASSPHRASE or hidden prompt)",
+    )
     p_sync_init.add_argument("vault_id")
-    p_sync_init.add_argument("passphrase")
     p_sync_init.add_argument("--server", default=None)
     p_sync_push = sync_sub.add_parser("push", help="push encrypted snapshot to cloud vault")
     p_sync_push.add_argument("--server", default=None)
     p_sync_pull = sync_sub.add_parser("pull", help="pull and decrypt snapshot from cloud vault")
     p_sync_pull.add_argument("--server", default=None)
+    sync_sub.add_parser(
+        "lock",
+        help="remove any plaintext passphrase from the local sync config (deprecated field)",
+    )
 
     p_snap = sub.add_parser("export-snapshot", help="export canonical ledger snapshot JSON")
 
@@ -191,7 +197,9 @@ def main(argv: List[str]) -> int:
     if args.command == "sync":
         from . import sync
         if args.sync_action == "init":
-            res = sync.sync_init(args.vault_id, args.passphrase, args.server or sync.DEFAULT_SERVER_URL)
+            # Passphrase is resolved inside sync.sync_init (env var or hidden prompt);
+            # it is never accepted from argv so it cannot leak via shell history.
+            res = sync.sync_init(args.vault_id, None, args.server or sync.DEFAULT_SERVER_URL)
             print(f"Vault initialized: {res['vault_id']} (rev {res['revision']})")
             return 0
         elif args.sync_action == "push":
@@ -201,6 +209,11 @@ def main(argv: List[str]) -> int:
         elif args.sync_action == "pull":
             res = sync.sync_pull(args.server)
             print(f"Pulled from vault: restored {res['transactions_count']} transactions, balance: {_format_money(res['balance_cents'])}")
+            return 0
+        elif args.sync_action == "lock":
+            res = sync.sync_lock()
+            state = "removed stored passphrase" if res["removed_stored_passphrase"] else "no stored passphrase found"
+            print(f"Vault {res['vault_id']} locked ({state}).")
             return 0
         return 2
 
