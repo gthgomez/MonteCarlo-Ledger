@@ -9,10 +9,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import sqlite3
 import sys
 from typing import Any, Dict, List, Optional
 
 from . import db_manager, decisions
+from .contract import ContractError
 
 COMMANDS = {
     "forecast",
@@ -107,6 +109,21 @@ def main(argv: List[str]) -> int:
     args = _build_parser().parse_args(argv)
     if not args.command:
         return 2
+    try:
+        return _dispatch(args)
+    except ContractError as exc:
+        # Machine-readable typed failure: automation gets a stable code, humans get one line.
+        print(f"error: {exc.code}: {exc}", file=sys.stderr)
+        return 2
+    except (ValueError, OverflowError) as exc:
+        print(f"error: INVALID_INPUT: {exc}", file=sys.stderr)
+        return 2
+    except sqlite3.DatabaseError as exc:
+        print(f"error: DATABASE_CORRUPT: {exc}", file=sys.stderr)
+        return 3
+
+
+def _dispatch(args) -> int:
     db_manager.init_db()
 
     if args.command == "forecast":

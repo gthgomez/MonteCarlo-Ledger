@@ -247,7 +247,7 @@ Two version domains exist in this repository and are intentionally independent:
 - **Package version** (`0.1.0` in `pyproject.toml`): the version of the installable
   `monte-carlo-ledger` distribution. It stays at `0.1.0` until a real release is cut; it is not
   bumped for documentation or metadata changes.
-- **API contract version** (`1.0.0` in `monte_carlo_ledger/api.py`): the version advertised by the
+- **API contract version** (`2.0.0` in `monte_carlo_ledger/api.py`): the version advertised by the
   local FastAPI surface for its endpoint shapes. It changes only when the API's request/response
   contract changes, and may therefore differ from the package version.
 
