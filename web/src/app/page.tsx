@@ -5,6 +5,7 @@ import { Header } from "@/components/Header";
 import { SafeSpendHero } from "@/components/SafeSpendHero";
 import { TimelineChart } from "@/components/TimelineChart";
 import { DecisionStudio } from "@/components/DecisionStudio";
+import { FinancialResultExplanation } from "@/components/FinancialResultExplanation";
 import { LedgerManager } from "@/components/LedgerManager";
 import { SyncModal } from "@/components/SyncModal";
 import { LedgerState, SAMPLE_LEDGER_STATE } from "@/lib/types";
@@ -395,6 +396,25 @@ export default function Home() {
           endingBalanceCents={forecast.ending_balance_cents}
           overdraftPpm={risk.negative_balance_probability_ppm}
           firstNegativeDate={forecast.first_negative_date}
+        />
+
+        <FinancialResultExplanation
+          asOf={asOf}
+          recordedBalanceCents={state.current_balance_cents}
+          horizonDays={90}
+          simulation={{
+            runs: 500,
+            seed: 42,
+            quantile_num: 1,
+            quantile_den: 10,
+          }}
+          forecast={forecast}
+          risk={risk}
+          transactionCount={state.transactions.length}
+          incomeCount={state.incomes.length}
+          paymentCount={state.payments.length}
+          liabilityCount={state.liabilities?.length ?? 0}
+          isDemo={usingDemo}
         />
 
         <TimelineChart
