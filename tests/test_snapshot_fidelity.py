@@ -24,6 +24,10 @@ def _db_state():
             "payments": "id, name, amount, due_day, recurrence, due_date, is_auto_withdraw",
             "transactions": "id, amount, category, type, date, description",
             "bill_occurrences": "id, payment_id, due_date, paid, transaction_id, original_due_date, is_user_modified",
+            "liabilities": (
+                "id, name, balance_cents, apr_basis_points, min_payment_cents, kind, "
+                "min_payment_percent_bps, min_payment_floor_cents, due_day_of_month"
+            ),
         }.items():
             rows = conn.execute(f"SELECT {columns} FROM {table} ORDER BY id").fetchall()
             state[table] = [dict(row) for row in rows]
@@ -145,17 +149,45 @@ class SnapshotFidelityTest(unittest.TestCase):
         self.assertIn(occ["transaction_id"], tx_ids)
         self.assertEqual(state["balance"], -500)
 
-    def test_liabilities_are_rejected_not_silently_dropped(self):
+    def test_liabilities_survive_export_restore_round_trip(self):
         self._seed_full_ledger()
         before = _db_state()
         snapshot = sync.export_ledger_snapshot()
         snapshot["liabilities"] = [
-            {"id": "l1", "name": "Card", "balance_cents": 1000, "apr_basis_points": 1999,
+            {
+                "id": "l1",
+                "name": "Card",
+                "balance_cents": 1000,
+                "apr_basis_points": 1999,
+                "min_payment_cents": 100,
+                "kind": "revolving",
+                "min_payment_percent_bps": 200,
+                "min_payment_floor_cents": 2500,
+                "due_day_of_month": 15,
+            }
+        ]
+        sync.restore_ledger_snapshot(snapshot)
+        after = _db_state()
+        self.assertEqual(after["income"], before["income"])
+        self.assertEqual(after["payments"], before["payments"])
+        self.assertEqual(after["transactions"], before["transactions"])
+        self.assertEqual(after["bill_occurrences"], before["bill_occurrences"])
+        self.assertEqual(len(after["liabilities"]), 1)
+        self.assertEqual(after["liabilities"][0]["id"], "l1")
+        self.assertEqual(after["liabilities"][0]["balance_cents"], 1000)
+        exported = sync.export_ledger_snapshot()
+        self.assertEqual(exported["liabilities"], snapshot["liabilities"])
+
+    def test_invalid_liability_rejected_without_mutating_ledger(self):
+        self._seed_full_ledger()
+        before = _db_state()
+        snapshot = sync.export_ledger_snapshot()
+        snapshot["liabilities"] = [
+            {"id": "l1", "name": "Card", "balance_cents": -1, "apr_basis_points": 1999,
              "min_payment_cents": 100}
         ]
-        with self.assertRaises(ValueError) as ctx:
+        with self.assertRaises(ValueError):
             sync.restore_ledger_snapshot(snapshot)
-        self.assertIn("cannot persist", str(ctx.exception))
         self.assertEqual(_db_state(), before)
 
     def test_unknown_top_level_fields_are_rejected(self):

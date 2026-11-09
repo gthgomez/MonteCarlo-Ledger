@@ -26,6 +26,8 @@ from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from . import db_manager
+from .contract import ContractError
+from .contract.debt import validate_liabilities
 from .contract.money import MAX_MONEY_CENTS, MIN_MONEY_CENTS
 
 SYNC_CONFIG_FILE = ".ledger-sync.json"
@@ -164,6 +166,30 @@ def export_ledger_snapshot() -> Dict[str, Any]:
             for r in occ_rows
         ]
 
+        liab_rows = conn.execute(
+            "SELECT id, name, balance_cents, apr_basis_points, min_payment_cents, "
+            "kind, min_payment_percent_bps, min_payment_floor_cents, due_day_of_month "
+            "FROM liabilities ORDER BY id"
+        ).fetchall()
+        liabilities = []
+        for r in liab_rows:
+            item: Dict[str, Any] = {
+                "id": r["id"],
+                "name": r["name"],
+                "balance_cents": r["balance_cents"],
+                "apr_basis_points": r["apr_basis_points"],
+                "min_payment_cents": r["min_payment_cents"],
+            }
+            if r["kind"] != "installment":
+                item["kind"] = r["kind"]
+            if r["min_payment_percent_bps"]:
+                item["min_payment_percent_bps"] = r["min_payment_percent_bps"]
+            if r["min_payment_floor_cents"]:
+                item["min_payment_floor_cents"] = r["min_payment_floor_cents"]
+            if r["due_day_of_month"] is not None:
+                item["due_day_of_month"] = r["due_day_of_month"]
+            liabilities.append(item)
+
     return {
         "version": SNAPSHOT_VERSION,
         "updated_at": _utc_now_iso(),
@@ -172,7 +198,7 @@ def export_ledger_snapshot() -> Dict[str, Any]:
         "payments": payments,
         "transactions": transactions,
         "bill_occurrences": occurrences,
-        "liabilities": [],
+        "liabilities": liabilities,
     }
 
 
@@ -209,6 +235,12 @@ _ROW_FIELDS = {
         {
             "id", "payment_id", "due_date", "paid", "transaction_id",
             "original_due_date", "is_user_modified",
+        }
+    ),
+    "liabilities": frozenset(
+        {
+            "id", "name", "balance_cents", "apr_basis_points", "min_payment_cents",
+            "kind", "min_payment_percent_bps", "min_payment_floor_cents", "due_day_of_month",
         }
     ),
 }
@@ -396,16 +428,8 @@ def _validate_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
     if "updated_at" in snapshot:
         _require_timestamp(snapshot["updated_at"], "updated_at")
 
-    # Liabilities are optional (older snapshots may omit them) but an empty list is
-    # the only value the Python ledger can faithfully persist.
+    # Liabilities are optional (older snapshots may omit them).
     liabilities = _require_rows(snapshot, "liabilities") if "liabilities" in snapshot else []
-    if liabilities:
-        raise ValueError(
-            f"Snapshot contains {len(liabilities)} liabilit"
-            f"{'y' if len(liabilities) == 1 else 'ies'}, which the Python ledger "
-            "cannot persist. Restore it with the Android or Web client instead of "
-            "silently dropping debt records."
-        )
 
     # A missing balance is an incomplete snapshot, never a zero balance.
     declared_balance = _require_int(
@@ -567,6 +591,69 @@ def _validate_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
                 f"{payment_amounts[pay_key]}"
             )
 
+    contract_liabilities: list = []
+    seen_liability_ids: set = set()
+    for index, liab in enumerate(liabilities):
+        _validate_row_fields(liab, "liabilities", index)
+        lid = _require_str(liab.get("id"), f"liabilities[{index}].id")
+        if lid in seen_liability_ids:
+            raise ValueError(f"Snapshot liabilities has duplicate identifier {lid!r}")
+        seen_liability_ids.add(lid)
+        _require_str(liab.get("name"), f"liabilities[{index}].name")
+        _require_money(liab.get("balance_cents"), f"liabilities[{index}].balance_cents")
+        _require_int(
+            liab.get("apr_basis_points"),
+            f"liabilities[{index}].apr_basis_points",
+            minimum=0,
+        )
+        _require_money(
+            liab.get("min_payment_cents"),
+            f"liabilities[{index}].min_payment_cents",
+        )
+        kind = liab.get("kind", "installment")
+        if kind not in ("installment", "revolving"):
+            raise ValueError(
+                f"Snapshot liabilities[{index}].kind is unsupported: {kind!r}"
+            )
+        percent_bps = _require_int(
+            liab.get("min_payment_percent_bps", 0),
+            f"liabilities[{index}].min_payment_percent_bps",
+            minimum=0,
+        )
+        floor_cents = _require_int(
+            liab.get("min_payment_floor_cents", 0),
+            f"liabilities[{index}].min_payment_floor_cents",
+            minimum=0,
+        )
+        due_day = _require_int(
+            liab.get("due_day_of_month"),
+            f"liabilities[{index}].due_day_of_month",
+            allow_none=True,
+        )
+        if due_day is not None and not 1 <= due_day <= 31:
+            raise ValueError(
+                f"Snapshot liabilities[{index}].due_day_of_month must be 1..31, got {due_day}"
+            )
+        contract_row: Dict[str, Any] = {
+            "id": lid,
+            "balance_cents": liab["balance_cents"],
+            "apr_basis_points": liab["apr_basis_points"],
+            "min_payment_cents": liab["min_payment_cents"],
+            "kind": kind,
+        }
+        if percent_bps:
+            contract_row["min_payment_percent_bps"] = percent_bps
+        if floor_cents:
+            contract_row["min_payment_floor_cents"] = floor_cents
+        if due_day is not None:
+            contract_row["due_day_of_month"] = due_day
+        contract_liabilities.append(contract_row)
+
+    try:
+        validate_liabilities(contract_liabilities)
+    except ContractError as exc:
+        raise ValueError(f"Snapshot liabilities are invalid: {exc}") from exc
+
     declared_sum = sum(tx["amount_cents"] for tx in transactions)
     if declared_sum != declared_balance:
         raise ValueError(
@@ -580,6 +667,7 @@ def _validate_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
         "payments": payments,
         "transactions": transactions,
         "occurrences": occurrences,
+        "liabilities": liabilities,
         "income_ids": income_ids,
         "payment_ids": payment_ids,
         "transaction_ids": transaction_ids,
@@ -595,7 +683,7 @@ def restore_ledger_snapshot(snapshot: Dict[str, Any]) -> None:
     commit. A rejected or interrupted restore therefore leaves the pre-existing ledger
     exactly as it was. Every field is validated before any row is written, non-integer
     identifiers are remapped deterministically, and data the Python ledger cannot
-    represent (liabilities) is rejected instead of being silently discarded.
+    represent is rejected instead of being silently discarded.
     """
     validated = _validate_snapshot(snapshot)
     declared_balance: int = validated["declared_balance"]
@@ -603,6 +691,7 @@ def restore_ledger_snapshot(snapshot: Dict[str, Any]) -> None:
     payments: list = validated["payments"]
     transactions: list = validated["transactions"]
     occurrences: list = validated["occurrences"]
+    liabilities: list = validated["liabilities"]
     income_ids: Dict[str, int] = validated["income_ids"]
     payment_ids: Dict[str, int] = validated["payment_ids"]
     transaction_ids: Dict[str, int] = validated["transaction_ids"]
@@ -621,6 +710,7 @@ def restore_ledger_snapshot(snapshot: Dict[str, Any]) -> None:
             conn.execute("DELETE FROM transactions")
             conn.execute("DELETE FROM payments")
             conn.execute("DELETE FROM income")
+            conn.execute("DELETE FROM liabilities")
 
             for inc in incomes:
                 conn.execute(
@@ -688,6 +778,25 @@ def restore_ledger_snapshot(snapshot: Dict[str, Any]) -> None:
                     ),
                 )
 
+            for liab in liabilities:
+                conn.execute(
+                    "INSERT INTO liabilities "
+                    "(id, name, balance_cents, apr_basis_points, min_payment_cents, "
+                    "kind, min_payment_percent_bps, min_payment_floor_cents, due_day_of_month) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        str(liab["id"]),
+                        liab["name"],
+                        liab["balance_cents"],
+                        liab["apr_basis_points"],
+                        liab["min_payment_cents"],
+                        liab.get("kind", "installment"),
+                        liab.get("min_payment_percent_bps", 0),
+                        liab.get("min_payment_floor_cents", 0),
+                        liab.get("due_day_of_month"),
+                    ),
+                )
+
             ledger_sum = conn.execute(
                 "SELECT COALESCE(SUM(amount), 0) FROM transactions"
             ).fetchone()[0]
@@ -737,7 +846,10 @@ def _local_ledger_fingerprint() -> Optional[str]:
 def _local_ledger_has_content() -> bool:
     stats = db_manager.get_ledger_stats()
     return bool(
-        stats["transaction_count"] or stats["income_source_count"] or stats["payment_count"]
+        stats["transaction_count"]
+        or stats["income_source_count"]
+        or stats["payment_count"]
+        or stats.get("liability_count")
     )
 
 
