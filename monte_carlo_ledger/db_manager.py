@@ -124,7 +124,30 @@ def init_db():
             _migrate_v9_to_v10(conn)
         if version < 11:
             _migrate_v10_to_v11(conn)
-        
+        if version < 12:
+            _migrate_v11_to_v12(conn)
+
+
+def _migrate_v11_to_v12(conn: sqlite3.Connection):
+    """Version 12: persist cross-platform liability records in snapshots."""
+    print("[Migration] Upgrading database to Version 12 (Liability persistence)...")
+    with conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS liabilities (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                balance_cents INTEGER NOT NULL,
+                apr_basis_points INTEGER NOT NULL,
+                min_payment_cents INTEGER NOT NULL,
+                kind TEXT NOT NULL DEFAULT 'installment' CHECK(kind IN ('installment', 'revolving')),
+                min_payment_percent_bps INTEGER NOT NULL DEFAULT 0,
+                min_payment_floor_cents INTEGER NOT NULL DEFAULT 0,
+                due_day_of_month INTEGER
+            )
+        """)
+        conn.execute("PRAGMA user_version = 12")
+    print("[Migration] Success: Version 12 Upgrade Complete.")
+
 
 def _migrate_v4_to_v5(conn: sqlite3.Connection):
     """
@@ -557,11 +580,13 @@ def get_ledger_stats() -> Dict[str, Any]:
         ).fetchone()
         income_count = conn.execute("SELECT COUNT(*) AS n FROM income").fetchone()["n"]
         payment_count = conn.execute("SELECT COUNT(*) AS n FROM payments").fetchone()["n"]
+        liability_count = conn.execute("SELECT COUNT(*) AS n FROM liabilities").fetchone()["n"]
     return {
         "transaction_count": int(row["transaction_count"]),
         "newest_date": row["newest_date"],
         "income_source_count": int(income_count),
         "payment_count": int(payment_count),
+        "liability_count": int(liability_count),
     }
 
 

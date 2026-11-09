@@ -1,8 +1,8 @@
 """Cross-client compatibility and non-destructive pull.
 
-The defect: a Python client could join a Web vault containing liabilities, then push
-its own snapshot (which cannot represent debt) over the Web vault. Authentication was
-mistaken for data compatibility, and a revision number alone authorized replacement.
+Historical defect: a Python client could join a Web vault containing liabilities, then
+push a snapshot that silently dropped debt. Compatibility is now enforced by validating
+remote snapshots and persisting liabilities in the local SQLite schema.
 """
 
 from __future__ import annotations
@@ -149,7 +149,7 @@ def _cfg(server, passphrase, revision, *, ancestry=True, fingerprint=None):
     return cfg
 
 
-def test_join_rejects_web_vault_with_liabilities_before_saving_any_config(
+def test_join_restores_web_vault_with_liabilities_after_explicit_pull(
     populated_db, monkeypatch, tmp_path
 ):
     server = FakeVaultServer().set_from_snapshot("passphrase", _debt_snapshot(), revision=5)
@@ -157,11 +157,12 @@ def test_join_rejects_web_vault_with_liabilities_before_saving_any_config(
     monkeypatch.setattr(sync, "_request_json", server.request)
     before = _local_state()
 
-    with pytest.raises(ValueError, match="cannot represent"):
-        sync.sync_init("shared-vault", "passphrase", "http://vault.test")
-
-    assert sync.load_sync_config() is None, "an incompatible join must not be recorded"
-    assert _local_state() == before
+    cfg = sync.sync_init("shared-vault", "passphrase", "http://vault.test")
+    assert cfg is not None
+    sync.sync_pull(passphrase="passphrase", allow_local_overwrite=True)
+    exported = sync.export_ledger_snapshot()
+    assert exported["liabilities"] == _debt_snapshot()["liabilities"]
+    assert _local_state() != before
     assert server.snapshot()["liabilities"], "remote debt must remain intact"
     assert server.revision == 5
 
@@ -191,23 +192,20 @@ def test_joined_vault_cannot_be_pushed_until_a_pull_establishes_ancestry(
     assert server.revision == 8
 
 
-def test_push_preflight_refuses_to_overwrite_remote_liabilities(
+def test_push_round_trips_liabilities_after_pull_establishes_ancestry(
     populated_db, monkeypatch
 ):
-    """Even with a locally recorded base, incompatible remote content blocks the write."""
     server = FakeVaultServer().set_from_snapshot("passphrase", _debt_snapshot(), revision=3)
+    server.create_conflict = True
     monkeypatch.setattr(sync, "_request_json", server.request)
-    _cfg(server, "passphrase", 3, ancestry=True, fingerprint="whatever")
-    before = _local_state()
+    sync.sync_init("shared-vault", "passphrase", "http://vault.test")
+    sync.sync_pull(passphrase="passphrase", allow_local_overwrite=True)
     remote_before = server.snapshot()
 
-    with pytest.raises(ValueError, match="cannot represent"):
-        sync.sync_push(passphrase="passphrase")
-
-    assert server.revision == 3
-    assert server.snapshot() == remote_before
-    assert _local_state() == before
-    assert not [c for c in server.calls if c[0] == "PUT"]
+    result = sync.sync_push(passphrase="passphrase")
+    assert result["revision"] == 4
+    assert server.snapshot()["liabilities"] == remote_before["liabilities"]
+    assert [c for c in server.calls if c[0] == "PUT"]
 
 
 def test_push_preflight_refuses_unknown_future_fields(populated_db, monkeypatch):

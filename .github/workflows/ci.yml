@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: ["3.10", "3.11"]
+        python-version: ["3.10", "3.11", "3.12"]
 
     steps:
       - uses: actions/checkout@v4
@@ -30,3 +30,64 @@ jobs:
 
       - name: Pytest
         run: python -m pytest -q
+
+  # Proves the packaged artifact works without development dependencies. This is the check that
+  # would have caught a validation dependency (or schema file) present only in the source tree.
+  clean-install:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install runtime dependencies only
+        run: |
+          python -m venv .clean
+          .clean/bin/python -m pip install --upgrade pip
+          .clean/bin/python -m pip install .
+
+      - name: Fail-closed validation works in a clean install
+        run: |
+          .clean/bin/python - <<'PY'
+          from monte_carlo_ledger import decisions
+
+          caps = decisions.engine_capabilities()
+          assert caps["validation"]["fail_closed"] is True
+
+          valid = decisions.validate_scenario({
+              "contract_version": "2.0",
+              "scenario_id": "clean-install",
+              "as_of": "2026-11-09",
+              "starting_balance_cents": 0,
+              "horizon_days": 1,
+              "events": [],
+          })
+          assert valid["valid"] is True, valid
+          assert valid["schema_checked"] is True, valid
+          assert valid["engine_evaluated"] is True, valid
+
+          bad = decisions.validate_scenario({
+              "contract_version": "2.0",
+              "scenario_id": "clean-install-bad",
+              "as_of": "2026-11-09",
+              "starting_balance_cents": 0,
+              "horizon_days": 1,
+              "events": [{"date": "2026-11-09", "amount_cents": 500, "type": "expense"}],
+          })
+          assert bad["valid"] is False and bad["engine_evaluated"] is True, bad
+          assert any(e["code"] == "INVALID_AMOUNT" for e in bad["errors"]), bad
+          print("clean-install validation path verified")
+          PY
+
+      - name: CLI behaves on a clean install
+        run: |
+          export MC_LEDGER_DB="$RUNNER_TEMP/clean.db"
+          .clean/bin/python -m monte_carlo_ledger forecast --as-of 2026-11-09 --horizon 30 --json
+          set +e
+          .clean/bin/python -m monte_carlo_ledger simulate-purchase 0 \
+            --date 2026-11-10 --as-of 2026-11-09 --json
+          code=$?
+          set -e
+          test "$code" -eq 2

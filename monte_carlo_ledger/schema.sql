@@ -52,5 +52,17 @@ CREATE INDEX IF NOT EXISTS idx_occurrences_paid ON bill_occurrences(paid);
 CREATE INDEX IF NOT EXISTS idx_occurrences_original
     ON bill_occurrences(payment_id, original_due_date);
 
+CREATE TABLE IF NOT EXISTS liabilities (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    balance_cents INTEGER NOT NULL,
+    apr_basis_points INTEGER NOT NULL,
+    min_payment_cents INTEGER NOT NULL,
+    kind TEXT NOT NULL DEFAULT 'installment' CHECK(kind IN ('installment', 'revolving')),
+    min_payment_percent_bps INTEGER NOT NULL DEFAULT 0,
+    min_payment_floor_cents INTEGER NOT NULL DEFAULT 0,
+    due_day_of_month INTEGER
+);
+
 -- Insert default balance (stored as INTEGER)
 INSERT OR IGNORE INTO settings (key, value) VALUES ('current_balance', 0);

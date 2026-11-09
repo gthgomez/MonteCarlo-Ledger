@@ -1,6 +1,6 @@
 # MCP Readiness — MonteCarlo-Ledger internal tool surface
 
-**Status: ready for adapter design. No MCP server is shipped in this campaign — by design.**
+**Status: read-only stdio MCP server shipped (`monte-carlo-mcp` / `monte_carlo_ledger.mcp_server`).**
 
 This document defines the stable *internal* surface a future MCP adapter should bind to, the
 result/error schemas it may rely on, and the security boundary it must enforce. Everything here
@@ -240,9 +240,9 @@ unchanged after every operation, including failures.
   than silently discarded (`tests/test_snapshot_restore_strict.py`).
 - Restore is a single SQLite transaction; a rejected or interrupted restore leaves the
   previous ledger intact. The recovery copy uses SQLite's online backup API.
-- **Python cannot persist liabilities.** A snapshot containing them is rejected with a
-  compatibility error instead of silently dropping debt. Use the Android/Web client for
-  ledgers with debt.
+- **Python persists liabilities** (schema v12 `liabilities` table, snapshot round-trip).
+  Android-only linkage fields (`linkedPaymentId`, `linkedAccountId`) are not in the
+  cross-platform snapshot format and remain Web/Android-only.
 - `tests/test_snapshot_fidelity.py` compares the *persisted database* before/after a real
   export → restore (11 tests), which detects fields omitted from both sides.
 

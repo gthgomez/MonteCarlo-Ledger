@@ -91,7 +91,7 @@ def test_corpus_detects_an_adapter_divergence(mutate, tmp_path, monkeypatch):
     assert result["forecast"] != data["expected"]["forecast"], "corpus must detect this fault"
 
 
-def test_liabilities_are_an_explicit_compatibility_error_not_silent_loss(tmp_path, monkeypatch):
+def test_liabilities_restore_persists_without_silent_loss(tmp_path, monkeypatch):
     data = _fixture()
     data["ledger"]["liabilities"] = [
         {
@@ -104,5 +104,6 @@ def test_liabilities_are_an_explicit_compatibility_error_not_silent_loss(tmp_pat
     ]
     monkeypatch.setattr(db_manager, "DB_PATH", str(tmp_path / "ledger.db"))
     db_manager.init_db()
-    with pytest.raises(ValueError, match="cannot persist"):
-        sync.restore_ledger_snapshot(data["ledger"])
+    sync.restore_ledger_snapshot(data["ledger"])
+    exported = sync.export_ledger_snapshot()
+    assert exported["liabilities"] == data["ledger"]["liabilities"]

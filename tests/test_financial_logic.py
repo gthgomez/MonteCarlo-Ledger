@@ -111,12 +111,19 @@ class TestLedgerLogic(unittest.TestCase):
 
         with db_manager.get_db_connection() as conn:
             v = conn.execute("PRAGMA user_version").fetchone()[0]
-            self.assertEqual(v, 11)
+            self.assertEqual(v, 12)
 
             # Verify type column exists
             res = conn.execute("PRAGMA table_info(transactions)").fetchall()
             cols = [r[1] for r in res]
             self.assertIn('type', cols)
+
+            liability_tables = {
+                row[0] for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name='liabilities'"
+                ).fetchall()
+            }
+            self.assertIn("liabilities", liability_tables)
 
     def test_occurrence_based_obligations(self):
         # 1. Setup payment (one-time bill due in 5 days)
