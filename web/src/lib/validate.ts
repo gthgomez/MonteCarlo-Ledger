@@ -19,9 +19,8 @@ const REQUIRED_FIELDS = [
   "payments",
   "transactions",
   "bill_occurrences",
-  "liabilities",
 ] as const;
-const KNOWN_TOP_LEVEL = new Set<string>([...REQUIRED_FIELDS, "updated_at"]);
+const KNOWN_TOP_LEVEL = new Set<string>([...REQUIRED_FIELDS, "liabilities", "updated_at"]);
 
 /** Exact row shapes. Unknown fields are rejected rather than silently dropped. */
 const ROW_FIELDS: Record<string, Set<string>> = {
@@ -134,7 +133,7 @@ export function parseLedgerState(raw: unknown): ParseResult {
     return fail("current_balance_cents", "must be integer cents");
   }
 
-  for (const key of ["incomes", "payments", "transactions", "bill_occurrences", "liabilities"]) {
+  for (const key of ["incomes", "payments", "transactions", "bill_occurrences"]) {
     if (!Array.isArray(raw[key])) {
       return fail(key, "must be an array");
     }
@@ -143,7 +142,10 @@ export function parseLedgerState(raw: unknown): ParseResult {
   const payments = raw.payments;
   const transactions = raw.transactions;
   const occurrences = raw.bill_occurrences;
-  const liabilities = raw.liabilities;
+  if (raw.liabilities !== undefined && !Array.isArray(raw.liabilities)) {
+    return fail("liabilities", "must be an array when present");
+  }
+  const liabilities = Array.isArray(raw.liabilities) ? raw.liabilities : [];
 
   const incomeIds = ids(incomes, "incomes");
   if ("ok" in incomeIds) return incomeIds;

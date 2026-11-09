@@ -139,7 +139,10 @@ def validate_scenario(scenario: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def main() -> None:
-    db_manager.init_db()
+    try:
+        db_manager.open_ledger_for_read()
+    except FileNotFoundError as exc:
+        raise SystemExit(str(exc)) from exc
     server.run(transport="stdio")
 
 

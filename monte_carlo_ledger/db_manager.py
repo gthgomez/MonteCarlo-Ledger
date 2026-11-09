@@ -88,6 +88,16 @@ def get_db_connection():
     finally:
         conn.close()
 
+def open_ledger_for_read() -> None:
+    """Open an existing ledger for read-only tools; never create a new database file."""
+    if not Path(DB_PATH).is_file():
+        raise FileNotFoundError(
+            f"No ledger database at {DB_PATH}. "
+            "Initialize with `python -m monte_carlo_ledger` before starting the MCP server."
+        )
+    init_db()
+
+
 def init_db():
     """Initializes the database and performs versioned migrations."""
     if sqlite3.sqlite_version_info < (3, 25, 0):
