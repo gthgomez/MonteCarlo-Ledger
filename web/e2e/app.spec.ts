@@ -55,6 +55,7 @@ function overflowState(): LedgerState {
 test.describe("dashboard loads with synthetic sample data", () => {
   test("hero renders canonical safe-to-spend, not an error screen", async ({ page }) => {
     await page.goto("/");
+    await expect(page.getByText("What these numbers mean")).toBeVisible();
     await expect(page.getByText("Safe to Spend (P10)")).toBeVisible();
     await expect(page.getByText("Calculation Failed")).toHaveCount(0);
     // The hero must show a real dollar figure, not a placeholder or zero-fill.
