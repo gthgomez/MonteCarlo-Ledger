@@ -108,13 +108,20 @@ test("rejects impossible calendar dates", () => {
 });
 
 test("rejects a snapshot with a missing required collection", () => {
-  for (const key of ["incomes", "payments", "transactions", "bill_occurrences", "liabilities"]) {
+  for (const key of ["incomes", "payments", "transactions", "bill_occurrences"]) {
     const snapshot = base();
     delete (snapshot as Record<string, unknown>)[key];
     const result = parseLedgerState(snapshot);
     assert.equal(result.ok, false, `missing ${key} must be rejected`);
     if (!result.ok) assert.match(result.error, new RegExp(key));
   }
+});
+
+test("accepts legacy snapshots without liabilities", () => {
+  const snapshot = base();
+  delete (snapshot as Record<string, unknown>).liabilities;
+  const result = parseLedgerState(snapshot);
+  assert.equal(result.ok, true);
 });
 
 test("rejects a missing balance instead of treating it as zero", () => {

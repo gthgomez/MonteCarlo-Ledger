@@ -44,7 +44,11 @@ export function FinancialResultExplanation({
   isDemo,
 }: FinancialResultExplanationProps) {
   const overdraftPct = (risk.negative_balance_probability_ppm / 10000).toFixed(1);
-  const reserveBasis = `p${simulation.quantile_num} trough (nearest-rank ${simulation.quantile_num}/${simulation.quantile_den})`;
+  const percentile =
+    simulation.quantile_den > 0
+      ? Math.round((simulation.quantile_num * 100) / simulation.quantile_den)
+      : 10;
+  const reserveBasis = `P${percentile} trough (nearest-rank ${simulation.quantile_num}/${simulation.quantile_den})`;
 
   return (
     <section

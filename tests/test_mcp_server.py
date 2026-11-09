@@ -70,6 +70,19 @@ class MCPServerToolTests(unittest.TestCase):
         self.assertFalse(first.is_error)
         self.assertEqual(self._body(first), self._body(second))
 
+    def test_open_ledger_for_read_refuses_missing_db(self):
+        missing = os.path.abspath("test_mcp_missing_ledger.db")
+        prior = db_manager.DB_PATH
+        try:
+            db_manager.DB_PATH = missing
+            if os.path.exists(missing):
+                os.remove(missing)
+            with self.assertRaises(FileNotFoundError):
+                db_manager.open_ledger_for_read()
+            self.assertFalse(os.path.exists(missing))
+        finally:
+            db_manager.DB_PATH = prior
+
 
 if __name__ == "__main__":
     unittest.main()
