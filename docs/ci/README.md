@@ -30,7 +30,7 @@ git push
 
 The pin patch applies cleanly (`git apply --check` verified). It changes
 `ANDROID_PIN_SHA` from `6cadf72c50ca6466f342a7263bacacf9145b28d3` (pre-release) to
-`fd8924dc9a1852066a569eba1da99d27595dfab6` (current `main` after PR #41: cloud vault sync MVP,
+`7216e8d41994b63918c676c173cc306407ef04a9` (current `main` after PR #41: cloud vault sync MVP,
 fail-closed instrumented CI gate, Robolectric vault crypto tests).
 
 After installation, update required checks on Ledger `master` to:
