@@ -8,7 +8,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "tsc --noEmit",
-    "test": "tsc -p tsconfig.test.json && node --test dist-test/contract/__tests__/conformance.test.js dist-test/contract/__tests__/timeline.test.js dist-test/contract/__tests__/canonical-math.test.js dist-test/lib/__tests__/scenario-builder.test.js dist-test/lib/__tests__/validate.test.js dist-test/lib/__tests__/storage.test.js dist-test/lib/__tests__/sync-state.test.js dist-test/lib/__tests__/vault-client.test.js dist-test/lib/__tests__/adapter-parity.test.js dist-test/lib/__tests__/accounting-integrity.test.js dist-test/lib/__tests__/persistence.test.js",
+    "test": "tsc -p tsconfig.test.json && node --test dist-test/contract/__tests__/conformance.test.js dist-test/contract/__tests__/timeline.test.js dist-test/contract/__tests__/canonical-math.test.js dist-test/lib/__tests__/scenario-builder.test.js dist-test/lib/__tests__/validate.test.js dist-test/lib/__tests__/storage.test.js dist-test/lib/__tests__/sync-state.test.js dist-test/lib/__tests__/vault-client.test.js dist-test/lib/__tests__/adapter-parity.test.js dist-test/lib/__tests__/accounting-integrity.test.js dist-test/lib/__tests__/persistence.test.js dist-test/lib/__tests__/present.test.js dist-test/lib/__tests__/ledger-edits.test.js dist-test/lib/__tests__/scenarios.test.js",
     "test:e2e": "pnpm build && playwright test"
   },
   "dependencies": {

@@ -34,7 +34,7 @@ Follow a synthetic household from its 90-day cash-flow forecast into a $650 purc
 </tr>
 </table>
 
-Captured from [`41b190b58730`](https://github.com/gthgomez/MonteCarlo-Ledger/tree/41b190b5873041f75651055f925a5bf38219ea8a) on 2026-10-30. The GIF is a compact preview; the MP4 preserves the recorded workflow timing.
+Captured from [`41b190b58730`](https://github.com/gthgomez/MonteCarlo-Ledger/tree/41b190b5873041f75651055f925a5bf38219ea8a) on 2026-10-30. Those frames show the previous single-screen companion. The current companion is organized around Home, Money, Budget, Bills, Plan, Future, and Advanced. The GIF is a compact preview; the MP4 preserves the recorded workflow timing.
 
 ![Monte Carlo Ledger architecture overview](./docs/assets/architecture-overview.svg)
 
@@ -120,7 +120,7 @@ python -m uvicorn monte_carlo_ledger.api:app --reload --host 127.0.0.1 --port 80
 A zero-knowledge, end-to-end encrypted web companion is deployed at:
 👉 **[https://montecarlo-ledger.vercel.app](https://montecarlo-ledger.vercel.app)**
 
-The web app runs Contract 2.0 TypeScript simulations client-side with zero data egress. You can synchronize your local CLI ledger with the edge vault (backed by Turso libSQL):
+The web app runs Contract 2.0 TypeScript simulations client-side with zero data egress. Everyday screens ask how you are doing, where money went, which bills are coming, whether a decision fits, and what the modeled futures look like. Seed, run count, horizon, quantile, and variance stay on Advanced and feed that same plan. You can synchronize your local CLI ledger with the edge vault (backed by Turso libSQL):
 
 ```bash
 # 1. Initialize a private vault (derives local PBKDF2 keys, never sent to server).

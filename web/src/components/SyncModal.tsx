@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { X, Cloud, Lock, Terminal, Upload, Download, Check, AlertCircle, RefreshCw } from "lucide-react";
 import {
   pushVault,
@@ -46,6 +46,15 @@ export function SyncModal({
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [pullConflict, setPullConflict] = useState(false);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [isOpen, onClose]);
 
   if (!isOpen) return null;
 
@@ -142,43 +151,48 @@ export function SyncModal({
   };
 
   return (
-    <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4">
-      <div className="rounded-2xl bg-slate-900 border border-slate-800 shadow-2xl max-w-lg w-full p-6 text-slate-100">
-        <div className="flex items-center justify-between border-b border-slate-800 pb-3 mb-4">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-ink/50 p-4">
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="sync-title"
+        className="max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-2xl border border-line bg-surface p-5 text-ink shadow-card"
+      >
+        <div className="mb-4 flex items-center justify-between border-b border-line pb-3">
           <div className="flex items-center gap-2">
-            <div className="p-1.5 rounded-lg bg-indigo-500/20 text-indigo-400">
-              <Cloud className="w-4 h-4" />
-            </div>
-            <h3 className="font-bold text-sm tracking-wide">
-              Cloud Vault & CLI Synchronization (Option C)
+            <Cloud className="h-4 w-4 text-accent" />
+            <h3 id="sync-title" className="text-base font-semibold">
+              Cloud Vault & CLI Synchronization
             </h3>
           </div>
           <button
+            type="button"
             onClick={onClose}
-            className="p-1 rounded-lg hover:bg-slate-800 text-slate-400 hover:text-slate-200 transition"
+            aria-label="Close synchronization"
+            className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-lg text-ink"
           >
-            <X className="w-4 h-4" />
+            <X className="h-4 w-4" />
           </button>
         </div>
 
         {/* Tabs */}
-        <div className="flex border-b border-slate-800 text-xs mb-4">
+        <div className="mb-4 flex flex-wrap gap-2 border-b border-line text-sm">
           <button
             onClick={() => setTab("cloud")}
             className={`pb-2 px-3 font-semibold border-b-2 transition ${
               tab === "cloud"
-                ? "border-indigo-500 text-indigo-400"
-                : "border-transparent text-slate-400 hover:text-slate-200"
+                ? "border-accent text-accent"
+                : "border-transparent text-muted hover:text-ink"
             }`}
           >
-            Encrypted Vault (Option C)
+            Encrypted vault
           </button>
           <button
             onClick={() => setTab("cli")}
             className={`pb-2 px-3 font-semibold border-b-2 transition ${
               tab === "cli"
-                ? "border-indigo-500 text-indigo-400"
-                : "border-transparent text-slate-400 hover:text-slate-200"
+                ? "border-accent text-accent"
+                : "border-transparent text-muted hover:text-ink"
             }`}
           >
             Python CLI Commands
@@ -187,8 +201,8 @@ export function SyncModal({
             onClick={() => setTab("file")}
             className={`pb-2 px-3 font-semibold border-b-2 transition ${
               tab === "file"
-                ? "border-indigo-500 text-indigo-400"
-                : "border-transparent text-slate-400 hover:text-slate-200"
+                ? "border-accent text-accent"
+                : "border-transparent text-muted hover:text-ink"
             }`}
           >
             Local JSON Backup
@@ -196,15 +210,15 @@ export function SyncModal({
         </div>
 
         {statusMessage && (
-          <div className="mb-4 p-3 rounded-xl bg-emerald-950/40 border border-emerald-500/30 text-emerald-300 text-xs flex items-center gap-2">
-            <Check className="w-4 h-4 text-emerald-400 shrink-0" />
+          <div className="mb-4 flex items-center gap-2 rounded-xl border border-positive bg-positive-soft p-3 text-sm text-ink">
+            <Check className="h-4 w-4 shrink-0 text-positive" />
             <span>{statusMessage}</span>
           </div>
         )}
 
         {errorMessage && (
-          <div className="mb-4 p-3 rounded-xl bg-rose-950/40 border border-rose-500/30 text-rose-300 text-xs flex items-center gap-2">
-            <AlertCircle className="w-4 h-4 text-rose-400 shrink-0" />
+          <div className="mb-4 flex items-center gap-2 rounded-xl border border-danger bg-danger-soft p-3 text-sm text-ink">
+            <AlertCircle className="h-4 w-4 shrink-0 text-danger" />
             <span>{errorMessage}</span>
           </div>
         )}
@@ -212,24 +226,24 @@ export function SyncModal({
         {/* Tab 1: Cloud Vault Form */}
         {tab === "cloud" && (
           <div className="space-y-4 text-xs">
-            <p className="text-slate-400">
+            <p className="text-muted">
               Synchronize your ledger with zero-knowledge end-to-end encryption. The cloud database
               (Turso) only receives ciphertext. Your encryption key is derived locally and never sent over the network.
             </p>
 
             <div>
-              <label className="block text-slate-300 font-medium mb-1">Vault Identifier</label>
+              <label className="block text-ink font-medium mb-1">Vault Identifier</label>
               <input
                 type="text"
                 placeholder="e.g. personal-budget-vault"
                 value={vaultId}
                 onChange={(e) => setVaultId(e.target.value)}
-                className="w-full px-3 py-2 rounded-lg bg-slate-800 border border-slate-700 text-slate-100 focus:outline-none focus:border-indigo-500"
+                className="w-full px-3 py-2 rounded-lg bg-inset border border-line text-ink focus:outline-none focus:border-accent"
               />
             </div>
 
             <div>
-              <label className="block text-slate-300 font-medium mb-1">
+              <label className="block text-ink font-medium mb-1">
                 Vault Secret Passphrase
               </label>
               <input
@@ -237,7 +251,7 @@ export function SyncModal({
                 placeholder="Enter secret passphrase"
                 value={passphrase}
                 onChange={(e) => setPassphrase(e.target.value)}
-                className="w-full px-3 py-2 rounded-lg bg-slate-800 border border-slate-700 text-slate-100 focus:outline-none focus:border-indigo-500"
+                className="w-full px-3 py-2 rounded-lg bg-inset border border-line text-ink focus:outline-none focus:border-accent"
               />
             </div>
 
@@ -245,7 +259,7 @@ export function SyncModal({
               <button
                 onClick={handlePushToCloud}
                 disabled={isLoading}
-                className="flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white font-semibold transition"
+                className="flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-accent hover:opacity-90 disabled:opacity-50 text-on-accent font-semibold transition"
               >
                 <Upload className="w-3.5 h-3.5" />
                 <span>{isLoading ? "Encrypting..." : "Push (Upload)"}</span>
@@ -254,7 +268,7 @@ export function SyncModal({
               <button
                 onClick={() => handlePullFromCloud(false)}
                 disabled={isLoading}
-                className="flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-slate-200 font-semibold border border-slate-700 transition"
+                className="flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-inset hover:bg-surface disabled:opacity-50 text-ink font-semibold border border-line transition"
               >
                 <Download className="w-3.5 h-3.5" />
                 <span>{isLoading ? "Decrypting..." : "Pull (Download)"}</span>
@@ -262,15 +276,15 @@ export function SyncModal({
             </div>
 
             {pullConflict && (
-              <div className="rounded-xl border border-amber-700/60 bg-amber-950/30 p-3 space-y-2">
-                <p className="text-amber-200">
+              <div className="space-y-2 rounded-xl border border-warning bg-warning-soft p-3">
+                <p className="text-ink">
                   This device has ledger edits that were never synchronized. Pulling now
                   would replace them. Export a backup from the header first, then confirm.
                 </p>
                 <button
                   onClick={() => handlePullFromCloud(true)}
                   disabled={isLoading}
-                  className="px-3 py-2 rounded-lg bg-amber-600 hover:bg-amber-500 disabled:opacity-50 text-white font-semibold"
+                  className="min-h-11 rounded-lg bg-accent px-3 py-2 font-semibold text-on-accent disabled:opacity-50"
                 >
                   Replace local ledger with the vault
                 </button>
@@ -282,23 +296,23 @@ export function SyncModal({
         {/* Tab 2: CLI Instructions */}
         {tab === "cli" && (
           <div className="space-y-3 text-xs">
-            <p className="text-slate-400">
+            <p className="text-muted">
               Run these commands in your local Python checkout to connect your terminal ledger to this Web UI:
             </p>
 
-            <div className="rounded-xl bg-slate-950 p-3 font-mono text-[11px] text-indigo-300 space-y-2 border border-slate-800 overflow-x-auto">
-              <div className="text-slate-500"># 1. Pair this vault (prompts for the passphrase; never put it in argv):</div>
+            <div className="rounded-xl bg-inset p-3 font-mono text-[11px] text-accent space-y-2 border border-line overflow-x-auto">
+              <div className="text-muted"># 1. Pair this vault (prompts for the passphrase; never put it in argv):</div>
               <div>python -m monte_carlo_ledger sync init {vaultId}</div>
-              <div className="text-slate-500">#    or, in unattended scripts:</div>
+              <div className="text-muted">#    or, in unattended scripts:</div>
               <div>MC_LEDGER_SYNC_PASSPHRASE=... python -m monte_carlo_ledger sync init {vaultId}</div>
 
-              <div className="text-slate-500 pt-1"># 2. Push local SQLite ledger to cloud vault:</div>
+              <div className="text-muted pt-1"># 2. Push local SQLite ledger to cloud vault:</div>
               <div>python -m monte_carlo_ledger sync push</div>
 
-              <div className="text-slate-500 pt-1"># 3. Pull latest changes into local SQLite:</div>
+              <div className="text-muted pt-1"># 3. Pull latest changes into local SQLite:</div>
               <div>python -m monte_carlo_ledger sync pull</div>
 
-              <div className="text-slate-500 pt-1"># Existing vaults are joined, not overwritten; the Web UI and CLI share one KDF salt.</div>
+              <div className="text-muted pt-1"># Existing vaults are joined, not overwritten; the Web UI and CLI share one KDF salt.</div>
             </div>
           </div>
         )}
@@ -306,14 +320,14 @@ export function SyncModal({
         {/* Tab 3: Local JSON File */}
         {tab === "file" && (
           <div className="space-y-4 text-xs">
-            <p className="text-slate-400">
+            <p className="text-muted">
               Import or export an unencrypted JSON backup directly to disk without using any network connection:
             </p>
 
-            <label className="flex flex-col items-center justify-center border-2 border-dashed border-slate-700 hover:border-cyan-500/50 rounded-xl p-6 cursor-pointer bg-slate-800/20 hover:bg-slate-800/40 transition">
-              <Upload className="w-6 h-6 text-slate-400 mb-2" />
-              <span className="font-semibold text-slate-300">Click to select backup JSON file</span>
-              <span className="text-[11px] text-slate-500 mt-1">Accepts canonical .json snapshot</span>
+            <label className="flex flex-col items-center justify-center border-2 border-dashed border-line hover:border-accent rounded-xl p-6 cursor-pointer bg-inset hover:bg-inset transition">
+              <Upload className="w-6 h-6 text-muted mb-2" />
+              <span className="font-semibold text-ink">Click to select backup JSON file</span>
+              <span className="text-[11px] text-muted mt-1">Accepts canonical .json snapshot</span>
               <input type="file" accept=".json" onChange={handleImportFile} className="hidden" />
             </label>
           </div>
