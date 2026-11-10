@@ -53,19 +53,20 @@ function overflowState(): LedgerState {
 }
 
 test.describe("dashboard loads with synthetic sample data", () => {
-  test("hero renders canonical safe-to-spend, not an error screen", async ({ page }) => {
+  test("home explains the cautious amount, not an error screen", async ({ page }) => {
     await page.goto("/");
     await expect(page.getByText("What these numbers mean")).toBeVisible();
     await expect(page.getByText("Safe to Spend (P10)")).toBeVisible();
     await expect(page.getByText("Calculation Failed")).toHaveCount(0);
-    // The hero must show a real dollar figure, not a placeholder or zero-fill.
     await expect(page.getByText(/\$[\d,]/).first()).toBeVisible();
+    await expect(page.getByText(/Demo data — not your finances/)).toBeVisible();
   });
 
-  test("decision studio shows the fragility-impact panel (what-if wired)", async ({ page }) => {
+  test("plan shows a purchase comparison from the engine", async ({ page }) => {
     await page.goto("/");
-    await expect(page.getByText("Impact On Your Fragility Floor")).toBeVisible();
-    await expect(page.getByText("Overdraft Risk:")).toBeVisible();
+    await page.getByRole("button", { name: "Plan", exact: true }).click();
+    await expect(page.getByText("How this changes the plan")).toBeVisible();
+    await expect(page.getByText("Chance of running short").first()).toBeVisible();
   });
 });
 
@@ -98,33 +99,34 @@ test.describe("fail-closed surfaces", () => {
   });
 });
 
-test.describe("decision studio journeys", () => {
+test.describe("decision journeys", () => {
   test("purchase scenario is labelled as a model estimate, never a guarantee", async ({ page }) => {
     await page.goto("/");
+    await page.getByRole("button", { name: "Plan", exact: true }).click();
     await expect(page.getByText(/^Purchase Amount:/)).toBeVisible();
     await page.locator('input[type="range"]').first().press("End");
     await expect(page.getByText(/^Purchase Amount: \$2,500/)).toBeVisible();
-    // The old copy claimed the purchase was safe "without risking negative balance".
     await expect(page.getByText(/without risking negative balance/i)).toHaveCount(0);
     await expect(page.getByText(/in this simulation/i).first()).toBeVisible();
-    await expect(page.getByText("Overdraft Risk:")).toBeVisible();
+    await expect(page.getByText("Chance of running short").first()).toBeVisible();
   });
 
   test("late paycheck tab computes payroll-variance impact", async ({ page }) => {
     await page.goto("/");
-    await page.getByRole("button", { name: /Late Paycheck/ }).click();
-    await expect(page.getByText("Fragility Under Payroll Variance")).toBeVisible();
-    await expect(page.getByText("Overdraft Risk:")).toBeVisible();
+    await page.getByRole("button", { name: "Plan", exact: true }).click();
+    await page.getByRole("tab", { name: /What if payday is late/ }).click();
+    await expect(page.getByText("If that paycheck arrives late")).toBeVisible();
+    await expect(page.getByText("Chance of running short").first()).toBeVisible();
     await expect(page.getByText("Calculation Failed")).toHaveCount(0);
   });
 
   test("debt tab computes payoff and states the cash-flow caveat", async ({ page }) => {
     await page.goto("/");
-    await page.getByRole("button", { name: /Debt Snowball vs Avalanche/ }).click();
+    await page.getByRole("button", { name: "Plan", exact: true }).click();
+    await page.getByRole("tab", { name: /How do I pay off debt/ }).click();
     await expect(page.getByText("Payoff Strategy")).toBeVisible();
     await expect(page.getByText("Months to Payoff")).toBeVisible();
     await expect(page.getByText("Total Interest Paid")).toBeVisible();
-    // Amortization must never be presented as affordability.
     await expect(
       page.getByText(/not automatically included in the cash-flow forecast/i)
     ).toBeVisible();
@@ -137,7 +139,8 @@ test.describe("decision studio journeys", () => {
 test.describe("ledger editing", () => {
   test("adding a recurring bill updates the ledger and keeps a valid forecast", async ({ page }) => {
     await page.goto("/");
-    await expect(page.getByText("Safe to Spend (P10)")).toBeVisible();
+    await page.getByRole("button", { name: "Bills", exact: true }).click();
+    await expect(page.getByText("Safe to Spend (P10)")).toHaveCount(0);
 
     const billForm = page
       .locator("form")
@@ -148,7 +151,8 @@ test.describe("ledger editing", () => {
     await numbers.nth(1).fill("12");
     await billForm.getByRole("button", { name: /Add Recurring Bill/ }).click();
 
-    await expect(page.getByText("Demo Gym")).toBeVisible();
+    await expect(page.getByRole("button", { name: "Remove Demo Gym" })).toBeVisible();
+    await page.getByRole("button", { name: "Home", exact: true }).click();
     await expect(page.getByText("Safe to Spend (P10)")).toBeVisible();
     await expect(page.getByText("Calculation Failed")).toHaveCount(0);
   });
@@ -168,9 +172,10 @@ test.describe("local-first privacy", () => {
 
     await page.goto("/");
     await expect(page.getByText("Safe to Spend (P10)")).toBeVisible();
-    await page.getByRole("button", { name: /Late Paycheck/ }).click();
-    await expect(page.getByText("Fragility Under Payroll Variance")).toBeVisible();
-    await page.getByRole("button", { name: /Debt Snowball vs Avalanche/ }).click();
+    await page.getByRole("button", { name: "Plan", exact: true }).click();
+    await page.getByRole("tab", { name: /What if payday is late/ }).click();
+    await expect(page.getByText("If that paycheck arrives late")).toBeVisible();
+    await page.getByRole("tab", { name: /How do I pay off debt/ }).click();
     await expect(page.getByText("Payoff Strategy")).toBeVisible();
 
     expect(remote, `unexpected remote requests: ${remote.join(", ")}`).toEqual([]);
@@ -189,5 +194,82 @@ test.describe("local-first privacy", () => {
     // Opening the optional sync surface must not by itself send the ledger anywhere.
     expect(vaultCalls).toEqual([]);
     await expect(page.getByText("Safe to Spend (P10)")).toBeVisible();
+  });
+});
+
+test.describe("beginner financial journey", () => {
+  test("own numbers, spending, bills, a decision, and the forecast stay consistent", async ({ page }) => {
+    await page.goto("/");
+    await page.getByRole("button", { name: "Enter my own numbers" }).click();
+    await page.getByLabel("Money you have now ($)").fill("1800");
+    await page.getByLabel("Paycheck name").fill("Job");
+    await page.getByLabel("Take-home amount ($)").fill("2400");
+    await page.getByLabel("A regular bill").fill("Rent");
+    await page.getByLabel("Bill amount ($)").fill("900");
+    await page.getByLabel("Due day").fill("1");
+    await page.getByRole("button", { name: "Save and show my plan" }).click();
+
+    await expect(page.getByText("Demo data — not your finances.")).toHaveCount(0);
+    await expect(page.getByText("$1,800.00").first()).toBeVisible();
+    await expect(page.getByText("Calculation Failed")).toHaveCount(0);
+    await expect(page.getByText(/not a guarantee/i).first()).toBeVisible();
+
+    await page.getByRole("button", { name: "Money", exact: true }).click();
+    await page.getByRole("textbox", { name: "Amount ($)", exact: true }).fill("80");
+    await page.getByLabel("Category").fill("Groceries");
+    await page.getByRole("button", { name: "Record this" }).click();
+    await expect(page.getByText("Groceries").first()).toBeVisible();
+    await expect(page.getByText(/This matches the sum of/)).toBeVisible();
+
+    await page.getByRole("button", { name: "Budget", exact: true }).click();
+    await expect(page.getByText("Groceries").first()).toBeVisible();
+    await expect(page.getByText("$80.00").first()).toBeVisible();
+    await page.getByLabel("Monthly spending target ($)").fill("200");
+    await page.getByRole("button", { name: "Save target" }).click();
+    await expect(page.getByText(/\$120\.00 under the target/)).toBeVisible();
+    await expect(page.getByText(/not part of the forecast/i)).toBeVisible();
+
+    await page.getByRole("button", { name: "Bills", exact: true }).click();
+    await expect(page.getByRole("button", { name: "Remove Rent" })).toBeVisible();
+    await expect(page.getByText(/you marked this as leaving on its own/i)).toHaveCount(0);
+
+    await page.getByRole("button", { name: "Plan", exact: true }).click();
+    await expect(page.getByText("How this changes the plan")).toBeVisible();
+    await page.getByRole("tab", { name: /What if payday is late/ }).click();
+    await expect(page.getByText("If that paycheck arrives late")).toBeVisible();
+
+    await page.getByRole("button", { name: "Future", exact: true }).click();
+    await expect(page.getByText(/median, not an average/i).first()).toBeVisible();
+    await expect(page.getByText("More difficult low point")).toBeVisible();
+    await expect(page.getByText("Calculation Failed")).toHaveCount(0);
+
+    await page.getByRole("button", { name: "Advanced", exact: true }).click();
+    await page.getByLabel("Seed").fill("7");
+    await page.getByRole("button", { name: "Update results" }).click();
+    await expect(page.getByText("7 / 500 / 90 days")).toBeVisible();
+    await expect(page.getByText("minimum_balance_p10 / p50 / p90")).toBeVisible();
+  });
+
+  test("sections fit the required viewports without horizontal overflow", async ({ page }) => {
+    await page.goto("/");
+    const sizes = [
+      [320, 568],
+      [375, 667],
+      [390, 844],
+      [768, 1024],
+      [1280, 800],
+      [1440, 900],
+    ] as const;
+    const sections = ["Home", "Money", "Budget", "Bills", "Plan", "Future", "Advanced"] as const;
+    for (const [width, height] of sizes) {
+      await page.setViewportSize({ width, height });
+      for (const name of sections) {
+        await page.getByRole("button", { name, exact: true }).click();
+        const overflow = await page.evaluate(
+          () => document.documentElement.scrollWidth - document.documentElement.clientWidth
+        );
+        expect(overflow, `${name} at ${width}x${height}`).toBeLessThanOrEqual(1);
+      }
+    }
   });
 });

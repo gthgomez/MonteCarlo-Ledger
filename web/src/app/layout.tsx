@@ -2,18 +2,18 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "MonteCarlo Ledger — Personal Cash Flow & Risk Engine",
-  description: "Free, zero-knowledge personal finance timeline and Monte Carlo risk forecast. Run scenarios locally or sync end-to-end encrypted with your CLI.",
+  title: "MonteCarlo — Understand your money",
+  description:
+    "A local-first plan for what you have, what is coming, and what a change might do. Forecasts stay on your device.",
 };
 
-export default function RootLayout({
-  children,
-}: {
-  children: React.ReactNode;
-}) {
+const themeBoot = `try{var t=localStorage.getItem("mc-theme");if(t==="dark"||t==="light")document.documentElement.setAttribute("data-theme",t);}catch(e){}`;
+
+export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en" className="dark">
-      <body className="bg-slate-950 text-slate-100 antialiased selection:bg-cyan-500/30 selection:text-cyan-200">
+    <html lang="en" suppressHydrationWarning>
+      <body>
+        <script dangerouslySetInnerHTML={{ __html: themeBoot }} />
         {children}
       </body>
     </html>
