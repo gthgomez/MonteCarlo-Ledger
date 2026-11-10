@@ -51,7 +51,7 @@ function Compare({
     ["Ending balance if the schedule is exact", base.endingBalanceCents, next.outcome.endingBalanceCents],
   ] as const;
   return (
-    <div className="rounded-xl border border-line bg-inset p-4">
+    <div className="min-w-0 rounded-xl border border-line bg-inset p-4">
       <h3 className="text-base font-semibold">{title}</h3>
       <div className="mt-3 overflow-x-auto">
         <table className="w-full text-left text-sm">
