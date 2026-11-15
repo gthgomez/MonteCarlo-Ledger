@@ -689,6 +689,11 @@ def read_ledger_view(start_date: str, end_date: str) -> Dict[str, Any]:
             "WHERE o.paid = 0 AND o.due_date < ?",
             (start_date,),
         ).fetchone()
+        liability_rows = conn.execute(
+            "SELECT id, name, balance_cents, apr_basis_points, min_payment_cents, "
+            "kind, min_payment_percent_bps, min_payment_floor_cents, due_day_of_month "
+            "FROM liabilities ORDER BY id"
+        ).fetchall()
         conn.execute("COMMIT")
 
     incomes = [
@@ -744,11 +749,31 @@ def read_ledger_view(start_date: str, end_date: str) -> Dict[str, Any]:
     ]
     ledger_balance = _to_int_strict(ledger_sum)
     stored_balance = _to_int_strict(stored_row["value"]) if stored_row else 0
+    liabilities: List[Dict[str, Any]] = []
+    for row in liability_rows:
+        item: Dict[str, Any] = {
+            "id": row["id"],
+            "name": row["name"],
+            "balance_cents": _to_int_strict(row["balance_cents"]),
+            "apr_basis_points": _to_int_strict(row["apr_basis_points"]),
+            "min_payment_cents": _to_int_strict(row["min_payment_cents"]),
+            "kind": row["kind"] or "installment",
+        }
+        percent_bps = _to_int_strict(row["min_payment_percent_bps"])
+        floor_cents = _to_int_strict(row["min_payment_floor_cents"])
+        if percent_bps:
+            item["min_payment_percent_bps"] = percent_bps
+        if floor_cents:
+            item["min_payment_floor_cents"] = floor_cents
+        if row["due_day_of_month"] is not None:
+            item["due_day_of_month"] = int(row["due_day_of_month"])
+        liabilities.append(item)
     return {
         "incomes": incomes,
         "payments": payments,
         "occurrences": occurrences,
         "future_transactions": future_transactions,
+        "liabilities": liabilities,
         "ledger_balance_cents": ledger_balance,
         "starting_balance_cents": _to_int_strict(starting_sum),
         "stored_balance_cents": stored_balance,

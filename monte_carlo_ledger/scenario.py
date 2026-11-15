@@ -209,6 +209,13 @@ def build_scenario(
         "horizon_days": horizon_days,
         "events": events,
     }
+    # Contract 2.0 debt is independent of forecast/risk: attach persisted liabilities so
+    # CLI/API/Web share one evaluation. Omit the key when empty (Web parity); never invent
+    # debt rows. Callers that want min payments in cash-flow must add ordinary events.
+    liabilities = ledger.get("liabilities") or []
+    if liabilities:
+        scenario["liabilities"] = [dict(item) for item in liabilities]
+        scenario["debt_strategy"] = "snowball"
     if include_simulation is not None:
         scenario["simulation"] = include_simulation
     return scenario
