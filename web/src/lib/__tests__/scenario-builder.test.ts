@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildScenarioFromLedger } from "../scenario-builder";
+import { buildScenarioFromLedger, planningMinimumPaymentCents } from "../scenario-builder";
 import { LedgerState } from "../types";
 
 function emptyState(overrides: Partial<LedgerState> = {}): LedgerState {
@@ -145,6 +145,22 @@ test("liabilities are mapped through with contract-2.0 fields", () => {
   const cardOutflows = scenario.events.filter((event: { name: string }) => event.name === "Credit Card");
   assert.equal(cardOutflows.length, 3);
   assert.ok(cardOutflows.every((event: { amount_cents: number }) => event.amount_cents === -3500));
+});
+
+test("revolving planning minimum uses percent/floor, not min_payment_cents", () => {
+  assert.equal(
+    planningMinimumPaymentCents({
+      id: "card",
+      name: "Card",
+      balance_cents: 100_000,
+      apr_basis_points: 2199,
+      min_payment_cents: 6_500,
+      kind: "revolving",
+      min_payment_percent_bps: 200,
+      min_payment_floor_cents: 3_500,
+    }),
+    3_500
+  );
 });
 
 test("liability minimums lower the cash plan versus a twin without debt", () => {

@@ -274,7 +274,8 @@ export default function Home() {
     plannedEndingCents: slice.plannedEndingCents,
     windowDays: 30,
     safeSpendCents: outcome.safeSpendCents,
-    difficultLowCents: outcome.minimumBalanceP10Cents,
+    // Same trough that produced safe-to-spend (quantile + reserve), not a hard-coded P10 field.
+    difficultLowCents: outcome.safeSpendCents + outcome.reserveCents,
     reserveCents: outcome.reserveCents,
     quantileNum: outcome.quantileNum,
     quantileDen: outcome.quantileDen,

@@ -21,8 +21,17 @@ import {
   type EvalResult,
   type ModelOutcome,
 } from "@/lib/scenarios";
-import { type LedgerState } from "@/lib/types";
+import { planningMinimumPaymentCents } from "@/lib/scenario-builder";
+import { type LedgerState, type LiabilityItem } from "@/lib/types";
 import { Button, Explain, fieldClass, Notice, Panel } from "./ui";
+
+function debtMinimumLabel(debt: LiabilityItem): string {
+  const planned = planningMinimumPaymentCents(debt);
+  if ((debt.kind ?? "installment") === "revolving") {
+    return `modeled min ${formatMoney(planned)}`;
+  }
+  return `min ${formatMoney(planned)}`;
+}
 
 type Question = "purchase" | "delay" | "bill" | "aside" | "debt";
 
@@ -436,8 +445,8 @@ export function PlanView({
               {state.liabilities.map((debt) => (
                 <li key={debt.id} className="flex flex-wrap items-center justify-between gap-2 py-2 text-sm">
                   <span>
-                    {debt.name} · owe {formatMoney(debt.balance_cents)} · {(debt.apr_basis_points / 100).toFixed(2)}% · min{" "}
-                    {formatMoney(debt.min_payment_cents)}
+                    {debt.name} · owe {formatMoney(debt.balance_cents)} · {(debt.apr_basis_points / 100).toFixed(2)}% ·{" "}
+                    {debtMinimumLabel(debt)}
                   </span>
                   <Button type="button" variant="quiet" onClick={() => onEdit(removeLiability(state, debt.id))}>
                     Remove {debt.name}

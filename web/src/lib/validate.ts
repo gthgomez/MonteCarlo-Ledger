@@ -262,6 +262,23 @@ export function parseLedgerState(raw: unknown): ParseResult {
     if (liability.kind !== undefined && liability.kind !== "installment" && liability.kind !== "revolving") {
       return fail(`${path}.kind`, "must be installment or revolving");
     }
+    if (
+      liability.min_payment_percent_bps !== undefined &&
+      (!isSafeInt(liability.min_payment_percent_bps) || liability.min_payment_percent_bps < 0)
+    ) {
+      return fail(`${path}.min_payment_percent_bps`, "must be non-negative integer basis points when present");
+    }
+    if (
+      liability.min_payment_floor_cents !== undefined &&
+      (!isSafeInt(liability.min_payment_floor_cents) || liability.min_payment_floor_cents < 0)
+    ) {
+      return fail(`${path}.min_payment_floor_cents`, "must be non-negative integer cents when present");
+    }
+    if (liability.due_day_of_month !== undefined) {
+      if (!isSafeInt(liability.due_day_of_month) || liability.due_day_of_month < 1 || liability.due_day_of_month > 31) {
+        return fail(`${path}.due_day_of_month`, "must be an integer 1..31 when present");
+      }
+    }
   }
 
   return {

@@ -234,3 +234,38 @@ test("rejects liability amounts that are not non-negative integers", () => {
   );
   assert.equal(result.ok, false);
 });
+
+test("rejects malformed optional revolving liability fields", () => {
+  const badPercent = parseLedgerState(
+    base({
+      liabilities: [
+        {
+          id: "l1",
+          name: "Card",
+          balance_cents: 1000,
+          apr_basis_points: 1999,
+          min_payment_cents: 100,
+          kind: "revolving",
+          min_payment_percent_bps: 1.5,
+        },
+      ],
+    })
+  );
+  assert.equal(badPercent.ok, false);
+
+  const badDue = parseLedgerState(
+    base({
+      liabilities: [
+        {
+          id: "l1",
+          name: "Card",
+          balance_cents: 1000,
+          apr_basis_points: 1999,
+          min_payment_cents: 100,
+          due_day_of_month: 0,
+        },
+      ],
+    })
+  );
+  assert.equal(badDue.ok, false);
+});
