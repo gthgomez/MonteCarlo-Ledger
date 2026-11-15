@@ -1,5 +1,5 @@
 {
-  "description": "Reproducible cross-surface household: synthetic income, bills, liabilities and opening balances. Oracle values come from Contract 2.0 run_scenario on the shared scenario (seed-bound). Liabilities affect the debt block only, not forecast/risk.",
+  "description": "Reproducible cross-surface household: synthetic income, bills, liabilities and opening balances. Adapters attach liability minimums as ordinary cash events and keep the Contract 2.0 debt amortization block. Oracle values come from Contract 2.0 run_scenario on the shared scenario (seed-bound).",
   "as_of": "2026-11-15",
   "horizon_days": 90,
   "simulation": {
@@ -213,25 +213,25 @@
     "bill_occurrences": []
   },
   "oracle": {
-    "safe_to_spend_cents": 474400,
+    "safe_to_spend_cents": 445900,
     "overdraft_ppm": 0,
-    "minimum_balance_p10_cents": 474400,
-    "minimum_balance_p50_cents": 474400,
-    "projected_low_cents": 474400,
+    "minimum_balance_p10_cents": 445900,
+    "minimum_balance_p50_cents": 445900,
+    "projected_low_cents": 445900,
     "projected_low_date": "2026-11-20",
-    "ending_balance_cents": 1414100,
+    "ending_balance_cents": 1317500,
     "first_negative_date": null,
     "debt_months_to_payoff": 163,
     "debt_total_interest_cents": 430891,
     "starting_balance_cents": 482300,
-    "event_count": 15,
-    "seed": 7,
-    "runs": 500,
-    "horizon_days": 90,
-    "p10_label": "Safe to Spend (P10)",
     "cash_minus_entered_debt_cents": -322700,
     "recorded_spend_this_month_cents": 12700,
-    "scheduled_outflow_in_horizon_cents": 508200
+    "scheduled_outflow_in_horizon_cents": 604800,
+    "p10_label": "Safe to Spend (P10)",
+    "event_count": 21,
+    "seed": 7,
+    "runs": 500,
+    "horizon_days": 90
   },
   "surfaces": {
     "home": [

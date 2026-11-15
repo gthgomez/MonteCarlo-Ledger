@@ -93,7 +93,7 @@ test("web surfaces share one seed-bound evaluation against the oracle", () => {
   assert.equal(planDebt.months_to_payoff, oracle.debt_months_to_payoff);
 });
 
-test("legacy snapshot without liabilities still loads and keeps cash metrics", () => {
+test("legacy snapshot without liabilities still loads and excludes debt cash mins", () => {
   const parsed = parseLedgerState(doc.legacy_snapshot_without_liabilities);
   assert.equal(parsed.ok, true);
   if (!parsed.ok) return;
@@ -106,10 +106,14 @@ test("legacy snapshot without liabilities still loads and keeps cash metrics", (
     doc.simulation
   );
   assert.equal("liabilities" in scenario, false);
+  assert.equal(
+    scenario.events.some((event: { name: string }) => event.name === "Auto Loan" || event.name === "Credit Card"),
+    false
+  );
   const result = runScenario(scenario);
   assert.equal("debt" in result, false);
-  assert.equal(result.risk.safe_to_spend_cents, doc.oracle.safe_to_spend_cents);
-  assert.equal(result.forecast.ending_balance_cents, doc.oracle.ending_balance_cents);
+  assert.ok(result.risk.safe_to_spend_cents > doc.oracle.safe_to_spend_cents);
+  assert.ok(result.forecast.ending_balance_cents > doc.oracle.ending_balance_cents);
 });
 
 test("import then restart from JSON keeps liabilities and P10", () => {

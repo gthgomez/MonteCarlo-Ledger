@@ -1,4 +1,5 @@
-import { LedgerState } from "./types";
+import { roundHalfAway, toSafeNumber } from "../contract/money";
+import { LedgerState, LiabilityItem, PaymentItem } from "./types";
 
 function addDays(iso: string, days: number): string {
   const [y, m, d] = iso.split("-").map(Number);
@@ -178,6 +179,11 @@ export function buildScenarioFromLedger(
       name: tx.description || tx.category || "Planned transaction",
     });
   }
+
+  // 4. Entered debt minimums become ordinary cash outflows (Contract callers add events;
+  // the engine still does not auto-inject). Skip when a monthly bill already matches.
+  events.push(...liabilityMinPaymentEvents(state.liabilities ?? [], state.payments, asOf, windowEnd));
+
   const futureOutflow = state.transactions
     .filter((tx) => tx.date > asOf)
     .reduce((sum, tx) => sum + tx.amount_cents, 0);
@@ -221,4 +227,62 @@ export function buildScenarioFromLedger(
   }
 
   return scenario;
+}
+
+/** Opening-balance planning minimum (no interest); matches Contract revolving/installment rules. */
+export function planningMinimumPaymentCents(liability: LiabilityItem): number {
+  const balance = liability.balance_cents;
+  if (!Number.isSafeInteger(balance) || balance <= 0) return 0;
+  if ((liability.kind ?? "installment") !== "revolving") {
+    return Math.min(liability.min_payment_cents, balance);
+  }
+  const percent = toSafeNumber(
+    roundHalfAway(BigInt(balance) * BigInt(liability.min_payment_percent_bps ?? 0), 10_000n)
+  );
+  const floor = liability.min_payment_floor_cents ?? 0;
+  return Math.min(Math.max(percent, floor), balance);
+}
+
+function liabilityMinPaymentEvents(
+  liabilities: LiabilityItem[],
+  payments: PaymentItem[],
+  asOf: string,
+  windowEnd: string
+): any[] {
+  const covered = new Set<string>();
+  for (const payment of payments) {
+    if (payment.recurrence !== "Monthly" || !payment.due_day) continue;
+    covered.add(`${payment.name.toLowerCase()}::${payment.amount_cents}::${payment.due_day}`);
+  }
+
+  const [startYear, startMonth] = asOf.split("-").map(Number);
+  const [endYear, endMonth] = windowEnd.split("-").map(Number);
+  const totalMonths = (endYear - startYear) * 12 + (endMonth - startMonth) + 2;
+  const events: any[] = [];
+
+  for (let i = 0; i < totalMonths; i++) {
+    const curM = startMonth + i;
+    const curY = startYear + Math.floor((curM - 1) / 12);
+    const actualM = ((curM - 1) % 12) + 1;
+    const maxD = new Date(Date.UTC(curY, actualM, 0)).getUTCDate();
+
+    for (const liability of liabilities) {
+      const amount = planningMinimumPaymentCents(liability);
+      if (amount <= 0) continue;
+      let dueDay = liability.due_day_of_month ?? 1;
+      if (!Number.isInteger(dueDay) || dueDay < 1 || dueDay > 31) dueDay = 1;
+      const d = Math.min(dueDay, maxD);
+      const dueIso = `${curY}-${String(actualM).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+      if (!(dueIso >= asOf && dueIso < windowEnd)) continue;
+      const name = liability.name || "Debt payment";
+      if (covered.has(`${name.toLowerCase()}::${amount}::${dueDay}`)) continue;
+      events.push({
+        date: dueIso,
+        amount_cents: -amount,
+        type: "expense",
+        name,
+      });
+    }
+  }
+  return events;
 }

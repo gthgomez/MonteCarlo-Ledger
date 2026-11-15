@@ -12,7 +12,7 @@ from datetime import date, timedelta
 from typing import Any, Dict, List, Optional
 
 from . import budget_engine, db_manager
-from .contract import CONTRACT_VERSION, ContractError, recurrence_dates
+from .contract import CONTRACT_VERSION, ContractError, recurrence_dates, round_half_away
 
 _INCOME_FREQUENCY = {
     "Weekly": "weekly",
@@ -158,6 +158,93 @@ def _future_transaction_events(
     return events
 
 
+def _planning_minimum_payment_cents(liability: Dict[str, Any]) -> int:
+    """Cash-plan minimum for one liability (opening balance; no interest invented).
+
+    Matches Contract 2.0 ``minimum_payment`` on the current balance so everyday
+    Safe-to-Spend includes debt outflows without changing engine injection rules.
+    """
+    balance = int(liability.get("balance_cents") or 0)
+    if balance <= 0:
+        return 0
+    if liability.get("kind", "installment") != "revolving":
+        return min(int(liability.get("min_payment_cents") or 0), balance)
+    percent = round_half_away(
+        balance * int(liability.get("min_payment_percent_bps") or 0), 10_000
+    )
+    floor = int(liability.get("min_payment_floor_cents") or 0)
+    return min(max(percent, floor), balance)
+
+
+def _liability_min_payment_events(
+    liabilities: List[Dict[str, Any]],
+    payments: List[Any],
+    as_of: date,
+    window_end: date,
+) -> List[Dict[str, Any]]:
+    """Emit ordinary monthly expense events for entered debt minimums.
+
+    Skips a liability when a monthly ``payments`` row already matches name, amount,
+    and due-day (avoid double-counting a bill that already represents the payment).
+    """
+    covered: set[tuple[str, int, int]] = set()
+    for payment in payments:
+        if getattr(payment, "recurrence", None) != "Monthly":
+            continue
+        due_day = getattr(payment, "due_day", None)
+        if due_day is None:
+            continue
+        covered.add(
+            (
+                str(getattr(payment, "name", "")).casefold(),
+                int(getattr(payment, "amount")),
+                int(due_day),
+            )
+        )
+
+    events: List[Dict[str, Any]] = []
+    lo, hi = as_of.isoformat(), window_end.isoformat()
+    cursor_year, cursor_month = as_of.year, as_of.month
+    # Walk calendar months that can intersect [as_of, window_end).
+    for _ in range(horizon_month_span(as_of, window_end) + 2):
+        for liability in liabilities:
+            amount = _planning_minimum_payment_cents(liability)
+            if amount <= 0:
+                continue
+            due_day = int(liability.get("due_day_of_month") or 1)
+            if due_day < 1 or due_day > 31:
+                due_day = 1
+            last_day = calendar.monthrange(cursor_year, cursor_month)[1]
+            day = min(due_day, last_day)
+            due = date(cursor_year, cursor_month, day)
+            due_iso = due.isoformat()
+            if not (lo <= due_iso < hi):
+                continue
+            name = str(liability.get("name") or "Debt payment")
+            if (name.casefold(), amount, due_day) in covered:
+                continue
+            events.append(
+                {
+                    "date": due_iso,
+                    "amount_cents": -amount,
+                    "type": "expense",
+                    "name": name,
+                }
+            )
+        if cursor_month == 12:
+            cursor_year += 1
+            cursor_month = 1
+        else:
+            cursor_month += 1
+        if date(cursor_year, cursor_month, 1) >= window_end:
+            break
+    return events
+
+
+def horizon_month_span(as_of: date, window_end: date) -> int:
+    return (window_end.year - as_of.year) * 12 + (window_end.month - as_of.month)
+
+
 def _bill_events_readonly(as_of: date, window_end: date) -> List[Dict[str, Any]]:
     """Standalone readonly projection (opens its own consistent view)."""
     view = db_manager.read_ledger_view(as_of.isoformat(), window_end.isoformat())
@@ -195,10 +282,12 @@ def build_scenario(
         if not read_only:
             db_manager.sync_bill_occurrences(as_of, window_end.isoformat())
         ledger = db_manager.read_ledger_view(as_of, window_end.isoformat())
+    liabilities = ledger.get("liabilities") or []
     events = (
         _bill_events_from(ledger["payments"], ledger["occurrences"], start, window_end)
         + _income_events_from(ledger["incomes"], start, window_end)
         + _future_transaction_events(ledger["future_transactions"], start, window_end)
+        + _liability_min_payment_events(liabilities, ledger["payments"], start, window_end)
     )
     starting_balance = ledger["starting_balance_cents"]
     scenario: Dict[str, Any] = {
@@ -209,10 +298,9 @@ def build_scenario(
         "horizon_days": horizon_days,
         "events": events,
     }
-    # Contract 2.0 debt is independent of forecast/risk: attach persisted liabilities so
-    # CLI/API/Web share one evaluation. Omit the key when empty (Web parity); never invent
-    # debt rows. Callers that want min payments in cash-flow must add ordinary events.
-    liabilities = ledger.get("liabilities") or []
+    # Contract 2.0 keeps amortization in the debt block; adapters also add ordinary
+    # minimum-payment expense events so everyday Safe-to-Spend includes entered debts.
+    # Omit the liabilities key when empty (Web/legacy parity); never invent debt rows.
     if liabilities:
         scenario["liabilities"] = [dict(item) for item in liabilities]
         scenario["debt_strategy"] = "snowball"

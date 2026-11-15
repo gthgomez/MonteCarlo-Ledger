@@ -141,6 +141,44 @@ test("liabilities are mapped through with contract-2.0 fields", () => {
       due_day_of_month: 12,
     },
   ]);
+  // Revolving planning min = max(2% of 100000, 3500) = 3500 on the 12th each month.
+  const cardOutflows = scenario.events.filter((event: { name: string }) => event.name === "Credit Card");
+  assert.equal(cardOutflows.length, 3);
+  assert.ok(cardOutflows.every((event: { amount_cents: number }) => event.amount_cents === -3500));
+});
+
+test("liability minimums lower the cash plan versus a twin without debt", () => {
+  const base = emptyState({
+    current_balance_cents: 100_000,
+    transactions: [
+      {
+        id: "tx-1",
+        amount_cents: 100_000,
+        category: "System",
+        type: "Adjustment",
+        date: "2026-11-01",
+        description: "Opening",
+      },
+    ],
+  });
+  const withDebt = emptyState({
+    ...base,
+    liabilities: [
+      {
+        id: "loan",
+        name: "Auto Loan",
+        balance_cents: 500_000,
+        apr_basis_points: 599,
+        min_payment_cents: 30_000,
+        kind: "installment",
+        due_day_of_month: 5,
+      },
+    ],
+  });
+  const without = buildScenarioFromLedger(base, "2026-11-01", 60);
+  const withMins = buildScenarioFromLedger(withDebt, "2026-11-01", 60);
+  assert.equal(without.events.length, 0);
+  assert.ok(withMins.events.some((event: { amount_cents: number }) => event.amount_cents === -30_000));
 });
 
 test("monthly payment with due_day clamps to month end without drift", () => {

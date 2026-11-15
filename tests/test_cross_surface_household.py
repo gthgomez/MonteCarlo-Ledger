@@ -122,6 +122,8 @@ def test_python_bridge_matches_oracle_including_debt(restored_db, household):
     assert "liabilities" in built
     assert len(built["liabilities"]) == 2
     assert built["debt_strategy"] == "snowball"
+    assert any(event["name"] == "Auto Loan" and event["amount_cents"] < 0 for event in built["events"])
+    assert any(event["name"] == "Credit Card" and event["amount_cents"] < 0 for event in built["events"])
 
     result = run_scenario(built)
     oracle = household["oracle"]
@@ -190,11 +192,13 @@ def test_legacy_snapshot_without_liabilities_keeps_cash_path(tmp_path, household
         read_only=True,
     )
     assert "liabilities" not in built
+    assert not any(event["name"] in {"Credit Card", "Auto Loan"} for event in built["events"])
     result = run_scenario(built)
     assert "debt" not in result
     oracle = household["oracle"]
-    assert result["risk"]["safe_to_spend_cents"] == oracle["safe_to_spend_cents"]
-    assert result["forecast"]["ending_balance_cents"] == oracle["ending_balance_cents"]
+    # Without debt mins, cautious spend must be strictly higher than the with-debt oracle.
+    assert result["risk"]["safe_to_spend_cents"] > oracle["safe_to_spend_cents"]
+    assert result["forecast"]["ending_balance_cents"] > oracle["ending_balance_cents"]
 
 
 def test_export_import_restart_preserves_liabilities_and_oracle(restored_db, household, tmp_path, monkeypatch):

@@ -68,7 +68,7 @@ test.describe("cross-surface household rendered views", () => {
     await page.getByRole("tab", { name: /How do I pay off debt/ }).click();
     await expect(page.getByText("Months to Payoff")).toBeVisible();
     await expect(
-      page.getByText(/not automatically included in the cash-flow forecast/i)
+      page.getByText(/Minimum payments for debts you entered are already ordinary outflows/i)
     ).toBeVisible();
     await page.screenshot({
       path: path.join(evidenceDir, "plan-debt.png"),

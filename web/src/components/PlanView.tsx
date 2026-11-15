@@ -385,9 +385,9 @@ export function PlanView({
         {question === "debt" && (
           <div className="mt-4 space-y-4">
             <p className="text-sm text-muted">
-              Snowball pays the smallest balance first. Avalanche (APR) pays the highest interest rate first. Both are
-              payoff schedules. They are not automatically included in the cash-flow forecast, so a shorter payoff is
-              not by itself proof you can afford the extra payment.
+              Snowball pays the smallest balance first. Avalanche (APR) pays the highest interest rate first. Minimum
+              payments for debts you entered are already ordinary outflows on Home and Future. Extra payments and the
+              interest schedule here are not proof you can afford accelerating payoff.
             </p>
             {state.liabilities.length === 0 ? (
               <p className="text-sm text-muted">No debts are entered yet.</p>
