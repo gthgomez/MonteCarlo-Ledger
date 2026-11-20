@@ -30,7 +30,7 @@ def main():
     argv = sys.argv[1:]
     from . import commands
 
-    if argv and argv[0] in commands.COMMANDS:
+    if argv and (argv[0] in commands.COMMANDS or argv[0] in {"-h", "--help"}):
         raise SystemExit(commands.main(argv))
 
     db_manager.init_db()
