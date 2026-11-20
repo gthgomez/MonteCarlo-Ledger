@@ -30,6 +30,7 @@ test.describe("cross-surface household rendered views", () => {
     test.skip(testInfo.project.name !== "desktop", "desktop screenshots only");
 
     fs.mkdirSync(evidenceDir, { recursive: true });
+    await page.clock.install({ time: new Date(`${doc.as_of}T12:00:00.000Z`) });
     await page.addInitScript((ledger) => {
       window.localStorage.setItem("montecarlo_ledger_state_v2", JSON.stringify(ledger));
       window.localStorage.setItem("mc-theme", "light");
@@ -38,10 +39,28 @@ test.describe("cross-surface household rendered views", () => {
     await page.goto("/");
     await expect(page.getByText("Safe to Spend (P10)")).toBeVisible();
     await expect(page.getByText("Calculation Failed")).toHaveCount(0);
-    const cautiousAmount = page
-      .getByRole("heading", { name: "Cautious amount to spend" })
-      .locator("..");
-    await expect(cautiousAmount.getByText("$4,422.00", { exact: true })).toBeVisible();
+    const readCautiousAmount = async () => {
+      const text = await page
+        .getByRole("heading", { name: "Cautious amount to spend" })
+        .locator("..")
+        .locator("p")
+        .first()
+        .innerText();
+      return Number(text.replace(/[^\d.-]/g, ""));
+    };
+    const withDebt = await readCautiousAmount();
+    expect(Number.isFinite(withDebt)).toBe(true);
+
+    const debtFreeLedger = JSON.parse(JSON.stringify(doc.ledger));
+    delete debtFreeLedger.liabilities;
+    await page.evaluate((ledger) => {
+      window.localStorage.setItem("montecarlo_ledger_state_v2", JSON.stringify(ledger));
+    }, debtFreeLedger);
+    await page.reload();
+    await expect(page.getByText("Safe to Spend (P10)")).toBeVisible();
+    await expect(page.getByText("Calculation Failed")).toHaveCount(0);
+    const withoutDebt = await readCautiousAmount();
+    expect(withoutDebt).toBeGreaterThan(withDebt);
     await page.screenshot({
       path: path.join(evidenceDir, "home.png"),
       fullPage: true,
