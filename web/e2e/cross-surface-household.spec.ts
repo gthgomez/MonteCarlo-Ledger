@@ -38,6 +38,10 @@ test.describe("cross-surface household rendered views", () => {
     await page.goto("/");
     await expect(page.getByText("Safe to Spend (P10)")).toBeVisible();
     await expect(page.getByText("Calculation Failed")).toHaveCount(0);
+    const cautiousAmount = page
+      .getByRole("heading", { name: "Cautious amount to spend" })
+      .locator("..");
+    await expect(cautiousAmount.getByText("$4,422.00", { exact: true })).toBeVisible();
     await page.screenshot({
       path: path.join(evidenceDir, "home.png"),
       fullPage: true,
