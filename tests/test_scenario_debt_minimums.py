@@ -47,6 +47,28 @@ def test_overdue_current_month_minimum_is_due_on_the_as_of_date() -> None:
     ]
 
 
+def test_revolving_minimums_include_monthly_interest_before_future_due_dates() -> None:
+    debt = _liability(
+        id="card", name="Card", balance=100_000, minimum=0, due_day=10
+    )
+    debt.update(
+        apr_basis_points=12_000,
+        kind="revolving",
+        min_payment_percent_bps=1_000,
+        min_payment_floor_cents=0,
+    )
+
+    events = _liability_min_payment_events(
+        [debt], [], date(2027, 1, 1), date(2027, 4, 1)
+    )
+
+    assert [(event["date"], event["amount_cents"]) for event in events] == [
+        ("2027-01-10", -10_000),
+        ("2027-02-10", -9_900),
+        ("2027-03-10", -9_801),
+    ]
+
+
 def test_matching_monthly_bill_covers_the_debt_for_the_forecast_window() -> None:
     payment = SimpleNamespace(
         name="Small Loan", amount=3_000, recurrence="Monthly", due_day=15

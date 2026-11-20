@@ -174,6 +174,35 @@ test("an overdue current-month minimum is charged at the as-of date", () => {
   );
 });
 
+test("revolving minimums include monthly interest before future due dates", () => {
+  const state = emptyState({
+    liabilities: [
+      {
+        id: "card",
+        name: "Card",
+        balance_cents: 100_000,
+        apr_basis_points: 12_000,
+        min_payment_cents: 0,
+        kind: "revolving",
+        min_payment_percent_bps: 1_000,
+        min_payment_floor_cents: 0,
+        due_day_of_month: 10,
+      },
+    ],
+  });
+
+  const scenario = buildScenarioFromLedger(state, "2027-01-01", 90);
+
+  assert.deepEqual(
+    scenario.events.map((event: any) => [event.date, event.amount_cents]),
+    [
+      ["2027-01-10", -10_000],
+      ["2027-02-10", -9_900],
+      ["2027-03-10", -9_801],
+    ]
+  );
+});
+
 test("revolving planning minimum uses percent/floor, not min_payment_cents", () => {
   assert.equal(
     planningMinimumPaymentCents({

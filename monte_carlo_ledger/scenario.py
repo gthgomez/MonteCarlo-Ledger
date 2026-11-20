@@ -12,7 +12,13 @@ from datetime import date, timedelta
 from typing import Any, Dict, List, Optional
 
 from . import budget_engine, db_manager
-from .contract import CONTRACT_VERSION, ContractError, recurrence_dates, round_half_away
+from .contract import (
+    CONTRACT_VERSION,
+    ContractError,
+    checked_add,
+    recurrence_dates,
+    round_half_away,
+)
 
 _INCOME_FREQUENCY = {
     "Weekly": "weekly",
@@ -161,7 +167,7 @@ def _future_transaction_events(
 def _planning_minimum_payment_cents(
     liability: Dict[str, Any], balance_cents: Optional[int] = None
 ) -> int:
-    """Cash-plan minimum for one liability (no interest is invented).
+    """Cash-plan minimum for one liability at the supplied balance.
 
     Matches Contract 2.0 ``minimum_payment`` on the current balance so everyday
     Safe-to-Spend includes debt outflows without changing engine injection rules.
@@ -227,8 +233,16 @@ def _liability_min_payment_events(
 
         remaining_balance = int(liability.get("balance_cents") or 0)
         cursor_year, cursor_month = as_of.year, as_of.month
+        first_due = True
         # Walk calendar months that can intersect [as_of, window_end).
         for _ in range(horizon_month_span(as_of, window_end) + 2):
+            if not first_due:
+                interest = round_half_away(
+                    remaining_balance * int(liability.get("apr_basis_points") or 0),
+                    120_000,
+                )
+                remaining_balance = checked_add(remaining_balance, interest)
+            first_due = False
             amount = _planning_minimum_payment_cents(liability, remaining_balance)
             if amount <= 0:
                 break

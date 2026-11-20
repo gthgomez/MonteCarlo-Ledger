@@ -1,4 +1,4 @@
-import { roundHalfAway, toSafeNumber } from "../contract/money";
+import { checkedAdd, roundHalfAway, toSafeNumber } from "../contract/money";
 import { LedgerState, LiabilityItem, PaymentItem } from "./types";
 
 function addDays(iso: string, days: number): string {
@@ -286,13 +286,26 @@ function liabilityMinPaymentEvents(
     }
 
     let remainingBalance = liability.balance_cents;
+    let firstDue = true;
     for (let i = 0; i < totalMonths; i++) {
       const curM = startMonth + i;
       const curY = startYear + Math.floor((curM - 1) / 12);
       const actualM = ((curM - 1) % 12) + 1;
       const maxD = new Date(Date.UTC(curY, actualM, 0)).getUTCDate();
+      if (!firstDue) {
+        const interest = toSafeNumber(
+          roundHalfAway(
+            BigInt(remainingBalance) * BigInt(liability.apr_basis_points),
+            120_000n
+          )
+        );
+        remainingBalance = toSafeNumber(
+          checkedAdd(BigInt(remainingBalance), BigInt(interest))
+        );
+      }
+      firstDue = false;
       const amount = planningMinimumPaymentCents(liability, remainingBalance);
-      if (amount <= 0) continue;
+      if (amount <= 0) break;
       const d = Math.min(dueDay, maxD);
       const dueIso = `${curY}-${String(actualM).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
       // A minimum whose due day passed earlier this month is still owed. Project it
