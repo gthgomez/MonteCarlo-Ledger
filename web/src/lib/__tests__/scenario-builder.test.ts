@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { runScenario } from "../../contract/engine";
 import { buildScenarioFromLedger, planningMinimumPaymentCents } from "../scenario-builder";
 import { LedgerState } from "../types";
 
@@ -195,6 +196,160 @@ test("liability minimums lower the cash plan versus a twin without debt", () => 
   const withMins = buildScenarioFromLedger(withDebt, "2026-11-01", 60);
   assert.equal(without.events.length, 0);
   assert.ok(withMins.events.some((event: { amount_cents: number }) => event.amount_cents === -30_000));
+});
+
+test("installment cash payments shrink the balance and cap the final payment", () => {
+  const state = emptyState({
+    current_balance_cents: 100_000,
+    liabilities: [
+      {
+        id: "loan-1",
+        name: "Small Loan",
+        balance_cents: 8_000,
+        apr_basis_points: 0,
+        min_payment_cents: 3_000,
+        due_day_of_month: 15,
+      },
+    ],
+  });
+  const scenario = buildScenarioFromLedger(state, "2027-01-01", 90);
+  assert.deepEqual(
+    scenario.events.map((event: any) => [event.date, event.amount_cents]),
+    [
+      ["2027-01-15", -3_000],
+      ["2027-02-15", -3_000],
+      ["2027-03-15", -2_000],
+    ]
+  );
+});
+
+test("a recurring bill that covers a debt is not charged a second time", () => {
+  const state = emptyState({
+    payments: [
+      {
+        id: "pmt-loan",
+        name: "Small Loan",
+        amount_cents: 3_000,
+        due_day: 15,
+        recurrence: "Monthly",
+      },
+    ],
+    liabilities: [
+      {
+        id: "loan-1",
+        name: "Small Loan",
+        balance_cents: 8_000,
+        apr_basis_points: 0,
+        min_payment_cents: 3_000,
+        due_day_of_month: 15,
+      },
+    ],
+  });
+  const scenario = buildScenarioFromLedger(state, "2027-01-01", 90);
+  assert.deepEqual(
+    scenario.events.map((event: any) => [event.date, event.amount_cents, event.name]),
+    [
+      ["2027-01-15", -3_000, "Small Loan"],
+      ["2027-02-15", -3_000, "Small Loan"],
+      ["2027-03-15", -3_000, "Small Loan"],
+    ]
+  );
+});
+
+test("Unicode payment names use the same lowercase matching rule as Python", () => {
+  const state = emptyState({
+    payments: [
+      {
+        id: "pmt-1",
+        name: "STRASSE",
+        amount_cents: 1_000,
+        due_day: 15,
+        recurrence: "Monthly",
+      },
+    ],
+    liabilities: [
+      {
+        id: "loan-1",
+        name: "Straße",
+        balance_cents: 8_000,
+        apr_basis_points: 0,
+        min_payment_cents: 1_000,
+        due_day_of_month: 15,
+      },
+    ],
+  });
+  const scenario = buildScenarioFromLedger(state, "2027-01-01", 30);
+  assert.deepEqual(
+    scenario.events.map((event: any) => [event.name, event.amount_cents]),
+    [["STRASSE", -1_000], ["Straße", -1_000]]
+  );
+});
+
+test("same-day debt expenses use stable ID order for seeded risk", () => {
+  const base = emptyState({
+    current_balance_cents: 500_000,
+    transactions: [
+      {
+        id: "opening",
+        amount_cents: 500_000,
+        category: "System",
+        type: "Adjustment",
+        date: "2026-10-01",
+        description: "Opening balance",
+      },
+    ],
+  });
+  const debts = [
+    {
+      id: "debt-z",
+      name: "Z Loan",
+      balance_cents: 100_000,
+      apr_basis_points: 0,
+      min_payment_cents: 12_000,
+      due_day_of_month: 15,
+    },
+    {
+      id: "debt-a",
+      name: "A Loan",
+      balance_cents: 100_000,
+      apr_basis_points: 0,
+      min_payment_cents: 8_000,
+      due_day_of_month: 15,
+    },
+  ];
+  const simulation = {
+    runs: 100,
+    seed: 7,
+    quantile_num: 1,
+    quantile_den: 10,
+    income_variation_min: 0,
+    income_variation_max: 0,
+    expense_variation_min: -20,
+    expense_variation_max: 20,
+    surprise_probability_ppm: 0,
+    surprise_amount_min: 0,
+    surprise_amount_max: 0,
+    surprise_check_interval_days: 14,
+    reserve_cents: 0,
+  };
+  const forward = buildScenarioFromLedger(
+    { ...base, liabilities: debts },
+    "2026-11-01",
+    30,
+    simulation
+  );
+  const reversed = buildScenarioFromLedger(
+    { ...base, liabilities: [...debts].reverse() },
+    "2026-11-01",
+    30,
+    simulation
+  );
+  assert.deepEqual(
+    forward.events.map((event: any) => event.name),
+    ["A Loan", "Z Loan"]
+  );
+  assert.deepEqual(reversed.events, forward.events);
+  assert.deepEqual(runScenario(reversed).risk, runScenario(forward).risk);
 });
 
 test("monthly payment with due_day clamps to month end without drift", () => {

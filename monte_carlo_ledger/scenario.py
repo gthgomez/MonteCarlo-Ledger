@@ -158,13 +158,19 @@ def _future_transaction_events(
     return events
 
 
-def _planning_minimum_payment_cents(liability: Dict[str, Any]) -> int:
-    """Cash-plan minimum for one liability (opening balance; no interest invented).
+def _planning_minimum_payment_cents(
+    liability: Dict[str, Any], balance_cents: Optional[int] = None
+) -> int:
+    """Cash-plan minimum for one liability (no interest is invented).
 
     Matches Contract 2.0 ``minimum_payment`` on the current balance so everyday
     Safe-to-Spend includes debt outflows without changing engine injection rules.
     """
-    balance = int(liability.get("balance_cents") or 0)
+    balance = (
+        int(liability.get("balance_cents") or 0)
+        if balance_cents is None
+        else int(balance_cents)
+    )
     if balance <= 0:
         return 0
     if liability.get("kind", "installment") != "revolving":
@@ -187,57 +193,66 @@ def _liability_min_payment_events(
     Skips a liability when a monthly ``payments`` row already matches name, amount,
     and due-day (avoid double-counting a bill that already represents the payment).
     """
-    covered: set[tuple[str, int, int]] = set()
+    covered: Dict[tuple[str, int, int], int] = {}
     for payment in payments:
         if getattr(payment, "recurrence", None) != "Monthly":
             continue
         due_day = getattr(payment, "due_day", None)
         if due_day is None:
             continue
-        covered.add(
-            (
-                str(getattr(payment, "name", "")).casefold(),
-                int(getattr(payment, "amount")),
-                int(due_day),
-            )
+        key = (
+            str(getattr(payment, "name", "")).lower(),
+            int(getattr(payment, "amount")),
+            int(due_day),
         )
+        covered[key] = covered.get(key, 0) + 1
 
     events: List[Dict[str, Any]] = []
     lo, hi = as_of.isoformat(), window_end.isoformat()
-    cursor_year, cursor_month = as_of.year, as_of.month
-    # Walk calendar months that can intersect [as_of, window_end).
-    for _ in range(horizon_month_span(as_of, window_end) + 2):
-        for liability in liabilities:
-            amount = _planning_minimum_payment_cents(liability)
+    # Stable identity order keeps same-day event order, and therefore seeded risk
+    # draws, consistent with the Web adapter even when snapshots use another order.
+    for liability in sorted(liabilities, key=lambda item: str(item.get("id") or "")):
+        name = str(liability.get("name") or "Debt payment")
+        opening_amount = _planning_minimum_payment_cents(liability)
+        due_day = int(liability.get("due_day_of_month") or 1)
+        if due_day < 1 or due_day > 31:
+            due_day = 1
+        covered_key = (name.lower(), opening_amount, due_day)
+        # A matching monthly bill is already emitted by the bill adapter. Treat it
+        # as the cash obligation for this debt through the forecast window, including
+        # the final payment when it is smaller than the usual minimum.
+        if covered.get(covered_key, 0) > 0:
+            covered[covered_key] -= 1
+            continue
+
+        remaining_balance = int(liability.get("balance_cents") or 0)
+        cursor_year, cursor_month = as_of.year, as_of.month
+        # Walk calendar months that can intersect [as_of, window_end).
+        for _ in range(horizon_month_span(as_of, window_end) + 2):
+            amount = _planning_minimum_payment_cents(liability, remaining_balance)
             if amount <= 0:
-                continue
-            due_day = int(liability.get("due_day_of_month") or 1)
-            if due_day < 1 or due_day > 31:
-                due_day = 1
+                break
             last_day = calendar.monthrange(cursor_year, cursor_month)[1]
             day = min(due_day, last_day)
             due = date(cursor_year, cursor_month, day)
             due_iso = due.isoformat()
-            if not (lo <= due_iso < hi):
-                continue
-            name = str(liability.get("name") or "Debt payment")
-            if (name.casefold(), amount, due_day) in covered:
-                continue
-            events.append(
-                {
-                    "date": due_iso,
-                    "amount_cents": -amount,
-                    "type": "expense",
-                    "name": name,
-                }
-            )
-        if cursor_month == 12:
-            cursor_year += 1
-            cursor_month = 1
-        else:
-            cursor_month += 1
-        if date(cursor_year, cursor_month, 1) >= window_end:
-            break
+            if lo <= due_iso < hi:
+                events.append(
+                    {
+                        "date": due_iso,
+                        "amount_cents": -amount,
+                        "type": "expense",
+                        "name": name,
+                    }
+                )
+                remaining_balance -= amount
+            if cursor_month == 12:
+                cursor_year += 1
+                cursor_month = 1
+            else:
+                cursor_month += 1
+            if date(cursor_year, cursor_month, 1) >= window_end:
+                break
     return events
 
 

@@ -230,8 +230,11 @@ export function buildScenarioFromLedger(
 }
 
 /** Opening-balance planning minimum (no interest); matches Contract revolving/installment rules. */
-export function planningMinimumPaymentCents(liability: LiabilityItem): number {
-  const balance = liability.balance_cents;
+export function planningMinimumPaymentCents(
+  liability: LiabilityItem,
+  balanceCents: number = liability.balance_cents
+): number {
+  const balance = balanceCents;
   if (!Number.isSafeInteger(balance) || balance <= 0) return 0;
   if ((liability.kind ?? "installment") !== "revolving") {
     return Math.min(liability.min_payment_cents, balance);
@@ -249,10 +252,11 @@ function liabilityMinPaymentEvents(
   asOf: string,
   windowEnd: string
 ): any[] {
-  const covered = new Set<string>();
+  const covered = new Map<string, number>();
   for (const payment of payments) {
     if (payment.recurrence !== "Monthly" || !payment.due_day) continue;
-    covered.add(`${payment.name.toLowerCase()}::${payment.amount_cents}::${payment.due_day}`);
+    const key = `${payment.name.toLowerCase()}::${payment.amount_cents}::${payment.due_day}`;
+    covered.set(key, (covered.get(key) ?? 0) + 1);
   }
 
   const [startYear, startMonth] = asOf.split("-").map(Number);
@@ -260,28 +264,47 @@ function liabilityMinPaymentEvents(
   const totalMonths = (endYear - startYear) * 12 + (endMonth - startMonth) + 2;
   const events: any[] = [];
 
-  for (let i = 0; i < totalMonths; i++) {
-    const curM = startMonth + i;
-    const curY = startYear + Math.floor((curM - 1) / 12);
-    const actualM = ((curM - 1) % 12) + 1;
-    const maxD = new Date(Date.UTC(curY, actualM, 0)).getUTCDate();
+  // Use stable identity order so same-day expenses receive seeded variation in the
+  // same order as Python, regardless of how a snapshot's liabilities are arranged.
+  const orderedLiabilities = [...liabilities].sort((left, right) => {
+    const a = String(left.id);
+    const b = String(right.id);
+    return a < b ? -1 : a > b ? 1 : 0;
+  });
+  for (const liability of orderedLiabilities) {
+    const name = liability.name || "Debt payment";
+    const openingAmount = planningMinimumPaymentCents(liability);
+    let dueDay = liability.due_day_of_month ?? 1;
+    if (!Number.isInteger(dueDay) || dueDay < 1 || dueDay > 31) dueDay = 1;
+    const coveredKey = `${name.toLowerCase()}::${openingAmount}::${dueDay}`;
+    // A matching monthly bill is emitted by the bill adapter. Keep it as the cash
+    // obligation for this debt throughout the window, including its final payment.
+    const coveredCount = covered.get(coveredKey) ?? 0;
+    if (coveredCount > 0) {
+      covered.set(coveredKey, coveredCount - 1);
+      continue;
+    }
 
-    for (const liability of liabilities) {
-      const amount = planningMinimumPaymentCents(liability);
+    let remainingBalance = liability.balance_cents;
+    for (let i = 0; i < totalMonths; i++) {
+      const curM = startMonth + i;
+      const curY = startYear + Math.floor((curM - 1) / 12);
+      const actualM = ((curM - 1) % 12) + 1;
+      const maxD = new Date(Date.UTC(curY, actualM, 0)).getUTCDate();
+      const amount = planningMinimumPaymentCents(liability, remainingBalance);
       if (amount <= 0) continue;
-      let dueDay = liability.due_day_of_month ?? 1;
-      if (!Number.isInteger(dueDay) || dueDay < 1 || dueDay > 31) dueDay = 1;
       const d = Math.min(dueDay, maxD);
       const dueIso = `${curY}-${String(actualM).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
-      if (!(dueIso >= asOf && dueIso < windowEnd)) continue;
-      const name = liability.name || "Debt payment";
-      if (covered.has(`${name.toLowerCase()}::${amount}::${dueDay}`)) continue;
-      events.push({
-        date: dueIso,
-        amount_cents: -amount,
-        type: "expense",
-        name,
-      });
+      if (dueIso >= asOf && dueIso < windowEnd) {
+        events.push({
+          date: dueIso,
+          amount_cents: -amount,
+          type: "expense",
+          name,
+        });
+        remainingBalance -= amount;
+      }
+      if (`${curY}-${String(actualM).padStart(2, "0")}-01` >= windowEnd) break;
     }
   }
   return events;

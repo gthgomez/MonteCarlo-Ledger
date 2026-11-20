@@ -13,6 +13,8 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
+from copy import deepcopy
 from pathlib import Path
 
 import pytest
@@ -101,14 +103,17 @@ console.log(JSON.stringify({
             text=True,
         )
         assert compile.returncode == 0, compile.stderr
-    proc = subprocess.run(
-        ["node", "--input-type=module", "-e", script, str(FIXTURE)],
-        cwd=str(REPO_ROOT),
-        capture_output=True,
-        text=True,
-    )
-    assert proc.returncode == 0, proc.stderr
-    payload = json.loads(proc.stdout)
+    with tempfile.TemporaryDirectory() as directory:
+        scenario_path = Path(directory) / "household.json"
+        scenario_path.write_text(json.dumps(household), encoding="utf-8")
+        proc = subprocess.run(
+            ["node", "--input-type=module", "-e", script, str(scenario_path)],
+            cwd=str(REPO_ROOT),
+            capture_output=True,
+            text=True,
+        )
+        assert proc.returncode == 0, proc.stderr
+        payload = json.loads(proc.stdout)
     return payload["scenario"], payload
 
 
@@ -178,6 +183,78 @@ def test_web_and_python_share_seed_bound_evaluation(restored_db, household):
         "p10_label",
     ):
         assert surfaces[key] == oracle[key], key
+
+
+def test_same_day_debt_order_is_stable_across_web_and_python(tmp_path, monkeypatch, household):
+    doc = deepcopy(household)
+    doc["as_of"] = "2026-11-01"
+    doc["horizon_days"] = 30
+    doc["simulation"] = {
+        "runs": 100,
+        "seed": 7,
+        "quantile_num": 1,
+        "quantile_den": 10,
+        "income_variation_min": 0,
+        "income_variation_max": 0,
+        "expense_variation_min": -20,
+        "expense_variation_max": 20,
+        "surprise_probability_ppm": 0,
+        "surprise_amount_min": 0,
+        "surprise_amount_max": 0,
+        "surprise_check_interval_days": 14,
+        "reserve_cents": 0,
+    }
+    doc["ledger"] = {
+        "version": "2.1",
+        "updated_at": "2026-11-01T00:00:00+00:00",
+        "current_balance_cents": 500_000,
+        "incomes": [],
+        "payments": [],
+        "transactions": [
+            {
+                "id": "opening",
+                "amount_cents": 500_000,
+                "category": "System",
+                "type": "Adjustment",
+                "date": "2026-10-01",
+                "description": "Opening balance",
+            }
+        ],
+        "bill_occurrences": [],
+        "liabilities": [
+            {
+                "id": "debt-z",
+                "name": "Z Loan",
+                "balance_cents": 100_000,
+                "apr_basis_points": 0,
+                "min_payment_cents": 12_000,
+                "kind": "installment",
+                "due_day_of_month": 15,
+            },
+            {
+                "id": "debt-a",
+                "name": "A Loan",
+                "balance_cents": 100_000,
+                "apr_basis_points": 0,
+                "min_payment_cents": 8_000,
+                "kind": "installment",
+                "due_day_of_month": 15,
+            },
+        ],
+    }
+
+    database = tmp_path / "same-day-debts.db"
+    monkeypatch.setattr(db_manager, "DB_PATH", str(database))
+    db_manager.init_db()
+    sync.restore_ledger_snapshot(doc["ledger"])
+    python_scenario = scenario_mod.build_scenario(
+        doc["as_of"], doc["horizon_days"], include_simulation=doc["simulation"], read_only=True
+    )
+    web_scenario, web_payload = _web_scenario_and_result(doc)
+
+    assert [event["name"] for event in python_scenario["events"]] == ["A Loan", "Z Loan"]
+    assert web_scenario["events"] == python_scenario["events"]
+    assert web_payload["result"]["risk"] == run_scenario(python_scenario)["risk"]
 
 
 def test_legacy_snapshot_without_liabilities_keeps_cash_path(tmp_path, household, monkeypatch):
