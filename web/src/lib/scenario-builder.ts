@@ -295,9 +295,12 @@ function liabilityMinPaymentEvents(
       if (amount <= 0) continue;
       const d = Math.min(dueDay, maxD);
       const dueIso = `${curY}-${String(actualM).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
-      if (dueIso >= asOf && dueIso < windowEnd) {
+      // A minimum whose due day passed earlier this month is still owed. Project it
+      // at the start of the window so today's available-cash estimate includes it.
+      const eventDate = dueIso < asOf ? asOf : dueIso;
+      if (eventDate < windowEnd) {
         events.push({
-          date: dueIso,
+          date: eventDate,
           amount_cents: -amount,
           type: "expense",
           name,

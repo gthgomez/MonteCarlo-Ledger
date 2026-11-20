@@ -33,6 +33,20 @@ def test_installment_minimums_reduce_balance_and_cap_final_payment() -> None:
     ]
 
 
+def test_overdue_current_month_minimum_is_due_on_the_as_of_date() -> None:
+    events = _liability_min_payment_events(
+        [_liability(id="loan", name="Small Loan", balance=5_000, minimum=3_000, due_day=10)],
+        [],
+        date(2027, 1, 20),
+        date(2027, 2, 20),
+    )
+
+    assert [(event["date"], event["amount_cents"]) for event in events] == [
+        ("2027-01-20", -3_000),
+        ("2027-02-10", -2_000),
+    ]
+
+
 def test_matching_monthly_bill_covers_the_debt_for_the_forecast_window() -> None:
     payment = SimpleNamespace(
         name="Small Loan", amount=3_000, recurrence="Monthly", due_day=15

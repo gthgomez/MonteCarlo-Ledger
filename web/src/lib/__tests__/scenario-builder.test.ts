@@ -148,6 +148,32 @@ test("liabilities are mapped through with contract-2.0 fields", () => {
   assert.ok(cardOutflows.every((event: { amount_cents: number }) => event.amount_cents === -3500));
 });
 
+test("an overdue current-month minimum is charged at the as-of date", () => {
+  const state = emptyState({
+    liabilities: [
+      {
+        id: "loan",
+        name: "Small Loan",
+        balance_cents: 5_000,
+        apr_basis_points: 0,
+        min_payment_cents: 3_000,
+        kind: "installment",
+        due_day_of_month: 10,
+      },
+    ],
+  });
+
+  const scenario = buildScenarioFromLedger(state, "2027-01-20", 31);
+
+  assert.deepEqual(
+    scenario.events.map((event: any) => [event.date, event.amount_cents]),
+    [
+      ["2027-01-20", -3_000],
+      ["2027-02-10", -2_000],
+    ]
+  );
+});
+
 test("revolving planning minimum uses percent/floor, not min_payment_cents", () => {
   assert.equal(
     planningMinimumPaymentCents({

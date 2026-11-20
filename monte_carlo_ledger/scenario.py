@@ -235,11 +235,15 @@ def _liability_min_payment_events(
             last_day = calendar.monthrange(cursor_year, cursor_month)[1]
             day = min(due_day, last_day)
             due = date(cursor_year, cursor_month, day)
-            due_iso = due.isoformat()
-            if lo <= due_iso < hi:
+            # If this month's due day has passed, the minimum is still an outstanding
+            # obligation. Put it at the start of the forecast window so it reduces
+            # current available cash instead of disappearing until next month.
+            event_date = max(due, as_of)
+            event_date_iso = event_date.isoformat()
+            if lo <= event_date_iso < hi:
                 events.append(
                     {
-                        "date": due_iso,
+                        "date": event_date_iso,
                         "amount_cents": -amount,
                         "type": "expense",
                         "name": name,
