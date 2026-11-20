@@ -198,6 +198,184 @@ test.describe("local-first privacy", () => {
 });
 
 test.describe("beginner financial journey", () => {
+  test("applied financial assumptions persist after reload", async ({ page }) => {
+    await page.goto("/");
+    await page.getByRole("button", { name: "Advanced", exact: true }).click();
+    await page.getByLabel("Plan window (days, 1–730)").fill("120");
+    await page.getByLabel("Modeled futures (1–2000)").fill("750");
+    await page.getByLabel("Seed").fill("123");
+    await page.getByLabel("Low-point rank used for the cautious amount").selectOption("9/10");
+    await page.getByLabel("Income can fall to (%)").fill("-10");
+    await page.getByLabel("Income can rise to (%)").fill("10");
+    await page.getByLabel("Bills can fall to (%)").fill("-3");
+    await page.getByLabel("Bills can rise to (%)").fill("5");
+    await page.getByLabel("Unexpected expense chance each check (%)").fill("5");
+    await page.getByLabel("Check every (days)").fill("21");
+    await page.getByLabel("Smallest unexpected expense ($)").fill("25");
+    await page.getByLabel("Largest unexpected expense ($)").fill("180");
+    const reserve = page.getByLabel("Reserve to subtract from the chosen low point ($)");
+    await reserve.fill("500");
+    await page.getByRole("button", { name: "Update results" }).click();
+    await expect(reserve).toHaveValue("500.00");
+
+    await page.reload();
+    await page.getByRole("button", { name: "Advanced", exact: true }).click();
+    await expect(page.getByLabel("Plan window (days, 1–730)")).toHaveValue("120");
+    await expect(page.getByLabel("Modeled futures (1–2000)")).toHaveValue("750");
+    await expect(page.getByLabel("Seed")).toHaveValue("123");
+    await expect(page.getByLabel("Low-point rank used for the cautious amount")).toHaveValue("9/10");
+    await expect(page.getByLabel("Income can fall to (%)")).toHaveValue("-10");
+    await expect(page.getByLabel("Income can rise to (%)")).toHaveValue("10");
+    await expect(page.getByLabel("Bills can fall to (%)")).toHaveValue("-3");
+    await expect(page.getByLabel("Bills can rise to (%)")).toHaveValue("5");
+    await expect(page.getByLabel("Unexpected expense chance each check (%)")).toHaveValue("5");
+    await expect(page.getByLabel("Check every (days)")).toHaveValue("21");
+    await expect(page.getByLabel("Smallest unexpected expense ($)")).toHaveValue("25.00");
+    await expect(page.getByLabel("Largest unexpected expense ($)")).toHaveValue("180.00");
+    await expect(
+      page.getByLabel("Reserve to subtract from the chosen low point ($)")
+    ).toHaveValue("500.00");
+  });
+
+  test("settings read failures stop forecasts and explain how to retry", async ({ page }) => {
+    await page.addInitScript(() => {
+      const original = Storage.prototype.getItem;
+      Storage.prototype.getItem = function (key: string) {
+        if (key === "montecarlo_financial_assumptions") throw new Error("storage blocked");
+        return original.call(this, key);
+      };
+    });
+    await page.goto("/");
+    await expect(page.getByRole("heading", { name: "Financial Settings Not Loaded" })).toBeVisible();
+    await expect(page.getByText(/could not be read from this browser/i)).toBeVisible();
+    await expect(page.getByText("Safe to spend", { exact: true })).toHaveCount(0);
+    await page.getByRole("button", { name: "Use default financial assumptions" }).click();
+    await expect(page.getByText(/previous financial settings could not be checked/i)).toBeVisible();
+    await expect(page.getByText("Safe to spend", { exact: true })).toHaveCount(0);
+  });
+
+  test("financial assumptions update across open tabs", async ({ page }) => {
+    await page.goto("/");
+    await page.getByRole("button", { name: "Advanced", exact: true }).click();
+
+    const otherTab = await page.context().newPage();
+    await otherTab.goto("/");
+    await otherTab.evaluate(() => {
+      localStorage.setItem(
+        "montecarlo_financial_assumptions",
+        JSON.stringify({
+          schemaVersion: 1,
+          values: {
+            horizonDays: 90,
+            runs: 500,
+            seed: 42,
+            quantileNum: 1,
+            quantileDen: 10,
+            incomeVariationMin: -8,
+            incomeVariationMax: 8,
+            expenseVariationMin: 0,
+            expenseVariationMax: 0,
+            surpriseProbabilityPpm: 150000,
+            surpriseAmountMin: 2000,
+            surpriseAmountMax: 15000,
+            surpriseIntervalDays: 14,
+            reserveCents: 25000,
+          },
+        })
+      );
+    });
+
+    await expect(page.getByLabel("Reserve to subtract from the chosen low point ($)")).toHaveValue("250.00");
+    await expect(page.getByText("Financial settings were updated in another tab.", { exact: true })).toBeVisible();
+    await otherTab.close();
+  });
+
+  test("an interrupted assumptions write keeps the prior plan active", async ({ page }) => {
+    await page.addInitScript(() => {
+      const original = Storage.prototype.setItem;
+      let failures = 0;
+      Storage.prototype.setItem = function (key: string, value: string) {
+        if (key === "montecarlo_financial_assumptions" && failures < 2) {
+          failures += 1;
+          original.call(this, key, value);
+          throw new Error("interrupted write");
+        }
+        return original.call(this, key, value);
+      };
+    });
+    await page.goto("/");
+    await page.getByRole("button", { name: "Advanced", exact: true }).click();
+    await page.getByLabel("Reserve to subtract from the chosen low point ($)").fill("500");
+    await page.getByRole("button", { name: "Update results" }).click();
+
+    await expect(page.getByRole("alert").filter({ hasText: "Financial settings could not be saved" })).toBeVisible();
+    await expect(page.getByText("Reserve subtracted", { exact: true }).locator("..")).toContainText("$0.00");
+    expect(await page.evaluate(() => localStorage.getItem("montecarlo_financial_assumptions"))).toBeNull();
+  });
+
+  test("legacy assumptions migrate to the versioned format", async ({ page }) => {
+    await page.addInitScript(() => {
+      localStorage.setItem(
+        "montecarlo_financial_assumptions",
+        JSON.stringify({
+          horizonDays: 90,
+          runs: 500,
+          seed: 42,
+          quantileNum: 1,
+          quantileDen: 10,
+          incomeVariationMin: -8,
+          incomeVariationMax: 8,
+          expenseVariationMin: 0,
+          expenseVariationMax: 0,
+          surpriseProbabilityPpm: 150000,
+          surpriseAmountMin: 2000,
+          surpriseAmountMax: 15000,
+          surpriseIntervalDays: 14,
+          reserveCents: 12500,
+        })
+      );
+    });
+    await page.goto("/");
+    await expect(page.getByText("Older financial settings were updated to the current format.", { exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "Advanced", exact: true }).click();
+    await expect(page.getByLabel("Reserve to subtract from the chosen low point ($)")).toHaveValue("125.00");
+    expect(await page.evaluate(() => JSON.parse(localStorage.getItem("montecarlo_financial_assumptions") ?? "{}").schemaVersion)).toBe(1);
+  });
+
+  test("invalid settings can be recovered without replacing the ledger", async ({ page }) => {
+    await page.goto("/");
+    const ledgerBefore = await page.evaluate(() => {
+      const ledger = {
+        version: "2.1",
+        updated_at: "2026-11-20T00:00:00.000Z",
+        current_balance_cents: 123456,
+        incomes: [],
+        payments: [],
+        transactions: [
+          {
+            id: "opening-balance",
+            amount_cents: 123456,
+            type: "Adjustment",
+            date: "2026-11-20",
+            description: "Opening balance",
+          },
+        ],
+        bill_occurrences: [],
+        liabilities: [],
+      };
+      const serialized = JSON.stringify(ledger);
+      localStorage.setItem("montecarlo_ledger_state_v2", serialized);
+      localStorage.setItem("montecarlo_financial_assumptions", '{"schemaVersion":99,"values":{}}');
+      return serialized;
+    });
+    await page.reload();
+    await expect(page.getByRole("heading", { name: "Financial Settings Not Loaded" })).toBeVisible();
+    await expect(page.getByRole("link", { name: "Download saved settings" })).toBeVisible();
+    await page.getByRole("button", { name: "Use default financial assumptions" }).click();
+    await expect(page.getByRole("heading", { name: "Financial Settings Not Loaded" })).toHaveCount(0);
+    expect(await page.evaluate(() => localStorage.getItem("montecarlo_ledger_state_v2"))).toBe(ledgerBefore);
+  });
+
   test("own numbers, spending, bills, a decision, and the forecast stay consistent", async ({ page }) => {
     await page.goto("/");
     await page.getByRole("button", { name: "Enter my own numbers" }).click();
