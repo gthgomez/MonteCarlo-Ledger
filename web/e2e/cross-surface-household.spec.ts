@@ -39,8 +39,8 @@ test.describe("cross-surface household rendered views", () => {
     await page.goto("/");
     await expect(page.getByText("Safe to Spend (P10)")).toBeVisible();
     await expect(page.getByText("Calculation Failed")).toHaveCount(0);
-    const readCautiousAmount = async () => {
-      const text = await page
+    const readCautiousAmount = async (targetPage: typeof page) => {
+      const text = await targetPage
         .getByRole("heading", { name: "Cautious amount to spend" })
         .locator("..")
         .locator("p")
@@ -48,19 +48,22 @@ test.describe("cross-surface household rendered views", () => {
         .innerText();
       return Number(text.replace(/[^\d.-]/g, ""));
     };
-    const withDebt = await readCautiousAmount();
+    const withDebt = await readCautiousAmount(page);
     expect(Number.isFinite(withDebt)).toBe(true);
 
     const debtFreeLedger = JSON.parse(JSON.stringify(doc.ledger));
     delete debtFreeLedger.liabilities;
-    await page.evaluate((ledger) => {
+    const debtFreePage = await page.context().newPage();
+    await debtFreePage.clock.install({ time: new Date(`${doc.as_of}T12:00:00.000Z`) });
+    await debtFreePage.addInitScript((ledger) => {
       window.localStorage.setItem("montecarlo_ledger_state_v2", JSON.stringify(ledger));
     }, debtFreeLedger);
-    await page.reload();
-    await expect(page.getByText("Safe to Spend (P10)")).toBeVisible();
-    await expect(page.getByText("Calculation Failed")).toHaveCount(0);
-    const withoutDebt = await readCautiousAmount();
+    await debtFreePage.goto("/");
+    await expect(debtFreePage.getByText("Safe to Spend (P10)")).toBeVisible();
+    await expect(debtFreePage.getByText("Calculation Failed")).toHaveCount(0);
+    const withoutDebt = await readCautiousAmount(debtFreePage);
     expect(withoutDebt).toBeGreaterThan(withDebt);
+    await debtFreePage.close();
     await page.screenshot({
       path: path.join(evidenceDir, "home.png"),
       fullPage: true,
