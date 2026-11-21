@@ -115,13 +115,13 @@ def _bill_events_from(
     for occ in occurrences:
         if occ["paid"]:
             continue
-        if not (lo <= occ["due_date"] < hi):
+        if occ["due_date"] >= hi:
             continue
         pmt = payment_by_id.get(occ["payment_id"])
         if pmt is None:
             continue
         events.append({
-            "date": occ["due_date"],
+            "date": max(lo, occ["due_date"]),
             "amount_cents": -int(pmt.amount),
             "type": "expense",
             "name": pmt.name,
@@ -266,13 +266,12 @@ def _liability_min_payment_events(
                     slot = (payment.id, due.isoformat())
                     occurrence = occurrences_by_slot.get(slot)
                     if slot in scheduled_slots or occurrence is not None:
-                        # An overdue unpaid bill is not emitted by the bill adapter.
-                        # Keep the minimum due now unless the bill was paid or moved.
+                        # The bill adapter includes overdue unpaid rows at as_of.
                         if occurrence is not None and occurrence["paid"]:
                             posted_amount = occurrence.get("transaction_amount")
                             paid_amount = payment.amount if posted_amount is None else max(0, -posted_amount)
                             covered = already_paid = min(amount, paid_amount)
-                        elif occurrence is None or occurrence["due_date"] >= lo:
+                        else:
                             covered = min(amount, payment.amount)
                 if covered < amount:
                     events.append(

@@ -354,7 +354,7 @@ test("an unpaid overdue linked occurrence does not erase the debt minimum", () =
     }],
   });
   const scenario = buildScenarioFromLedger(state, "2027-01-20", 10);
-  assert.deepEqual(scenario.events.map((event: any) => [event.date, event.amount_cents]), [["2027-01-20", -3_000]]);
+  assert.deepEqual(scenario.events.map((event: any) => [event.date, event.amount_cents]), [["2027-01-20", -1_000], ["2027-01-20", -2_000]]);
 });
 
 test("a paid linked occurrence uses its transaction amount and does not reduce principal twice", () => {

@@ -41,6 +41,104 @@ function getNextDate(iso: string, frequency: string, anchorDay?: number): string
   return date.toISOString().split("T")[0];
 }
 
+interface ProjectedBillSlot {
+  payment: PaymentItem;
+  slotDate: string;
+  dueDate: string;
+}
+
+/** One occurrence model for cash events and editable bill rows. */
+export function projectBillPayments(state: LedgerState, asOf: string, windowEnd: string) {
+  const events: { date: string; amount_cents: number; type: "expense"; name: string }[] = [];
+  const slots: ProjectedBillSlot[] = [];
+  const paymentById = new Map(state.payments.map((p) => [String(p.id), p] as const));
+  const represented = new Set<string>();
+  const generated = new Set<string>();
+  const suppressed = new Set<string>();
+  const occurrenceKey = (paymentId: number | string, date: string) => `${paymentId}::${date}`;
+  for (const occ of state.bill_occurrences) {
+    const slot = occ.original_due_date || occ.due_date;
+    represented.add(occurrenceKey(occ.payment_id, slot));
+    if (occ.paid || occ.is_user_modified) {
+      suppressed.add(occurrenceKey(occ.payment_id, slot));
+    }
+    if (occ.is_user_modified) {
+      suppressed.add(occurrenceKey(occ.payment_id, occ.due_date));
+    }
+  }
+  for (const occ of state.bill_occurrences) {
+    if (occ.paid) continue;
+    if (occ.due_date >= windowEnd) continue;
+    const pmt = paymentById.get(String(occ.payment_id));
+    if (!pmt) continue;
+    const slotDate = occ.original_due_date || occ.due_date;
+    slots.push({ payment: pmt, slotDate, dueDate: occ.due_date });
+    events.push({
+      date: occ.due_date < asOf ? asOf : occ.due_date,
+      amount_cents: -pmt.amount_cents,
+      type: "expense",
+      name: pmt.name,
+    });
+  }
+
+  for (const pmt of state.payments) {
+    if (pmt.recurrence === "Monthly" && pmt.due_day) {
+      const [startYear, startMonth] = asOf.split("-").map(Number);
+      const [endYear, endMonth] = windowEnd.split("-").map(Number);
+      const totalMonths = (endYear - startYear) * 12 + (endMonth - startMonth) + 2;
+
+      for (let i = 0; i < totalMonths; i++) {
+        const curM = startMonth + i;
+        const curY = startYear + Math.floor((curM - 1) / 12);
+        const actualM = ((curM - 1) % 12) + 1;
+        const maxD = new Date(Date.UTC(curY, actualM, 0)).getUTCDate();
+        const d = Math.min(pmt.due_day, maxD);
+        const dueIso = `${curY}-${String(actualM).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+
+        if (dueIso >= asOf && dueIso < windowEnd) {
+          const key = occurrenceKey(String(pmt.id), dueIso);
+          if (!represented.has(key) && !suppressed.has(key)) {
+            generated.add(key);
+            slots.push({ payment: pmt, slotDate: dueIso, dueDate: dueIso });
+            events.push({
+              date: dueIso,
+              amount_cents: -pmt.amount_cents,
+              type: "expense",
+              name: pmt.name,
+            });
+          }
+        }
+      }
+    } else if (pmt.due_date) {
+      let current = pmt.due_date;
+      const paymentAnchorDay = Number(pmt.due_date.split("-")[2]);
+      let guard = 0;
+      while (current < windowEnd && guard < 1000) {
+        if (current >= asOf) {
+          const key = occurrenceKey(String(pmt.id), current);
+          if (!represented.has(key) && !suppressed.has(key)) {
+            generated.add(key);
+            slots.push({ payment: pmt, slotDate: current, dueDate: current });
+            events.push({
+              date: current,
+              amount_cents: -pmt.amount_cents,
+              type: "expense",
+              name: pmt.name,
+            });
+          }
+        }
+        if (pmt.recurrence === "One-time") break;
+        const nxt = getNextDate(current, pmt.recurrence, paymentAnchorDay);
+        if (nxt <= current) break;
+        current = nxt;
+        guard++;
+      }
+    }
+  }
+
+  return { events, generated, slots };
+}
+
 export function buildScenarioFromLedger(
   state: LedgerState,
   asOf: string,
@@ -93,90 +191,8 @@ export function buildScenarioFromLedger(
     }
   }
 
-  // 2. Materialize Bill Payments from persisted occurrence state.
-  //    Persisted rows are authoritative; a moved row keeps its scheduled slot via
-  //    original_due_date, so the original date is never regenerated. Read-only and
-  //    write paths therefore share one projection rule (Android/Python parity).
-  const paymentById = new Map(state.payments.map((p) => [String(p.id), p] as const));
-  const represented = new Set<string>();
-  const generated = new Set<string>();
-  const suppressed = new Set<string>();
-  const occurrenceKey = (paymentId: number | string, date: string) => `${paymentId}::${date}`;
-  for (const occ of state.bill_occurrences) {
-    const slot = occ.original_due_date || occ.due_date;
-    represented.add(occurrenceKey(occ.payment_id, slot));
-    if (occ.paid || occ.is_user_modified) {
-      suppressed.add(occurrenceKey(occ.payment_id, slot));
-    }
-    if (occ.is_user_modified) {
-      suppressed.add(occurrenceKey(occ.payment_id, occ.due_date));
-    }
-  }
-  for (const occ of state.bill_occurrences) {
-    if (occ.paid) continue;
-    if (!(occ.due_date >= asOf && occ.due_date < windowEnd)) continue;
-    const pmt = paymentById.get(String(occ.payment_id));
-    if (!pmt) continue;
-    events.push({
-      date: occ.due_date,
-      amount_cents: -pmt.amount_cents,
-      type: "expense",
-      name: pmt.name,
-    });
-  }
-
-  for (const pmt of state.payments) {
-    if (pmt.recurrence === "Monthly" && pmt.due_day) {
-      const [startYear, startMonth] = asOf.split("-").map(Number);
-      const [endYear, endMonth] = windowEnd.split("-").map(Number);
-      const totalMonths = (endYear - startYear) * 12 + (endMonth - startMonth) + 2;
-
-      for (let i = 0; i < totalMonths; i++) {
-        const curM = startMonth + i;
-        const curY = startYear + Math.floor((curM - 1) / 12);
-        const actualM = ((curM - 1) % 12) + 1;
-        const maxD = new Date(Date.UTC(curY, actualM, 0)).getUTCDate();
-        const d = Math.min(pmt.due_day, maxD);
-        const dueIso = `${curY}-${String(actualM).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
-
-        if (dueIso >= asOf && dueIso < windowEnd) {
-          const key = occurrenceKey(String(pmt.id), dueIso);
-          if (!represented.has(key) && !suppressed.has(key)) {
-            generated.add(key);
-            events.push({
-              date: dueIso,
-              amount_cents: -pmt.amount_cents,
-              type: "expense",
-              name: pmt.name,
-            });
-          }
-        }
-      }
-    } else if (pmt.due_date) {
-      let current = pmt.due_date;
-      const paymentAnchorDay = Number(pmt.due_date.split("-")[2]);
-      let guard = 0;
-      while (current < windowEnd && guard < 1000) {
-        if (current >= asOf) {
-          const key = occurrenceKey(String(pmt.id), current);
-          if (!represented.has(key) && !suppressed.has(key)) {
-            generated.add(key);
-            events.push({
-              date: current,
-              amount_cents: -pmt.amount_cents,
-              type: "expense",
-              name: pmt.name,
-            });
-          }
-        }
-        if (pmt.recurrence === "One-time") break;
-        const nxt = getNextDate(current, pmt.recurrence, paymentAnchorDay);
-        if (nxt <= current) break;
-        current = nxt;
-        guard++;
-      }
-    }
-  }
+  const bills = projectBillPayments(state, asOf, windowEnd);
+  events.push(...bills.events);
 
   // 3. Future-dated posted transactions are events, not opening cash.
   const futureTransactions = state.transactions.filter(
@@ -195,13 +211,13 @@ export function buildScenarioFromLedger(
   // 4. Entered debt minimums become ordinary cash outflows (Contract callers add events;
   // the engine still does not auto-inject). Linked bills cover only their matching slot.
   events.push(...liabilityMinPaymentEvents(
-    state.liabilities ?? [], state.payments, state.bill_occurrences, state.transactions, generated, asOf, windowEnd,
+    state.liabilities ?? [], state.payments, state.bill_occurrences, state.transactions, bills.generated, asOf, windowEnd,
   ));
 
   const futureOutflow = state.transactions
     .filter((tx) => tx.date > asOf)
-    .reduce((sum, tx) => sum + tx.amount_cents, 0);
-  const startingBalance = state.current_balance_cents - futureOutflow;
+    .reduce((sum, tx) => sum + BigInt(tx.amount_cents), 0n);
+  const startingBalance = toSafeNumber(BigInt(state.current_balance_cents) - futureOutflow);
 
   const scenario: any = {
     contract_version: "2.0",
@@ -339,12 +355,10 @@ function liabilityMinPaymentEvents(
       if (linkedPayment) {
         const slots = occurrenceSlots.get(String(liability.linked_payment_id));
         const occurrence = slots?.get(dueIso);
-        const occurrenceIsOverdueUnpaid = occurrence !== undefined && !occurrence.paid &&
-          occurrence.due_date < asOf;
         const occurrenceAmount = occurrence?.paid && occurrence.transaction_id != null
           ? Math.abs(transactionById.get(String(occurrence.transaction_id))?.amount_cents ?? linkedPayment.amount_cents)
           : linkedPayment.amount_cents;
-        const occurrenceCovers = occurrence !== undefined && !occurrenceIsOverdueUnpaid;
+        const occurrenceCovers = occurrence !== undefined;
         const generatedCovers = generatedSlots.has(`${linkedPayment.id}::${dueIso}`);
         if (occurrenceCovers || generatedCovers) coveredCents = occurrenceAmount;
         const paidCoverage = occurrenceCovers && occurrence?.paid;

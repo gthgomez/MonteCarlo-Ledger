@@ -694,8 +694,8 @@ def read_ledger_view(start_date: str, end_date: str) -> Dict[str, Any]:
     sum of transactions dated on or before it; later transactions are returned as
     ``future_transactions`` so a forecast shows them when they occur instead of
     counting them as already-posted cash. ``occurrences`` includes moved rows whose
-    scheduled slot or moved due date falls in the window, and ``overdue`` aggregates
-    unpaid obligations before ``as_of`` without injecting them into the forecast.
+    scheduled slot or moved due date falls in the window, plus overdue unpaid
+    obligations. ``overdue`` also reports the original due dates for diagnostics.
     """
     with get_db_connection() as conn:
         conn.execute("BEGIN DEFERRED")
@@ -708,8 +708,9 @@ def read_ledger_view(start_date: str, end_date: str) -> Dict[str, Any]:
             "WHERE (o.due_date >= ? AND o.due_date <= ?) "
             "   OR (COALESCE(o.original_due_date, o.due_date) >= ? "
             "       AND COALESCE(o.original_due_date, o.due_date) <= ?) "
+            "   OR (o.paid = 0 AND o.due_date < ?) "
             "ORDER BY o.due_date ASC, o.id ASC",
-            (start_date, end_date, start_date[:8] + "01", end_date),
+            (start_date, end_date, start_date[:8] + "01", end_date, start_date),
         ).fetchall()
         future_rows = conn.execute(
             "SELECT id, amount, category, type, date, description "

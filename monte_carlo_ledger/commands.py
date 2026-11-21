@@ -19,7 +19,8 @@ from .contract import ContractError
 
 def _format_money(cents: int) -> str:
     sign = "-" if cents < 0 else ""
-    return f"{sign}${abs(cents) / 100:,.2f}"
+    dollars, remainder = divmod(abs(cents), 100)
+    return f"{sign}${dollars:,}.{remainder:02d}"
 
 
 def _emit(obj: Dict[str, Any], as_json: bool, human: Optional[List[str]] = None) -> None:

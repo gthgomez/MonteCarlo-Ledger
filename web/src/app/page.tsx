@@ -175,17 +175,27 @@ export default function Home() {
     setTheme(next);
   }
 
-  function handleUpdateState(nextState: LedgerState) {
-    setState(nextState);
-    setUsingDemo(false);
+  function handleUpdateState(nextState: LedgerState): string | null {
     try {
-      localStorage.setItem(LEDGER_STORAGE_KEY, JSON.stringify(nextState));
+      if (localStorage.getItem(LEDGER_STORAGE_KEY) !== storedRaw) {
+        const message = "This ledger changed in another tab. Reload and try your edit again.";
+        setSaveWarning(message);
+        return message;
+      }
+      const serialized = JSON.stringify(nextState);
+      localStorage.setItem(LEDGER_STORAGE_KEY, serialized);
+      if (localStorage.getItem(LEDGER_STORAGE_KEY) !== serialized) {
+        throw new Error("The stored ledger did not match your change.");
+      }
+      setStoredRaw(serialized);
+      setState(nextState);
+      setUsingDemo(false);
       setSaveWarning(null);
-    } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : "quota or browser restriction";
-      setSaveWarning(
-        `Could not save your ledger to local storage (${message}). The change is visible but not durable.`
-      );
+      return null;
+    } catch {
+      const message = "The edit could not be saved. Reload to check your saved ledger before trying again.";
+      setSaveWarning(message);
+      return message;
     }
   }
 
@@ -195,6 +205,7 @@ export default function Home() {
       setSaveWarning(saved.error);
       return saved;
     }
+    setStoredRaw(JSON.stringify(nextState));
     setState(nextState);
     setUsingDemo(false);
     setSaveWarning(null);
@@ -222,7 +233,9 @@ export default function Home() {
     setLoadError(null);
     setSaveWarning(null);
     try {
-      localStorage.setItem(LEDGER_STORAGE_KEY, JSON.stringify(SAMPLE_LEDGER_STATE));
+      const serialized = JSON.stringify(SAMPLE_LEDGER_STATE);
+      localStorage.setItem(LEDGER_STORAGE_KEY, serialized);
+      setStoredRaw(serialized);
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : "storage error";
       setSaveWarning(`Could not save the demo ledger (${message}).`);
@@ -241,6 +254,7 @@ export default function Home() {
 
   function onEdit(result: EditResult) {
     if (result.ok) handleUpdateState(result.state);
+    else setSaveWarning(result.error);
   }
 
   function saveTargets(next: BudgetTargets): string | null {
@@ -463,8 +477,8 @@ export default function Home() {
             createOwn={(input) => {
               const created = createStarterLedger(input);
               if (!created.ok) return created;
-              handleUpdateState(created.state);
-              return { ok: true };
+              const saveError = handleUpdateState(created.state);
+              return saveError ? { ok: false, error: saveError } : { ok: true };
             }}
           />
         )}

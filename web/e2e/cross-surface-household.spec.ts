@@ -167,3 +167,44 @@ test("an existing bill can be linked to a debt and survives reload", async ({ pa
     min_payment_cents: 50_000,
   }]);
 });
+
+test("move and record a generated bill without posting a duplicate", async ({ page }) => {
+  await page.clock.install({ time: new Date("2028-02-01T12:00:00.000Z") });
+  await page.addInitScript(() => {
+    const key = "montecarlo_ledger_state_v2";
+    if (localStorage.getItem(key) !== null) return;
+    localStorage.setItem(key, JSON.stringify({
+      version: "2.1",
+      current_balance_cents: 100_000,
+      incomes: [],
+      payments: [{
+        id: "bill-1", name: "Internet", amount_cents: 5_000, recurrence: "Monthly", due_day: 15,
+      }],
+      transactions: [{
+        id: 1, type: "Adjustment", amount_cents: 100_000, date: "2028-01-31",
+      }],
+      bill_occurrences: [],
+      liabilities: [],
+    }));
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Bills", exact: true }).click();
+  const firstBill = page.getByRole("listitem", { name: /^Internet due/ }).first();
+  await firstBill.getByLabel(/^New date for Internet/).fill("2028-02-19");
+  await firstBill.getByRole("button", { name: "Move", exact: true }).click();
+  await expect(firstBill.getByLabel(/^New date for Internet/)).toHaveValue("2028-02-19");
+  await page.reload();
+  await expect(firstBill.getByLabel(/^New date for Internet/)).toHaveValue("2028-02-19");
+  await firstBill.getByRole("button", { name: "Mark paid" }).click();
+  await expect(firstBill.getByLabel(/^New date for Internet/)).not.toHaveValue("2028-02-19");
+  await page.reload();
+
+  const saved = await page.evaluate(() => JSON.parse(localStorage.getItem("montecarlo_ledger_state_v2") ?? "null"));
+  expect(saved.current_balance_cents).toBe(95_000);
+  expect(saved.transactions).toHaveLength(2);
+  expect(saved.transactions[1]).toMatchObject({ date: "2028-02-01", amount_cents: -5_000 });
+  expect(saved.bill_occurrences).toMatchObject([{
+    payment_id: "bill-1", due_date: "2028-02-19", original_due_date: "2028-02-15",
+    paid: true, transaction_id: saved.transactions[1].id,
+  }]);
+});

@@ -127,7 +127,7 @@ export function parseLedgerState(raw: unknown): ParseResult {
     );
   }
 
-  if (!ACCEPTED_VERSIONS.has(String(raw.version))) {
+  if (typeof raw.version !== "string" || !ACCEPTED_VERSIONS.has(raw.version)) {
     return fail("version", `unsupported ledger version ${JSON.stringify(raw.version)}`);
   }
   if (!isSafeInt(raw.current_balance_cents)) {
@@ -189,7 +189,7 @@ export function parseLedgerState(raw: unknown): ParseResult {
 
   const transactionIds = ids(transactions, "transactions");
   if ("ok" in transactionIds) return transactionIds;
-  let sum = 0;
+  let sum = 0n;
   for (const [index, tx] of transactions.entries()) {
     const path = `transactions[${index}]`;
     const fieldError = checkRowFields(tx, "transactions", index);
@@ -207,9 +207,9 @@ export function parseLedgerState(raw: unknown): ParseResult {
     if (tx.description !== undefined && tx.description !== null && typeof tx.description !== "string") {
       return fail(`${path}.description`, "must be a string");
     }
-    sum += tx.amount_cents;
+    sum += BigInt(tx.amount_cents);
   }
-  if (sum !== raw.current_balance_cents) {
+  if (sum !== BigInt(raw.current_balance_cents)) {
     return fail(
       "current_balance_cents",
       `is inconsistent with the transaction ledger (${raw.current_balance_cents} vs ${sum})`

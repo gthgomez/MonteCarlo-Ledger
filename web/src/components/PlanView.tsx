@@ -6,6 +6,7 @@ import { type Assumptions } from "@/lib/assumptions";
 import { addDaysIso } from "@/lib/dates";
 import {
   addInstallmentDebt,
+  updateLiabilityBalance,
   aprPercentToBasisPoints,
   dollarsToCents,
   removeLiability,
@@ -126,6 +127,7 @@ export function PlanView({
   const [linkedPaymentId, setLinkedPaymentId] = useState("");
   const selectedPayment = state.payments.find((payment) => String(payment.id) === linkedPaymentId);
   const [debtError, setDebtError] = useState<string | null>(null);
+  const [balanceEdit, setBalanceEdit] = useState<{ id: string; dollars: string } | null>(null);
 
   const purchase = useMemo(
     () =>
@@ -459,9 +461,43 @@ export function PlanView({
                     {debt.name} · owe {formatMoney(debt.balance_cents)} · {(debt.apr_basis_points / 100).toFixed(2)}% ·{" "}
                     {debtMinimumLabel(debt)}
                   </span>
-                  <Button type="button" variant="quiet" onClick={() => onEdit(removeLiability(state, debt.id))}>
-                    Remove {debt.name}
-                  </Button>
+                  <div className="flex flex-wrap gap-2">
+                    <Button type="button" variant="quiet" onClick={() => setBalanceEdit({ id: debt.id, dollars: "" })}>
+                      Update balance for {debt.name}
+                    </Button>
+                    <Button type="button" variant="quiet" onClick={() => onEdit(removeLiability(state, debt.id))}>
+                      Remove {debt.name}
+                    </Button>
+                  </div>
+                  {balanceEdit?.id === debt.id && (
+                    <form
+                      className="flex w-full flex-wrap items-end gap-2"
+                      onSubmit={(event) => {
+                        event.preventDefault();
+                        const balance = dollarsToCents(Number(balanceEdit.dollars));
+                        const result = updateLiabilityBalance(state, debt.id, balance ?? NaN);
+                        if (!result.ok) {
+                          setDebtError(result.error);
+                          return;
+                        }
+                        setDebtError(null);
+                        setBalanceEdit(null);
+                        onEdit(result);
+                      }}
+                    >
+                      <label className="text-sm font-medium">
+                        Lender balance for {debt.name} ($)
+                        <input
+                          type="number" min={0} step="0.01" required
+                          className={`${fieldClass} mt-1`}
+                          value={balanceEdit.dollars}
+                          onChange={(event) => setBalanceEdit({ id: debt.id, dollars: event.target.value })}
+                        />
+                      </label>
+                      <Button type="submit" variant="quiet">Save balance</Button>
+                      <Button type="button" variant="quiet" onClick={() => setBalanceEdit(null)}>Cancel</Button>
+                    </form>
+                  )}
                 </li>
               ))}
             </ul>

@@ -188,7 +188,7 @@ def test_link_survives_repeated_restore_and_delete_keeps_debt(tmp_path, monkeypa
     [
         (False, "2027-01-22", [("2027-01-22", "Scheduled payment", -3_000)]),
         (False, "2027-02-22", [("2027-02-22", "Scheduled payment", -3_000)]),
-        (False, "2027-01-15", [("2027-01-20", "Debt", -3_000)]),
+        (False, "2027-01-15", [("2027-01-20", "Scheduled payment", -3_000)]),
         (True, "2027-01-15", []),
     ],
 )
@@ -245,3 +245,29 @@ def test_invalid_links_leave_the_existing_database_intact(tmp_path, monkeypatch,
     with pytest.raises(ValueError):
         sync.restore_ledger_snapshot(snapshot)
     assert _cash_events() == before
+
+
+def test_linked_leap_year_slot_keeps_anchor_after_february(tmp_path, monkeypatch):
+    snapshot = _snapshot()
+    snapshot["payments"][0]["due_day"] = 31
+    snapshot["liabilities"][0]["due_day_of_month"] = 31
+    _restore(tmp_path, monkeypatch, snapshot)
+    assert _cash_events("2028-02-01", 65) == [
+        ("2028-02-29", "Scheduled payment", -3_000),
+        ("2028-03-31", "Scheduled payment", -3_000),
+    ]
+
+
+def test_unlinked_replacement_cannot_inherit_an_old_link_for_same_local_id(tmp_path, monkeypatch):
+    first = _snapshot()
+    _restore(tmp_path, monkeypatch, first)
+    second = _snapshot()
+    second["version"] = "2.1"
+    second["payments"][0].update(id=1, name="Independent bill")
+    del second["liabilities"][0]["linked_payment_id"]
+    second["liabilities"].pop()
+    sync.restore_ledger_snapshot(second)
+    assert _cash_events(horizon=30) == [
+        ("2027-01-15", "Independent bill", -3_000),
+        ("2027-01-15", "Debt", -3_000),
+    ]
