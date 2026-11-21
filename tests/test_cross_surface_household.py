@@ -25,6 +25,7 @@ from monte_carlo_ledger.contract import run_scenario
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FIXTURE = REPO_ROOT / "testdata" / "household" / "cross-surface-household.json"
+TIMING_FIXTURE = REPO_ROOT / "testdata" / "household" / "mcl-timing.json"
 
 
 @pytest.fixture(scope="module")
@@ -141,6 +142,27 @@ def test_python_bridge_matches_oracle_including_debt(restored_db, household):
     assert result["debt"]["months_to_payoff"] == oracle["debt_months_to_payoff"]
     assert result["debt"]["total_interest_cents"] == oracle["debt_total_interest_cents"]
     assert len(built["events"]) == oracle["event_count"]
+
+
+def test_month_end_and_future_receipt_fixture_is_chronological(tmp_path, monkeypatch):
+    doc = json.loads(TIMING_FIXTURE.read_text())
+    monkeypatch.setattr(db_manager, "DB_PATH", str(tmp_path / "timing.db"))
+    db_manager.init_db()
+    sync.restore_ledger_snapshot(doc["ledger"])
+    built = scenario_mod.build_scenario(doc["as_of"], doc["horizon_days"], read_only=True)
+    actual = sorted(
+        ((event["date"], event["amount_cents"]) for event in built["events"]),
+        key=lambda item: (item[0], 0 if item[1] >= 0 else 1),
+    )
+    expected = [(date, cents) for date, cents in doc["expected"]["event_dates_and_cents"]]
+    assert built["starting_balance_cents"] == doc["expected"]["opening_cents"]
+    assert actual == expected
+    assert min((event["amount_cents"] for event in built["events"]), default=0) == -20_000
+    assert max((event["date"] for event in built["events"]), default="") == "2027-03-31"
+    result = run_scenario(built)
+    assert result["forecast"]["minimum_balance_cents"] == doc["expected"]["minimum_cents"]
+    assert result["forecast"]["minimum_balance_date"] == doc["expected"]["minimum_date"]
+    assert result["forecast"]["ending_balance_cents"] == doc["expected"]["ending_cents"]
 
 
 def test_web_and_python_share_seed_bound_evaluation(restored_db, household):

@@ -290,6 +290,44 @@ test.describe("beginner financial journey", () => {
     await otherTab.close();
   });
 
+  for (const delivery of ["before", "after"] as const) {
+    test(`a legacy storage event delivered ${delivery} another tab saves preserves the explicit reserve`, async ({ page }) => {
+      const key = "montecarlo_financial_assumptions";
+      const legacy = {
+        horizonDays: 90, runs: 500, seed: 42, quantileNum: 1, quantileDen: 10,
+        incomeVariationMin: -8, incomeVariationMax: 8, expenseVariationMin: 0, expenseVariationMax: 0,
+        surpriseProbabilityPpm: 150000, surpriseAmountMin: 2000, surpriseAmountMax: 15000,
+        surpriseIntervalDays: 14, reserveCents: 10000,
+      };
+      const otherTab = await page.context().newPage();
+      const reserve = "Reserve to subtract from the chosen low point ($)";
+      await page.goto("/");
+      await otherTab.goto("/");
+      await page.getByRole("button", { name: "Advanced", exact: true }).click();
+      await otherTab.getByRole("button", { name: "Advanced", exact: true }).click();
+      await otherTab.evaluate(({ key, legacy }) => localStorage.setItem(key, JSON.stringify(legacy)), { key, legacy });
+      await expect(page.getByLabel(reserve)).toHaveValue("100.00");
+
+      const deliverQueuedEvent = () => page.evaluate(({ key, legacy }) => {
+        window.dispatchEvent(new StorageEvent("storage", {
+          key, newValue: JSON.stringify(legacy), storageArea: localStorage,
+        }));
+      }, { key, legacy });
+
+      if (delivery === "before") await deliverQueuedEvent();
+      await otherTab.getByLabel(reserve).fill("900");
+      await otherTab.getByRole("button", { name: "Update results" }).click();
+      await expect(page.getByLabel(reserve)).toHaveValue("900.00");
+      if (delivery === "after") await deliverQueuedEvent();
+
+      const durable = await otherTab.evaluate(key => JSON.parse(localStorage.getItem(key) ?? "{}"), key);
+      expect(durable.schemaVersion).toBe(1);
+      expect(durable.values.reserveCents).toBe(90000);
+      await expect(page.getByLabel(reserve)).toHaveValue("900.00");
+      await otherTab.close();
+    });
+  }
+
   test("an interrupted assumptions write keeps the prior plan active", async ({ page }) => {
     await page.addInitScript(() => {
       const original = Storage.prototype.setItem;
@@ -313,7 +351,7 @@ test.describe("beginner financial journey", () => {
     expect(await page.evaluate(() => localStorage.getItem("montecarlo_financial_assumptions"))).toBeNull();
   });
 
-  test("legacy assumptions migrate to the versioned format", async ({ page }) => {
+  test("legacy assumptions hydrate read-only until explicitly saved", async ({ page }) => {
     await page.addInitScript(() => {
       localStorage.setItem(
         "montecarlo_financial_assumptions",
@@ -336,10 +374,52 @@ test.describe("beginner financial journey", () => {
       );
     });
     await page.goto("/");
-    await expect(page.getByText("Older financial settings were updated to the current format.", { exact: true })).toBeVisible();
+    await expect(page.getByText("Older financial settings were loaded. Save under Advanced to update their format.", { exact: true })).toBeVisible();
     await page.getByRole("button", { name: "Advanced", exact: true }).click();
     await expect(page.getByLabel("Reserve to subtract from the chosen low point ($)")).toHaveValue("125.00");
+    expect(await page.evaluate(() => JSON.parse(localStorage.getItem("montecarlo_financial_assumptions") ?? "{}").schemaVersion)).toBeUndefined();
+    await page.getByRole("button", { name: "Update results" }).click();
     expect(await page.evaluate(() => JSON.parse(localStorage.getItem("montecarlo_financial_assumptions") ?? "{}").schemaVersion)).toBe(1);
+  });
+
+  test("legacy startup cannot overwrite a newer explicit save in another tab", async ({ page }) => {
+    await page.addInitScript(() => {
+      const original = Storage.prototype.setItem;
+      Storage.prototype.setItem = function (key: string, value: string) {
+        if (key === "montecarlo_financial_assumptions" && value.includes('"schemaVersion":1')) {
+          Object.defineProperty(window, "__releaseLegacyWrite", {
+            configurable: true, value: () => original.call(this, key, value),
+          });
+          return;
+        }
+        return original.call(this, key, value);
+      };
+      localStorage.setItem(
+        "montecarlo_financial_assumptions",
+        JSON.stringify({
+          horizonDays: 90, runs: 500, seed: 42, quantileNum: 1, quantileDen: 10,
+          incomeVariationMin: -8, incomeVariationMax: 8, expenseVariationMin: 0, expenseVariationMax: 0,
+          surpriseProbabilityPpm: 150000, surpriseAmountMin: 2000, surpriseAmountMax: 15000,
+          surpriseIntervalDays: 14, reserveCents: 10000,
+        })
+      );
+    });
+    await page.goto("/");
+
+    const otherTab = await page.context().newPage();
+    await otherTab.goto("/");
+    await otherTab.getByRole("button", { name: "Advanced", exact: true }).click();
+    await otherTab.getByLabel("Reserve to subtract from the chosen low point ($)").fill("900");
+    await otherTab.getByRole("button", { name: "Update results" }).click();
+    await page.evaluate(() => {
+      const release = (window as Window & { __releaseLegacyWrite?: () => void }).__releaseLegacyWrite;
+      release?.();
+    });
+
+    expect(
+      await otherTab.evaluate(() => JSON.parse(localStorage.getItem("montecarlo_financial_assumptions") ?? "{}").values.reserveCents)
+    ).toBe(90000);
+    await otherTab.close();
   });
 
   test("invalid settings can be recovered without replacing the ledger", async ({ page }) => {

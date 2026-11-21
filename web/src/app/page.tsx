@@ -73,9 +73,9 @@ export default function Home() {
       setAssumptions(savedAssumptions.assumptions);
       setAssumptionsWarning(savedAssumptions.warning);
       if (savedAssumptions.migrated) {
-        const migrated = saveAssumptions(browserStorage(), savedAssumptions.assumptions);
-        if (migrated.ok) setAssumptionsWarning("Older financial settings were updated to the current format.");
-        else setAssumptionsWarning(`${savedAssumptions.warning} ${migrated.error}`);
+        // Legacy records are hydrated read-only. Writing a migrated copy during startup
+        // can race an explicit save in another tab and overwrite newer assumptions.
+        setAssumptionsWarning("Older financial settings were loaded. Save under Advanced to update their format.");
       }
     } else {
       setAssumptionsError(savedAssumptions.error);
@@ -126,7 +126,18 @@ export default function Home() {
   useEffect(() => {
     function receiveAssumptions(event: StorageEvent) {
       if (event.key !== ASSUMPTIONS_STORAGE_KEY && event.key !== null) return;
-      const loaded = parseSavedAssumptions(event.key === null ? null : event.newValue);
+      let currentRaw: string | null = null;
+      try {
+        const storage = browserStorage();
+        if (!storage) throw new Error("Browser storage unavailable");
+        currentRaw = storage.getItem(ASSUMPTIONS_STORAGE_KEY);
+      } catch {
+        setAssumptionsError("Financial settings could not be read from this browser.");
+        return;
+      }
+      // Storage events may be delivered out of order; the durable key is the source of truth,
+      // not the event's historical newValue payload.
+      const loaded = parseSavedAssumptions(currentRaw);
       if (!loaded.ok) {
         setAssumptionsRaw(loaded.raw);
         setAssumptionsError(loaded.error);
@@ -137,13 +148,8 @@ export default function Home() {
       setAssumptionsError(null);
       setAssumptionsRaw(null);
       if (loaded.migrated) {
-        const migrated = saveAssumptions(browserStorage(), loaded.assumptions);
-        setAssumptionsWarning(
-          migrated.ok
-            ? "Older financial settings from another tab were updated to the current format."
-            : `${loaded.warning ?? "Older financial settings were received."} ${migrated.error}`
-        );
-      } else if (event.key === null || event.newValue === null) {
+        setAssumptionsWarning("Older financial settings from another tab were loaded. Save under Advanced to update their format.");
+      } else if (currentRaw === null) {
         setAssumptionsWarning("Financial settings were removed in another tab. Default assumptions are now active.");
       } else {
         setAssumptionsWarning("Financial settings were updated in another tab.");
