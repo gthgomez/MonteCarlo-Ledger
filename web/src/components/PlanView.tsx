@@ -122,6 +122,9 @@ export function PlanView({
   const [debtBalance, setDebtBalance] = useState("");
   const [debtApr, setDebtApr] = useState("");
   const [debtMin, setDebtMin] = useState("");
+  const [debtDueDay, setDebtDueDay] = useState("");
+  const [linkedPaymentId, setLinkedPaymentId] = useState("");
+  const selectedPayment = state.payments.find((payment) => String(payment.id) === linkedPaymentId);
   const [debtError, setDebtError] = useState<string | null>(null);
 
   const purchase = useMemo(
@@ -180,11 +183,14 @@ export function PlanView({
       setDebtError("Enter a name, the amount you owe, a minimum payment, and a rate such as 21.99.");
       return;
     }
+    const dueDay = selectedPayment?.due_day ?? Number(debtDueDay);
     const result = addInstallmentDebt(state, {
       name: debtName,
       balanceCents: balance,
       aprBasisPoints: apr,
       minPaymentCents: min,
+      dueDay,
+      ...(selectedPayment ? { linkedPaymentId: selectedPayment.id } : {}),
     });
     if (!result.ok) {
       setDebtError(result.error);
@@ -192,6 +198,11 @@ export function PlanView({
     }
     setDebtError(null);
     setDebtName("");
+    setDebtBalance("");
+    setDebtMin("");
+    setDebtApr("");
+    setDebtDueDay("");
+    setLinkedPaymentId("");
     onEdit(result);
   }
 
@@ -471,6 +482,35 @@ export function PlanView({
                 Minimum payment ($)
                 <input className={`${fieldClass} mt-1`} inputMode="decimal" value={debtMin} onChange={(e) => setDebtMin(e.target.value)} />
               </label>
+              <label className="text-sm font-medium">
+                Bill for this debt (optional)
+                <select className={`${fieldClass} mt-1`} value={linkedPaymentId} onChange={(e) => setLinkedPaymentId(e.target.value)}>
+                  <option value="">No matching bill</option>
+                  {state.payments
+                    .filter((payment) => payment.recurrence === "Monthly" && payment.due_day)
+                    .filter((payment) => !(state.liabilities ?? []).some(
+                      (debt) => debt.linked_payment_id != null && String(debt.linked_payment_id) === String(payment.id)
+                    ))
+                    .map((payment) => (
+                      <option key={String(payment.id)} value={String(payment.id)}>
+                        {payment.name} · {formatMoney(payment.amount_cents)} · day {payment.due_day}
+                      </option>
+                    ))}
+                </select>
+              </label>
+              {!selectedPayment && (
+                <label className="text-sm font-medium">
+                  Usual payment day (1–31)
+                  <input
+                    className={`${fieldClass} mt-1`}
+                    type="number"
+                    min={1}
+                    max={31}
+                    value={debtDueDay}
+                    onChange={(e) => setDebtDueDay(e.target.value)}
+                  />
+                </label>
+              )}
               {debtError && (
                 <p className="text-sm text-danger sm:col-span-2" role="alert">
                   {debtError}
@@ -483,8 +523,8 @@ export function PlanView({
               </div>
             </form>
             <Explain term="interest">
-              The rate you enter is turned into basis points and used only for this payoff schedule. It does not change
-              the cash-flow plan unless you also add the payment as a bill or a recorded expense.
+              The interest rate helps estimate what you will owe in future months. If you already track the same
+              payment as a bill, choose it above so that payment is counted once.
             </Explain>
           </div>
         )}

@@ -175,6 +175,28 @@ test("rejects duplicate liability identifiers", () => {
   assert.equal(result.ok, false);
 });
 
+test("rejects a linked payment that is stale, duplicated, or incompatible", () => {
+  const liability = { id: "l1", name: "Loan", balance_cents: 100, apr_basis_points: 0, min_payment_cents: 10, linked_payment_id: "missing" };
+  const result = parseLedgerState(base({ version: "2.2", liabilities: [liability] }));
+  assert.equal(result.ok, false);
+  if (!result.ok) assert.match(result.error, /unknown payment/);
+});
+
+test("legacy snapshots reject durable debt identity fields", () => {
+  const result = parseLedgerState(base({ liabilities: [{ id: "l1", name: "Loan", balance_cents: 100, apr_basis_points: 0, min_payment_cents: 10, is_active: false }] }));
+  assert.equal(result.ok, false);
+  if (!result.ok) assert.match(result.error, /version 2\.2/);
+});
+
+test("accepts a unique monthly linked payment in version 2.2", () => {
+  const result = parseLedgerState(base({
+    version: "2.2",
+    payments: [{ id: "p1", name: "Loan draft", amount_cents: 10, due_day: 1, recurrence: "Monthly" }],
+    liabilities: [{ id: "l1", name: "Loan", balance_cents: 100, apr_basis_points: 0, min_payment_cents: 10, linked_payment_id: "p1" }],
+  }));
+  assert.equal(result.ok, true);
+});
+
 test("rejects duplicate bill-occurrence identifiers", () => {
   const result = parseLedgerState(
     base({

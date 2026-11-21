@@ -343,3 +343,71 @@ def test_seed_bound_risk_is_stable_and_not_a_guarantee(restored_db, household):
     assert first["minimum_balance_p10_cents"] == household["oracle"]["minimum_balance_p10_cents"]
     assumptions = first["ledger"]["model"]["assumptions"].lower()
     assert "estimate" in assumptions
+
+
+@pytest.mark.parametrize("linked", [False, True])
+def test_identical_bills_and_debt_across_persisted_adapters(tmp_path, monkeypatch, household, linked):
+    database = tmp_path / "identity.db"
+    monkeypatch.setattr(db_manager, "DB_PATH", str(database))
+    db_manager.init_db()
+    payment = {
+        "id": "monthly-payment",
+        "name": "Car loan",
+        "amount_cents": 50_000,
+        "recurrence": "Monthly",
+        "due_day": 15,
+    }
+    debt = {
+        "id": "loan",
+        "name": "Car loan",
+        "balance_cents": 300_000,
+        "apr_basis_points": 0,
+        "min_payment_cents": 50_000,
+        "due_day_of_month": 15,
+    }
+    if linked:
+        debt["linked_payment_id"] = payment["id"]
+    doc = {
+        "as_of": "2028-02-01",
+        "horizon_days": 35,
+        "simulation": dict(
+            household["simulation"],
+            surprise_probability_ppm=0,
+            reserve_cents=10_000,
+        ),
+        "ledger": {
+            "version": "2.2" if linked else "2.1",
+            "current_balance_cents": 120_000,
+            "incomes": [],
+            "payments": [payment],
+            "transactions": [{
+                "id": 1, "type": "Adjustment", "amount_cents": 120_000, "date": "2028-01-31",
+            }],
+            "bill_occurrences": [],
+            "liabilities": [debt],
+        },
+    }
+    sync.restore_ledger_snapshot(doc["ledger"])
+    doc["ledger"] = sync.export_ledger_snapshot()
+    sync.restore_ledger_snapshot(doc["ledger"])
+    python_scenario = scenario_mod.build_scenario(
+        doc["as_of"], doc["horizon_days"], include_simulation=doc["simulation"], read_only=True
+    )
+    web_scenario, web_payload = _web_scenario_and_result(doc)
+    expected_events = [{
+        "date": "2028-02-15",
+        "name": "Car loan",
+        "type": "expense",
+        "amount_cents": -50_000,
+    }] * (1 if linked else 2)
+    assert python_scenario["events"] == web_scenario["events"] == expected_events
+
+    # 120,000 minus one or two 50,000 payments. The simulation is deterministic
+    # for these inputs, so its low is identical and the reserve costs 10,000.
+    expected_low = 70_000 if linked else 20_000
+    python_result = run_scenario(python_scenario)
+    for result in (python_result, web_payload["result"]):
+        assert result["forecast"]["minimum_balance_cents"] == expected_low
+        assert result["forecast"]["ending_balance_cents"] == expected_low
+        assert result["risk"]["minimum_balance_p10_cents"] == expected_low
+        assert result["risk"]["safe_to_spend_cents"] == expected_low - 10_000

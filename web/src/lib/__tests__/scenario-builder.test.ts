@@ -297,6 +297,7 @@ test("a recurring bill that covers a debt is not charged a second time", () => {
         apr_basis_points: 0,
         min_payment_cents: 3_000,
         due_day_of_month: 15,
+        linked_payment_id: "pmt-loan",
       },
     ],
   });
@@ -309,6 +310,83 @@ test("a recurring bill that covers a debt is not charged a second time", () => {
       ["2027-03-15", -3_000, "Small Loan"],
     ]
   );
+});
+
+test("identical unrelated bills do not suppress a debt minimum", () => {
+  const state = emptyState({
+    payments: [{ id: "pmt-unrelated", name: "Small Loan", amount_cents: 3_000, due_day: 15, recurrence: "Monthly" }],
+    liabilities: [{
+      id: "loan-1", name: "Small Loan", balance_cents: 8_000, apr_basis_points: 0,
+      min_payment_cents: 3_000, due_day_of_month: 15,
+    }],
+  });
+  const scenario = buildScenarioFromLedger(state, "2027-01-01", 30);
+  assert.deepEqual(
+    scenario.events.map((event: any) => [event.date, event.amount_cents]),
+    [["2027-01-15", -3_000], ["2027-01-15", -3_000]],
+  );
+});
+
+test("a linked bill contributes only the debt minimum shortfall", () => {
+  const state = emptyState({
+    payments: [{ id: "pmt-loan", name: "Loan draft", amount_cents: 1_000, due_day: 15, recurrence: "Monthly" }],
+    liabilities: [{
+      id: "loan-1", name: "Loan", balance_cents: 8_000, apr_basis_points: 0,
+      min_payment_cents: 3_000, due_day_of_month: 15, linked_payment_id: "pmt-loan",
+    }],
+  });
+  const scenario = buildScenarioFromLedger(state, "2027-01-01", 30);
+  assert.deepEqual(
+    scenario.events.map((event: any) => [event.date, event.amount_cents]),
+    [["2027-01-15", -1_000], ["2027-01-15", -2_000]],
+  );
+});
+
+test("an unpaid overdue linked occurrence does not erase the debt minimum", () => {
+  const state = emptyState({
+    payments: [{ id: "pmt-loan", name: "Loan draft", amount_cents: 1_000, due_day: 15, recurrence: "Monthly" }],
+    bill_occurrences: [{
+      payment_id: "pmt-loan", due_date: "2027-01-15", original_due_date: "2027-01-15", paid: false,
+    }],
+    liabilities: [{
+      id: "loan-1", name: "Loan", balance_cents: 8_000, apr_basis_points: 0,
+      min_payment_cents: 3_000, due_day_of_month: 15, linked_payment_id: "pmt-loan",
+    }],
+  });
+  const scenario = buildScenarioFromLedger(state, "2027-01-20", 10);
+  assert.deepEqual(scenario.events.map((event: any) => [event.date, event.amount_cents]), [["2027-01-20", -3_000]]);
+});
+
+test("a paid linked occurrence uses its transaction amount and does not reduce principal twice", () => {
+  const state = emptyState({
+    payments: [{ id: "pmt-loan", name: "Loan draft", amount_cents: 1_000, due_day: 15, recurrence: "Monthly" }],
+    transactions: [{ id: "tx-paid", amount_cents: -1_000, type: "Expense", date: "2027-01-15" }],
+    bill_occurrences: [{ payment_id: "pmt-loan", due_date: "2027-01-15", paid: true, transaction_id: "tx-paid" }],
+    liabilities: [{ id: "loan-1", name: "Loan", balance_cents: 8_000, apr_basis_points: 0, min_payment_cents: 3_000, due_day_of_month: 15, linked_payment_id: "pmt-loan" }],
+  });
+  const scenario = buildScenarioFromLedger(state, "2027-01-01", 30);
+  assert.deepEqual(scenario.events.map((event: any) => [event.date, event.amount_cents]), [["2027-01-15", -1_000], ["2027-01-15", -2_000]]);
+});
+
+test("a moved unpaid linked occurrence covers its original slot", () => {
+  const state = emptyState({
+    payments: [{ id: "pmt-loan", name: "Loan draft", amount_cents: 3_000, due_day: 15, recurrence: "Monthly" }],
+    bill_occurrences: [{ payment_id: "pmt-loan", due_date: "2027-01-25", original_due_date: "2027-01-15", is_user_modified: true, paid: false }],
+    liabilities: [{ id: "loan-1", name: "Loan", balance_cents: 8_000, apr_basis_points: 0, min_payment_cents: 3_000, due_day_of_month: 15, linked_payment_id: "pmt-loan" }],
+  });
+  const scenario = buildScenarioFromLedger(state, "2027-01-01", 30);
+  assert.deepEqual(scenario.events.map((event: any) => [event.date, event.amount_cents]), [["2027-01-25", -3_000]]);
+});
+
+test("programmatic callers reject duplicate linked payment ownership", () => {
+  const state = emptyState({
+    payments: [{ id: "pmt-loan", name: "Loan draft", amount_cents: 3_000, due_day: 15, recurrence: "Monthly" }],
+    liabilities: [
+      { id: "loan-1", name: "Loan", balance_cents: 8_000, apr_basis_points: 0, min_payment_cents: 3_000, linked_payment_id: "pmt-loan" },
+      { id: "loan-2", name: "Loan copy", balance_cents: 8_000, apr_basis_points: 0, min_payment_cents: 3_000, linked_payment_id: "pmt-loan" },
+    ],
+  });
+  assert.throws(() => buildScenarioFromLedger(state, "2027-01-01", 30), /multiple liabilities/);
 });
 
 test("Unicode payment names use the same lowercase matching rule as Python", () => {

@@ -47,6 +47,15 @@ export function buildScenarioFromLedger(
   horizonDays: number = 90,
   includeSimulation?: any
 ): any {
+  const paymentIds = new Set(state.payments.map((payment) => String(payment.id)));
+  const ownedPayments = new Set<string>();
+  for (const liability of state.liabilities ?? []) {
+    if (liability.linked_payment_id == null) continue;
+    const linkedId = String(liability.linked_payment_id);
+    if (!paymentIds.has(linkedId)) throw new Error(`Liability '${liability.id}' references unknown payment '${linkedId}'`);
+    if (ownedPayments.has(linkedId)) throw new Error(`Payment '${linkedId}' is linked to multiple liabilities`);
+    ownedPayments.add(linkedId);
+  }
   const windowEnd = addDays(asOf, horizonDays);
   const events: any[] = [];
 
@@ -90,6 +99,7 @@ export function buildScenarioFromLedger(
   //    write paths therefore share one projection rule (Android/Python parity).
   const paymentById = new Map(state.payments.map((p) => [String(p.id), p] as const));
   const represented = new Set<string>();
+  const generated = new Set<string>();
   const suppressed = new Set<string>();
   const occurrenceKey = (paymentId: number | string, date: string) => `${paymentId}::${date}`;
   for (const occ of state.bill_occurrences) {
@@ -132,6 +142,7 @@ export function buildScenarioFromLedger(
         if (dueIso >= asOf && dueIso < windowEnd) {
           const key = occurrenceKey(String(pmt.id), dueIso);
           if (!represented.has(key) && !suppressed.has(key)) {
+            generated.add(key);
             events.push({
               date: dueIso,
               amount_cents: -pmt.amount_cents,
@@ -149,6 +160,7 @@ export function buildScenarioFromLedger(
         if (current >= asOf) {
           const key = occurrenceKey(String(pmt.id), current);
           if (!represented.has(key) && !suppressed.has(key)) {
+            generated.add(key);
             events.push({
               date: current,
               amount_cents: -pmt.amount_cents,
@@ -181,8 +193,10 @@ export function buildScenarioFromLedger(
   }
 
   // 4. Entered debt minimums become ordinary cash outflows (Contract callers add events;
-  // the engine still does not auto-inject). Skip when a monthly bill already matches.
-  events.push(...liabilityMinPaymentEvents(state.liabilities ?? [], state.payments, asOf, windowEnd));
+  // the engine still does not auto-inject). Linked bills cover only their matching slot.
+  events.push(...liabilityMinPaymentEvents(
+    state.liabilities ?? [], state.payments, state.bill_occurrences, state.transactions, generated, asOf, windowEnd,
+  ));
 
   const futureOutflow = state.transactions
     .filter((tx) => tx.date > asOf)
@@ -198,8 +212,9 @@ export function buildScenarioFromLedger(
     events,
   };
 
-  if (state.liabilities && state.liabilities.length > 0) {
-    scenario.liabilities = state.liabilities.map((l) => {
+  const activeLiabilities = (state.liabilities ?? []).filter((l) => l.is_active !== false);
+  if (activeLiabilities.length > 0) {
+    scenario.liabilities = activeLiabilities.map((l) => {
       const item: any = {
         id: l.id,
         name: l.name,
@@ -249,14 +264,28 @@ export function planningMinimumPaymentCents(
 function liabilityMinPaymentEvents(
   liabilities: LiabilityItem[],
   payments: PaymentItem[],
+  occurrences: {
+    payment_id: number | string;
+    due_date: string;
+    original_due_date?: string | null;
+    paid: boolean;
+    transaction_id?: number | string | null;
+  }[],
+  transactions: { id?: number | string; amount_cents: number }[],
+  generatedSlots: ReadonlySet<string>,
   asOf: string,
   windowEnd: string
 ): any[] {
-  const covered = new Map<string, number>();
-  for (const payment of payments) {
-    if (payment.recurrence !== "Monthly" || !payment.due_day) continue;
-    const key = `${payment.name.toLowerCase()}::${payment.amount_cents}::${payment.due_day}`;
-    covered.set(key, (covered.get(key) ?? 0) + 1);
+  const paymentById = new Map(payments.map((payment) => [String(payment.id), payment] as const));
+  const occurrenceSlots = new Map<string, Map<string, typeof occurrences[number]>>();
+  const transactionById = new Map(transactions.map((tx) => [String(tx.id), tx] as const));
+  for (const occurrence of occurrences) {
+    const key = String(occurrence.payment_id);
+    const slots = occurrenceSlots.get(key) ?? new Map<string, typeof occurrence>();
+    const slot = occurrence.original_due_date || occurrence.due_date;
+    if (slots.has(slot)) throw new Error(`Payment '${key}' has duplicate occurrences on ${slot}`);
+    slots.set(slot, occurrence);
+    occurrenceSlots.set(key, slots);
   }
 
   const [startYear, startMonth] = asOf.split("-").map(Number);
@@ -272,18 +301,13 @@ function liabilityMinPaymentEvents(
     return a < b ? -1 : a > b ? 1 : 0;
   });
   for (const liability of orderedLiabilities) {
+    if (liability.is_active === false) continue;
     const name = liability.name || "Debt payment";
-    const openingAmount = planningMinimumPaymentCents(liability);
     let dueDay = liability.due_day_of_month ?? 1;
     if (!Number.isInteger(dueDay) || dueDay < 1 || dueDay > 31) dueDay = 1;
-    const coveredKey = `${name.toLowerCase()}::${openingAmount}::${dueDay}`;
-    // A matching monthly bill is emitted by the bill adapter. Keep it as the cash
-    // obligation for this debt throughout the window, including its final payment.
-    const coveredCount = covered.get(coveredKey) ?? 0;
-    if (coveredCount > 0) {
-      covered.set(coveredKey, coveredCount - 1);
-      continue;
-    }
+    const linkedPayment = liability.linked_payment_id == null
+      ? undefined
+      : paymentById.get(String(liability.linked_payment_id));
 
     let remainingBalance = liability.balance_cents;
     let firstDue = true;
@@ -311,13 +335,29 @@ function liabilityMinPaymentEvents(
       // A minimum whose due day passed earlier this month is still owed. Project it
       // at the start of the window so today's available-cash estimate includes it.
       const eventDate = dueIso < asOf ? asOf : dueIso;
+      let coveredCents = 0;
+      if (linkedPayment) {
+        const slots = occurrenceSlots.get(String(liability.linked_payment_id));
+        const occurrence = slots?.get(dueIso);
+        const occurrenceIsOverdueUnpaid = occurrence !== undefined && !occurrence.paid &&
+          occurrence.due_date < asOf;
+        const occurrenceAmount = occurrence?.paid && occurrence.transaction_id != null
+          ? Math.abs(transactionById.get(String(occurrence.transaction_id))?.amount_cents ?? linkedPayment.amount_cents)
+          : linkedPayment.amount_cents;
+        const occurrenceCovers = occurrence !== undefined && !occurrenceIsOverdueUnpaid;
+        const generatedCovers = generatedSlots.has(`${linkedPayment.id}::${dueIso}`);
+        if (occurrenceCovers || generatedCovers) coveredCents = occurrenceAmount;
+        const paidCoverage = occurrenceCovers && occurrence?.paid;
+        const shortfall = Math.max(0, amount - coveredCents);
+        const principalReduction = paidCoverage ? shortfall : amount;
+        if (eventDate < windowEnd && shortfall > 0) {
+          events.push({ date: eventDate, amount_cents: -shortfall, type: "expense", name });
+        }
+        if (eventDate < windowEnd) remainingBalance -= principalReduction;
+        continue;
+      }
       if (eventDate < windowEnd) {
-        events.push({
-          date: eventDate,
-          amount_cents: -amount,
-          type: "expense",
-          name,
-        });
+        events.push({ date: eventDate, amount_cents: -amount, type: "expense", name });
         remainingBalance -= amount;
       }
       if (`${curY}-${String(actualM).padStart(2, "0")}-01` >= windowEnd) break;

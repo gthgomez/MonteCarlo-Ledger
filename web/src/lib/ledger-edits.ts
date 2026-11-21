@@ -212,6 +212,11 @@ export function addBill(
 export function removePayment(state: LedgerState, id: number | string): EditResult {
   const next = clone(state);
   next.payments = next.payments.filter((payment) => String(payment.id) !== String(id));
+  for (const debt of next.liabilities ?? []) {
+    if (debt.linked_payment_id != null && String(debt.linked_payment_id) === String(id)) {
+      delete debt.linked_payment_id;
+    }
+  }
   next.bill_occurrences = next.bill_occurrences.filter(
     (occurrence) => String(occurrence.payment_id) !== String(id)
   );
@@ -258,7 +263,7 @@ export function removeIncome(state: LedgerState, id: number | string): EditResul
 
 export function addInstallmentDebt(
   state: LedgerState,
-  debt: { name: string; balanceCents: number; aprBasisPoints: number; minPaymentCents: number }
+  debt: { name: string; balanceCents: number; aprBasisPoints: number; minPaymentCents: number; dueDay?: number; linkedPaymentId?: number | string }
 ): EditResult {
   const name = debt.name.trim();
   if (!name) return { ok: false, error: "Enter a name for the debt." };
@@ -271,6 +276,9 @@ export function addInstallmentDebt(
   if (!Number.isSafeInteger(debt.minPaymentCents) || debt.minPaymentCents < 0) {
     return { ok: false, error: "Enter the minimum payment." };
   }
+  if (debt.dueDay !== undefined && (!Number.isInteger(debt.dueDay) || debt.dueDay < 1 || debt.dueDay > 31)) {
+    return { ok: false, error: "Enter the usual payment day from 1 to 31." };
+  }
   const next = clone(state);
   next.liabilities = [
     ...(next.liabilities ?? []),
@@ -281,8 +289,11 @@ export function addInstallmentDebt(
       apr_basis_points: debt.aprBasisPoints,
       min_payment_cents: debt.minPaymentCents,
       kind: "installment",
+      ...(debt.dueDay === undefined ? {} : { due_day_of_month: debt.dueDay }),
+      ...(debt.linkedPaymentId === undefined ? {} : { linked_payment_id: debt.linkedPaymentId }),
     },
   ];
+  if (debt.linkedPaymentId !== undefined) next.version = "2.2";
   next.updated_at = new Date().toISOString();
   return commit(next);
 }

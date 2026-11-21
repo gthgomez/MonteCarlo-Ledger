@@ -3,7 +3,7 @@ import { LedgerState } from "./types";
 /** Structural + semantic validation for imported/pulled ledgers. */
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
-const ACCEPTED_VERSIONS = new Set(["2.0", "2.1"]);
+const ACCEPTED_VERSIONS = new Set(["2.0", "2.1", "2.2"]);
 const INCOME_FREQUENCIES = new Set(["Weekly", "Bi-weekly", "Monthly", "One-time"]);
 const PAYMENT_RECURRENCES = new Set(["Monthly", "One-time", "Weekly", "Bi-weekly"]);
 const TRANSACTION_TYPES = new Set(["Income", "Expense", "Adjustment"]);
@@ -40,6 +40,7 @@ const ROW_FIELDS: Record<string, Set<string>> = {
   liabilities: new Set([
     "id", "name", "balance_cents", "apr_basis_points", "min_payment_cents",
     "kind", "min_payment_percent_bps", "min_payment_floor_cents", "due_day_of_month",
+    "linked_payment_id", "is_active",
   ]),
 };
 
@@ -146,6 +147,7 @@ export function parseLedgerState(raw: unknown): ParseResult {
     return fail("liabilities", "must be an array when present");
   }
   const liabilities = Array.isArray(raw.liabilities) ? raw.liabilities : [];
+  const snapshotVersion = String(raw.version);
 
   const incomeIds = ids(incomes, "incomes");
   if ("ok" in incomeIds) return incomeIds;
@@ -219,6 +221,7 @@ export function parseLedgerState(raw: unknown): ParseResult {
   const transactionById = new Map(transactions.map((tx: any) => [String(tx.id), tx] as const));
   const paymentAmountById = new Map(payments.map((pmt: any) => [String(pmt.id), pmt.amount_cents] as const));
   const linkedTransactions = new Set<string>();
+  const originalSlots = new Set<string>();
   for (const [index, occ] of occurrences.entries()) {
     const path = `bill_occurrences[${index}]`;
     const fieldError = checkRowFields(occ, "bill_occurrences", index);
@@ -230,6 +233,9 @@ export function parseLedgerState(raw: unknown): ParseResult {
     if (occ.original_due_date !== undefined && occ.original_due_date !== null && !isDate(occ.original_due_date)) {
       return fail(`${path}.original_due_date`, "must be a valid date or null");
     }
+    const originalSlot = `${occ.payment_id}::${occ.original_due_date ?? occ.due_date}`;
+    if (originalSlots.has(originalSlot)) return fail(path, "duplicates an original payment slot");
+    originalSlots.add(originalSlot);
     if (occ.is_user_modified !== undefined && typeof occ.is_user_modified !== "boolean") {
       return fail(`${path}.is_user_modified`, "must be a boolean");
     }
@@ -251,6 +257,7 @@ export function parseLedgerState(raw: unknown): ParseResult {
 
   const liabilityIds = ids(liabilities, "liabilities");
   if ("ok" in liabilityIds) return liabilityIds;
+  const linkedPayments = new Set<string>();
   for (const [index, liability] of liabilities.entries()) {
     const path = `liabilities[${index}]`;
     const fieldError = checkRowFields(liability, "liabilities", index);
@@ -278,6 +285,31 @@ export function parseLedgerState(raw: unknown): ParseResult {
       if (!isSafeInt(liability.due_day_of_month) || liability.due_day_of_month < 1 || liability.due_day_of_month > 31) {
         return fail(`${path}.due_day_of_month`, "must be an integer 1..31 when present");
       }
+    }
+    const hasIdentityFields = liability.linked_payment_id !== undefined || liability.is_active !== undefined;
+    if (hasIdentityFields && snapshotVersion !== "2.2") {
+      return fail(`${path}`, "linked_payment_id/is_active requires ledger version 2.2");
+    }
+    if (liability.linked_payment_id != null) {
+      const link = liability.linked_payment_id;
+      if (!isSafeInt(link) && (typeof link !== "string" || link.length === 0)) {
+        return fail(`${path}.linked_payment_id`, "must be a payment identifier");
+      }
+      if (!paymentIds.has(String(liability.linked_payment_id))) {
+        return fail(`${path}.linked_payment_id`, "references an unknown payment");
+      }
+      const linkedId = String(liability.linked_payment_id);
+      if (linkedPayments.has(linkedId)) return fail(`${path}.linked_payment_id`, "payment is already linked to another liability");
+      linkedPayments.add(linkedId);
+      const linked = payments.find((payment: any) => String(payment.id) === linkedId)!;
+      const monthly = linked.recurrence === "Monthly" && linked.due_day !== undefined && linked.due_day !== null;
+      const oneTime = linked.recurrence === "One-time" && linked.due_date !== undefined && linked.due_date !== null;
+      if (!monthly && !oneTime) {
+        return fail(`${path}.linked_payment_id`, "must reference a monthly payment with due_day or one-time payment with due_date");
+      }
+    }
+    if (liability.is_active !== undefined && typeof liability.is_active !== "boolean") {
+      return fail(`${path}.is_active`, "must be a boolean");
     }
   }
 

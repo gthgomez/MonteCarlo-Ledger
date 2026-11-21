@@ -193,25 +193,34 @@ def _liability_min_payment_events(
     payments: List[Any],
     as_of: date,
     window_end: date,
+    occurrences: Optional[List[Dict[str, Any]]] = None,
 ) -> List[Dict[str, Any]]:
-    """Emit ordinary monthly expense events for entered debt minimums.
-
-    Skips a liability when a monthly ``payments`` row already matches name, amount,
-    and due-day (avoid double-counting a bill that already represents the payment).
-    """
-    covered: Dict[tuple[str, int, int], int] = {}
-    for payment in payments:
-        if getattr(payment, "recurrence", None) != "Monthly":
+    """Emit monthly debt minimums, with credit only for explicit payment links."""
+    occurrences = occurrences or []
+    owners: Dict[int, int] = {}
+    for liability in liabilities:
+        link = liability.get("linked_payment_id")
+        if link is not None:
+            owners[link] = owners.get(link, 0) + 1
+    payments_by_id = {payment.id: payment for payment in payments}
+    occurrences_by_slot: Dict[tuple[int, str], Dict[str, Any]] = {}
+    for row in occurrences:
+        if row["payment_id"] not in owners:
             continue
-        due_day = getattr(payment, "due_day", None)
-        if due_day is None:
-            continue
-        key = (
-            str(getattr(payment, "name", "")).lower(),
-            int(getattr(payment, "amount")),
-            int(due_day),
-        )
-        covered[key] = covered.get(key, 0) + 1
+        slot = (row["payment_id"], row.get("original_due_date") or row["due_date"])
+        if slot in occurrences_by_slot:
+            raise ValueError(f"Linked payment {row['payment_id']} has duplicate occurrences for {slot[1]}")
+        occurrences_by_slot[slot] = row
+    # Generate upcoming slots with the same recurrence helper used by bill events.
+    schedule = budget_engine.get_upcoming_schedule(
+        [vars(payment) for payment in payments if owners.get(payment.id) == 1],
+        as_of.isoformat(),
+        window_end.isoformat(),
+    )
+    moved_destinations = {
+        (row["payment_id"], row["due_date"]) for row in occurrences if row["is_user_modified"]
+    }
+    scheduled_slots = {(row["payment_id"], row["date"]) for row in schedule} - moved_destinations
 
     events: List[Dict[str, Any]] = []
     lo, hi = as_of.isoformat(), window_end.isoformat()
@@ -219,17 +228,13 @@ def _liability_min_payment_events(
     # draws, consistent with the Web adapter even when snapshots use another order.
     for liability in sorted(liabilities, key=lambda item: str(item.get("id") or "")):
         name = str(liability.get("name") or "Debt payment")
-        opening_amount = _planning_minimum_payment_cents(liability)
         due_day = int(liability.get("due_day_of_month") or 1)
         if due_day < 1 or due_day > 31:
             due_day = 1
-        covered_key = (name.lower(), opening_amount, due_day)
-        # A matching monthly bill is already emitted by the bill adapter. Treat it
-        # as the cash obligation for this debt through the forecast window, including
-        # the final payment when it is smaller than the usual minimum.
-        if covered.get(covered_key, 0) > 0:
-            covered[covered_key] -= 1
+        if not liability.get("is_active", True):
             continue
+        link = liability.get("linked_payment_id")
+        payment = payments_by_id.get(link) if link is not None and owners[link] == 1 else None
 
         remaining_balance = int(liability.get("balance_cents") or 0)
         cursor_year, cursor_month = as_of.year, as_of.month
@@ -255,15 +260,30 @@ def _liability_min_payment_events(
             event_date = max(due, as_of)
             event_date_iso = event_date.isoformat()
             if lo <= event_date_iso < hi:
-                events.append(
-                    {
-                        "date": event_date_iso,
-                        "amount_cents": -amount,
-                        "type": "expense",
-                        "name": name,
-                    }
-                )
-                remaining_balance -= amount
+                covered = 0
+                already_paid = 0
+                if payment is not None:
+                    slot = (payment.id, due.isoformat())
+                    occurrence = occurrences_by_slot.get(slot)
+                    if slot in scheduled_slots or occurrence is not None:
+                        # An overdue unpaid bill is not emitted by the bill adapter.
+                        # Keep the minimum due now unless the bill was paid or moved.
+                        if occurrence is not None and occurrence["paid"]:
+                            posted_amount = occurrence.get("transaction_amount")
+                            paid_amount = payment.amount if posted_amount is None else max(0, -posted_amount)
+                            covered = already_paid = min(amount, paid_amount)
+                        elif occurrence is None or occurrence["due_date"] >= lo:
+                            covered = min(amount, payment.amount)
+                if covered < amount:
+                    events.append(
+                        {
+                            "date": event_date_iso,
+                            "amount_cents": -(amount - covered),
+                            "type": "expense",
+                            "name": name,
+                        }
+                    )
+                remaining_balance -= amount - already_paid
             if cursor_month == 12:
                 cursor_year += 1
                 cursor_month = 1
@@ -320,7 +340,9 @@ def build_scenario(
         _bill_events_from(ledger["payments"], ledger["occurrences"], start, window_end)
         + _income_events_from(ledger["incomes"], start, window_end)
         + _future_transaction_events(ledger["future_transactions"], start, window_end)
-        + _liability_min_payment_events(liabilities, ledger["payments"], start, window_end)
+        + _liability_min_payment_events(
+            liabilities, ledger["payments"], start, window_end, ledger["occurrences"]
+        )
     )
     starting_balance = ledger["starting_balance_cents"]
     scenario: Dict[str, Any] = {
@@ -334,8 +356,13 @@ def build_scenario(
     # Contract 2.0 keeps amortization in the debt block; adapters also add ordinary
     # minimum-payment expense events so everyday Safe-to-Spend includes entered debts.
     # Omit the liabilities key when empty (Web/legacy parity); never invent debt rows.
-    if liabilities:
-        scenario["liabilities"] = [dict(item) for item in liabilities]
+    active_liabilities = [
+        {key: value for key, value in item.items() if key not in ("linked_payment_id", "is_active")}
+        for item in liabilities
+        if item.get("is_active", True)
+    ]
+    if active_liabilities:
+        scenario["liabilities"] = active_liabilities
         scenario["debt_strategy"] = "snowball"
     if include_simulation is not None:
         scenario["simulation"] = include_simulation
