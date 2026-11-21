@@ -375,7 +375,7 @@ export default function Home() {
 
   const outcome = evaluation.outcome;
   const rows = evaluation.rows;
-  const slice = slicePlan(rows, asOf, 30, outcome.startingBalanceCents);
+  const slice = slicePlan(rows, asOf, Math.min(30, assumptions.horizonDays), outcome.startingBalanceCents);
   const sum = transactionSumCents(state.transactions);
   const currentSpend = spendingThisMonth(state.transactions, asOf);
   const previousSpend = spendingLastMonth(state.transactions, asOf);
@@ -449,7 +449,7 @@ export default function Home() {
             usingDemo={usingDemo}
             needsSetup={needsSetup}
             copy={copy}
-            recordedBalanceCents={state.current_balance_cents}
+            startingBalanceCents={outcome.startingBalanceCents}
             safeSpendCents={outcome.safeSpendCents}
             plannedLowCents={outcome.projectedLowCents}
             plannedLowDate={outcome.projectedLowDate}
@@ -457,6 +457,7 @@ export default function Home() {
             insights={insights}
             assumptionsChanged={assumptionsChanged}
             horizonDays={assumptions.horizonDays}
+            reserveCents={assumptions.reserveCents}
             runs={outcome.runs}
             onNavigate={navigate}
             createOwn={(input) => {

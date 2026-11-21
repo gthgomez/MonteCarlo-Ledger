@@ -116,7 +116,7 @@ test("an existing bill can be linked to a debt and survives reload", async ({ pa
     key: storageKey,
     ledger: {
       version: "2.1",
-      current_balance_cents: 200_000,
+      current_balance_cents: 210_000,
       incomes: [],
       payments: [{
         id: "existing-loan",
@@ -127,6 +127,8 @@ test("an existing bill can be linked to a debt and survives reload", async ({ pa
       }],
       transactions: [{
         id: 1, type: "Adjustment", amount_cents: 200_000, date: "2028-01-31",
+      }, {
+        id: 2, type: "Income", amount_cents: 10_000, date: "2028-02-25", description: "Future income",
       }],
       bill_occurrences: [],
       liabilities: [],
@@ -137,6 +139,12 @@ test("an existing bill can be linked to a debt and survives reload", async ({ pa
 
   await page.goto("/");
   await expect(amount).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Money available now" }).locator("..").locator("p").first())
+    .toHaveText("$2,000.00");
+  const details = page.getByText("See what is included", { exact: true });
+  await details.focus();
+  await details.press("Enter");
+  await expect(page.getByText(/Future income/)).toBeVisible();
   const before = await amount.innerText();
   await page.getByRole("button", { name: "Plan", exact: true }).click();
   await page.getByRole("tab", { name: /How do I pay off debt/ }).click();
@@ -149,6 +157,7 @@ test("an existing bill can be linked to a debt and survives reload", async ({ pa
   await expect(page.getByRole("button", { name: "Remove Car loan" })).toBeVisible();
 
   await page.reload();
+  await page.getByRole("button", { name: "Home", exact: true }).click();
   await expect(amount).toHaveText(before);
   const saved = await page.evaluate((key) => JSON.parse(localStorage.getItem(key) ?? "null"), storageKey);
   expect(saved.version).toBe("2.2");
