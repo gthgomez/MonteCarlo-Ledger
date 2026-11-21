@@ -12,6 +12,12 @@ import { PlanView } from "@/components/PlanView";
 import { SyncModal } from "@/components/SyncModal";
 import { Notice } from "@/components/ui";
 import { DEFAULT_ASSUMPTIONS, type Assumptions } from "@/lib/assumptions";
+import {
+  ASSUMPTIONS_STORAGE_KEY,
+  loadAssumptions,
+  parseSavedAssumptions,
+  saveAssumptions,
+} from "@/lib/assumptions-persistence";
 import { EMPTY_TARGETS, loadBudgetTargets, saveBudgetTargets, type BudgetTargets } from "@/lib/budget-targets";
 import { localDateIso } from "@/lib/dates";
 import { createStarterLedger, type EditResult } from "@/lib/ledger-edits";
@@ -35,11 +41,22 @@ import { parseLedgerState } from "@/lib/validate";
 
 const THEME_KEY = "mc-theme";
 
+function browserStorage(): Storage | null {
+  try {
+    return window.localStorage;
+  } catch {
+    return null;
+  }
+}
+
 export default function Home() {
   const [state, setState] = useState<LedgerState>(SAMPLE_LEDGER_STATE);
   const [usingDemo, setUsingDemo] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [saveWarning, setSaveWarning] = useState<string | null>(null);
+  const [assumptionsError, setAssumptionsError] = useState<string | null>(null);
+  const [assumptionsWarning, setAssumptionsWarning] = useState<string | null>(null);
+  const [assumptionsRaw, setAssumptionsRaw] = useState<string | null>(null);
   const [storedRaw, setStoredRaw] = useState<string | null>(null);
   const [isLoaded, setIsLoaded] = useState(false);
   const [isSyncModalOpen, setIsSyncModalOpen] = useState(false);
@@ -51,6 +68,20 @@ export default function Home() {
   const [theme, setTheme] = useState<"light" | "dark" | null>(null);
 
   useEffect(() => {
+    const savedAssumptions = loadAssumptions(browserStorage());
+    if (savedAssumptions.ok) {
+      setAssumptions(savedAssumptions.assumptions);
+      setAssumptionsWarning(savedAssumptions.warning);
+      if (savedAssumptions.migrated) {
+        const migrated = saveAssumptions(browserStorage(), savedAssumptions.assumptions);
+        if (migrated.ok) setAssumptionsWarning("Older financial settings were updated to the current format.");
+        else setAssumptionsWarning(`${savedAssumptions.warning} ${migrated.error}`);
+      }
+    } else {
+      setAssumptionsError(savedAssumptions.error);
+      setAssumptionsRaw(savedAssumptions.raw);
+    }
+
     try {
       const saved = localStorage.getItem(LEDGER_STORAGE_KEY);
       if (saved) {
@@ -90,6 +121,37 @@ export default function Home() {
     const fromHash = sectionFromHash(window.location.hash);
     if (fromHash) setSection(fromHash);
     setIsLoaded(true);
+  }, []);
+
+  useEffect(() => {
+    function receiveAssumptions(event: StorageEvent) {
+      if (event.key !== ASSUMPTIONS_STORAGE_KEY && event.key !== null) return;
+      const loaded = parseSavedAssumptions(event.key === null ? null : event.newValue);
+      if (!loaded.ok) {
+        setAssumptionsRaw(loaded.raw);
+        setAssumptionsError(loaded.error);
+        setAssumptionsWarning(null);
+        return;
+      }
+      setAssumptions(loaded.assumptions);
+      setAssumptionsError(null);
+      setAssumptionsRaw(null);
+      if (loaded.migrated) {
+        const migrated = saveAssumptions(browserStorage(), loaded.assumptions);
+        setAssumptionsWarning(
+          migrated.ok
+            ? "Older financial settings from another tab were updated to the current format."
+            : `${loaded.warning ?? "Older financial settings were received."} ${migrated.error}`
+        );
+      } else if (event.key === null || event.newValue === null) {
+        setAssumptionsWarning("Financial settings were removed in another tab. Default assumptions are now active.");
+      } else {
+        setAssumptionsWarning("Financial settings were updated in another tab.");
+      }
+    }
+
+    window.addEventListener("storage", receiveAssumptions);
+    return () => window.removeEventListener("storage", receiveAssumptions);
   }, []);
 
   const asOf = useMemo(() => localDateIso(), []);
@@ -138,6 +200,19 @@ export default function Home() {
     setSaveWarning(null);
     if (vaultId) setCurrentVaultId(vaultId);
     return { ok: true };
+  }
+
+  function handleApplyAssumptions(nextAssumptions: Assumptions): string | null {
+    const saved = saveAssumptions(browserStorage(), nextAssumptions);
+    if (!saved.ok) {
+      setAssumptionsWarning(saved.error);
+      return saved.error;
+    }
+    setAssumptions(nextAssumptions);
+    setAssumptionsError(null);
+    setAssumptionsWarning(null);
+    setAssumptionsRaw(null);
+    return null;
   }
 
   function handleResetDemo() {
@@ -210,6 +285,45 @@ export default function Home() {
               className="inline-flex min-h-11 items-center rounded-lg bg-accent px-3 text-sm font-semibold text-on-accent"
             >
               Replace with sample data (explicit)
+            </button>
+            <a href="/" className="inline-flex min-h-11 items-center rounded-lg border border-line bg-surface px-3 text-sm font-semibold">
+              Retry
+            </a>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (assumptionsError) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-canvas p-6 text-ink">
+        <div className="w-full max-w-xl space-y-4 rounded-2xl border border-warning bg-warning-soft p-6">
+          <h1 className="text-lg font-semibold">Financial Settings Not Loaded</h1>
+          <p className="text-sm">{assumptionsError}</p>
+          <p className="text-sm text-muted">
+            Your ledger is still saved on this device. No forecast is shown until the settings are repaired or you
+            choose the defaults. Choosing defaults will not replace your ledger.
+          </p>
+          {assumptionsRaw && (
+            <a
+              href={"data:text/json;charset=utf-8," + encodeURIComponent(assumptionsRaw)}
+              download="montecarlo-financial-settings-recovery.json"
+              className="inline-flex min-h-11 items-center rounded-lg border border-line bg-surface px-3 text-sm font-semibold"
+            >
+              Download saved settings
+            </a>
+          )}
+          <div className="flex flex-wrap gap-3">
+            <button
+              type="button"
+              onClick={() => {
+                const problem = handleApplyAssumptions(DEFAULT_ASSUMPTIONS);
+                if (problem) setAssumptionsError(problem);
+              }}
+              className="inline-flex min-h-11 items-center rounded-lg bg-accent px-3 text-sm font-semibold text-on-accent"
+            >
+              Use default financial assumptions
             </button>
             <a href="/" className="inline-flex min-h-11 items-center rounded-lg border border-line bg-surface px-3 text-sm font-semibold">
               Retry
@@ -328,6 +442,7 @@ export default function Home() {
       <main id="content" className="mx-auto w-full min-w-0 max-w-5xl flex-1 space-y-4 px-4 py-6">
         <p className="text-sm text-muted">{SECTION_QUESTION[section]}</p>
         {saveWarning && <Notice tone="warning" title="Not saved">{saveWarning}</Notice>}
+        {assumptionsWarning && <Notice tone="warning" title="Financial settings">{assumptionsWarning}</Notice>}
         {section === "home" && (
           <HomeView
             asOf={asOf}
@@ -383,7 +498,7 @@ export default function Home() {
           <FutureView asOf={asOf} outcome={outcome} rows={rows} assumptionsChanged={assumptionsChanged} />
         )}
         {section === "advanced" && (
-          <AdvancedView assumptions={assumptions} outcome={outcome} asOf={asOf} onApply={setAssumptions} />
+          <AdvancedView assumptions={assumptions} outcome={outcome} asOf={asOf} onApply={handleApplyAssumptions} />
         )}
       </main>
       <footer className="border-t border-line px-4 py-6 text-center text-sm text-muted">
