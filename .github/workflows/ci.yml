@@ -19,6 +19,20 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+
+      - name: Install Web dependencies for cross-surface tests
+        run: pnpm install --frozen-lockfile
+        working-directory: web
+
       - name: Install package and dev dependencies
         run: python -m pip install --upgrade pip && pip install -e .[dev]
 
@@ -50,7 +64,9 @@ jobs:
 
       - name: Fail-closed validation works in a clean install
         run: |
-          .clean/bin/python - <<'PY'
+          clean_python="$PWD/.clean/bin/python"
+          cd "$RUNNER_TEMP"
+          "$clean_python" - <<'PY'
           from monte_carlo_ledger import decisions
 
           caps = decisions.engine_capabilities()
@@ -83,10 +99,21 @@ jobs:
 
       - name: CLI behaves on a clean install
         run: |
+          clean_python="$PWD/.clean/bin/python"
+          cd "$RUNNER_TEMP"
           export MC_LEDGER_DB="$RUNNER_TEMP/clean.db"
-          .clean/bin/python -m monte_carlo_ledger forecast --as-of 2026-11-09 --horizon 30 --json
+          "$clean_python" -m monte_carlo_ledger --help
+          test ! -e "$MC_LEDGER_DB"
           set +e
-          .clean/bin/python -m monte_carlo_ledger simulate-purchase 0 \
+          "$clean_python" -m monte_carlo_ledger forecast --as-of 2026-11-09 --horizon 30 --json
+          code=$?
+          set -e
+          test "$code" -eq 3
+          test ! -e "$MC_LEDGER_DB"
+          "$clean_python" -c 'from monte_carlo_ledger.db_manager import init_db; init_db()'
+          "$clean_python" -m monte_carlo_ledger forecast --as-of 2026-11-09 --horizon 30 --json
+          set +e
+          "$clean_python" -m monte_carlo_ledger simulate-purchase 0 \
             --date 2026-11-10 --as-of 2026-11-09 --json
           code=$?
           set -e

@@ -101,6 +101,11 @@ test("cash minus entered debt is subtraction, not net worth", () => {
   assert.equal(cashMinusEnteredDebt(345_000, SAMPLE_LEDGER_STATE.liabilities), 345_000 - 240_000 - 850_000);
 });
 
+test("archived debts do not change the cash summary", () => {
+  const archived = SAMPLE_LEDGER_STATE.liabilities.map((debt) => ({ ...debt, is_active: false }));
+  assert.equal(cashMinusEnteredDebt(345_000, archived), 345_000);
+});
+
 test("position copy uses the figures it is given and does not call the median an expected value", () => {
   const copy = describePosition({
     recordedBalanceCents: 345_000,
@@ -145,6 +150,28 @@ test("a negative cautious amount is not described as money you could spend", () 
   });
   assert.match(copy.lead, /no cautious amount left to spend/);
   assert.doesNotMatch(copy.lead, /you could spend/);
+});
+
+test("custom quantile copy matches the same trough used for safe-to-spend", () => {
+  const trough = 70_000;
+  const reserve = 5_000;
+  const copy = describePosition({
+    recordedBalanceCents: 100_000,
+    scheduledIncomeCents: 0,
+    scheduledBillCents: 0,
+    plannedEndingCents: 100_000,
+    windowDays: 30,
+    safeSpendCents: trough - reserve,
+    difficultLowCents: trough,
+    reserveCents: reserve,
+    quantileNum: 1,
+    quantileDen: 5,
+    runs: 200,
+    isDemo: false,
+    hasSchedule: false,
+  });
+  assert.equal(copy.technicalName, "Safe to spend (nearest-rank 1/5)");
+  assert.doesNotMatch(copy.caution, /matches that modeled low point/);
 });
 
 test("insights do not invent a grocery comparison", () => {

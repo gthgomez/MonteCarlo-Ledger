@@ -1,9 +1,8 @@
 import sqlite3
-from contextlib import asynccontextmanager
 from datetime import date
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 
 from . import db_manager, decisions
@@ -19,10 +18,17 @@ _MAX_HORIZON_DAYS = decisions.MAX_HORIZON_DAYS
 _MAX_AMOUNT_CENTS = decisions.MAX_AMOUNT_CENTS
 
 
-@asynccontextmanager
-async def lifespan(_: FastAPI):
-    db_manager.init_db()
-    yield
+def _require_existing_ledger() -> None:
+    try:
+        db_manager.open_ledger_for_read()
+    except (FileNotFoundError, ValueError) as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": "LEDGER_UNAVAILABLE",
+                "message": "Open or upgrade your ledger in the local CLI and try again.",
+            },
+        ) from exc
 
 
 app = FastAPI(
@@ -34,7 +40,7 @@ app = FastAPI(
     # API contract version, independent of the package version in pyproject.toml.
     # Bump only when the request/response shapes of these endpoints change.
     version="2.0.0",
-    lifespan=lifespan,
+    dependencies=[Depends(_require_existing_ledger)],
 )
 
 from fastapi.middleware.cors import CORSMiddleware

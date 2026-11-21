@@ -337,17 +337,19 @@ def test_current_date_with_no_future_transactions_starts_at_ledger_balance(ledge
 
 
 # --------------------------------------------------------------------------
-# Overdue obligations are visible but not injected
+# Known overdue obligations count at the start
 # --------------------------------------------------------------------------
 
 
-def test_overdue_obligation_is_reported_and_not_projected(ledger):
+def test_overdue_obligation_is_reported_and_projected_at_start(ledger):
     ledger.add_payment("Past bill", 25_000, "One-time", "2026-10-15")
     db_manager.sync_bill_occurrences(AS_OF, WINDOW_END)
     view = db_manager.read_ledger_view(AS_OF, WINDOW_END)
     assert view["overdue"] == {"count": 1, "total_cents": 25_000, "earliest_date": "2026-10-15"}
     built = scenario.build_scenario(AS_OF, HORIZON, read_only=True)
-    assert [e for e in built["events"] if e.get("name") == "Past bill"] == []
+    assert [e for e in built["events"] if e.get("name") == "Past bill"] == [
+        {"date": AS_OF, "name": "Past bill", "type": "expense", "amount_cents": -25_000}
+    ]
     result = decisions.forecast(AS_OF, HORIZON)
     assert result["ledger"]["overdue_obligations"]["count"] == 1
     assert result["ledger"]["overdue_obligations"]["total_cents"] == 25_000

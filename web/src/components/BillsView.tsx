@@ -1,11 +1,19 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useMemo, useState } from "react";
 import { type Assumptions } from "@/lib/assumptions";
-import { formatDateLabel, relativeDay } from "@/lib/dates";
-import { addBill, dollarsToCents, removePayment, type EditResult } from "@/lib/ledger-edits";
+import { addDaysIso, formatDateLabel, relativeDay } from "@/lib/dates";
+import {
+  addBill,
+  dollarsToCents,
+  markBillOccurrencePaid,
+  moveBillOccurrence,
+  removePayment,
+  type EditResult,
+} from "@/lib/ledger-edits";
 import { formatMoney } from "@/lib/money-format";
 import { type PlanSlice } from "@/lib/present";
+import { projectBillPayments } from "@/lib/scenario-builder";
 import { type LedgerState, type PaymentItem } from "@/lib/types";
 import { Button, fieldClass, Notice, Panel } from "./ui";
 
@@ -33,7 +41,13 @@ export function BillsView({
   const [dueDate, setDueDate] = useState(asOf);
   const [auto, setAuto] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [moveDates, setMoveDates] = useState<Record<string, string>>({});
   const billsVary = assumptions.expenseVariationMin !== 0 || assumptions.expenseVariationMax !== 0;
+  const billSlots = useMemo(
+    () => projectBillPayments(state, asOf, addDaysIso(asOf, horizonDays)).slots
+      .sort((left, right) => left.dueDate.localeCompare(right.dueDate)),
+    [state, asOf, horizonDays]
+  );
   const upcoming = slice.events.filter((event) => event.amount_cents < 0);
 
   function submit(event: React.FormEvent) {
@@ -65,8 +79,7 @@ export function BillsView({
       {overdue.count > 0 && (
         <Notice tone="warning" title={`${overdue.count} past-due unpaid ${overdue.count === 1 ? "bill" : "bills"}`}>
           They total {formatMoney(overdue.total_cents)}
-          {overdue.earliest_date ? `, earliest ${formatDateLabel(overdue.earliest_date)}` : ""}. The forward plan does
-          not include them. This screen cannot mark them paid.
+          {overdue.earliest_date ? `, earliest ${formatDateLabel(overdue.earliest_date)}` : ""}. The forecast counts them today while they are unpaid.
         </Notice>
       )}
       <Panel
@@ -175,6 +188,55 @@ export function BillsView({
             </li>
           ))}
         </ul>
+        {billSlots.length > 0 && (
+          <div className="mt-6 border-t border-line pt-4">
+            <h3 className="font-semibold">Record or move a payment</h3>
+            <p className="mt-1 text-sm text-muted">
+              Marking a bill paid records the expense today. If it pays a debt, use the lender’s balance
+              to update the amount still owed in Plan.
+            </p>
+            <ul className="mt-2 divide-y divide-line">
+              {billSlots.map(({ payment, slotDate, dueDate }) => {
+                if (payment.id === undefined) return null;
+                const paymentId = payment.id;
+                const key = `${paymentId}::${slotDate}`;
+                const selectedDate = moveDates[key] ?? dueDate;
+                return (
+                  <li
+                    key={key}
+                    aria-label={`${payment.name} due ${formatDateLabel(dueDate)}`}
+                    className="flex flex-wrap items-center justify-between gap-3 py-3 text-sm"
+                  >
+                    <span>{payment.name} · due {formatDateLabel(dueDate)} · {formatMoney(payment.amount_cents)}</span>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Button
+                        type="button"
+                        variant="quiet"
+                        onClick={() => onEdit(markBillOccurrencePaid(state, paymentId, slotDate, asOf))}
+                      >
+                        Mark paid
+                      </Button>
+                      <input
+                        className={`${fieldClass} w-auto`}
+                        type="date"
+                        value={selectedDate}
+                        onChange={(event) => setMoveDates((current) => ({ ...current, [key]: event.target.value }))}
+                        aria-label={`New date for ${payment.name} due ${formatDateLabel(dueDate)}`}
+                      />
+                      <Button
+                        type="button"
+                        variant="quiet"
+                        onClick={() => onEdit(moveBillOccurrence(state, paymentId, slotDate, selectedDate))}
+                      >
+                        Move
+                      </Button>
+                    </div>
+                  </li>
+                );
+              })}
+            </ul>
+          </div>
+        )}
       </Panel>
     </div>
   );

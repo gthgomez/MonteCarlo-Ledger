@@ -48,10 +48,14 @@ export interface LiabilityItem {
   min_payment_percent_bps?: number;
   min_payment_floor_cents?: number;
   due_day_of_month?: number;
+  /** Explicit snapshot-local ownership of this debt's recurring bill. */
+  linked_payment_id?: number | string | null;
+  /** Inactive debts remain in history but do not affect forecasts. */
+  is_active?: boolean;
 }
 
 export interface LedgerState {
-  version: "2.0" | "2.1";
+  version: "2.0" | "2.1" | "2.2";
   updated_at: string;
   current_balance_cents: number;
   incomes: IncomeItem[];

@@ -1,0 +1,263 @@
+{
+  "description": "Reproducible cross-surface household: synthetic income, bills, liabilities and opening balances. Cash-plan debt minimums reduce the remaining balance without inventing interest; Contract 2.0 separately models interest and payoff strategies. Oracle values come from Contract 2.0 run_scenario on the shared scenario (seed-bound).",
+  "as_of": "2026-11-15",
+  "horizon_days": 90,
+  "simulation": {
+    "runs": 500,
+    "seed": 7,
+    "quantile_num": 1,
+    "quantile_den": 10,
+    "income_variation_min": -8,
+    "income_variation_max": 8,
+    "expense_variation_min": 0,
+    "expense_variation_max": 0,
+    "surprise_probability_ppm": 150000,
+    "surprise_amount_min": 2000,
+    "surprise_amount_max": 15000,
+    "surprise_check_interval_days": 14,
+    "reserve_cents": 0
+  },
+  "ledger": {
+    "version": "2.1",
+    "updated_at": "2026-11-15T00:00:00+00:00",
+    "current_balance_cents": 482300,
+    "incomes": [
+      {
+        "id": "inc-primary",
+        "name": "Primary Paycheck",
+        "amount_cents": 240000,
+        "frequency": "Bi-weekly",
+        "last_payday": "2026-11-07",
+        "next_payday": "2026-11-21"
+      }
+    ],
+    "payments": [
+      {
+        "id": "pmt-rent",
+        "name": "Apartment Rent",
+        "amount_cents": 145000,
+        "due_day": 1,
+        "recurrence": "Monthly",
+        "due_date": null,
+        "is_auto_withdraw": true
+      },
+      {
+        "id": "pmt-util",
+        "name": "Utilities",
+        "amount_cents": 16500,
+        "due_day": 12,
+        "recurrence": "Monthly",
+        "due_date": null,
+        "is_auto_withdraw": true
+      },
+      {
+        "id": "pmt-net",
+        "name": "Internet",
+        "amount_cents": 7900,
+        "due_day": 20,
+        "recurrence": "Monthly",
+        "due_date": null,
+        "is_auto_withdraw": true
+      }
+    ],
+    "transactions": [
+      {
+        "id": "tx-open",
+        "amount_cents": 500000,
+        "category": "System",
+        "type": "Adjustment",
+        "date": "2026-10-01",
+        "description": "Opening balance"
+      },
+      {
+        "id": "tx-pay",
+        "amount_cents": 240000,
+        "category": "Income",
+        "type": "Income",
+        "date": "2026-11-07",
+        "description": "Primary Paycheck"
+      },
+      {
+        "id": "tx-groc",
+        "amount_cents": -8200,
+        "category": "Food",
+        "type": "Expense",
+        "date": "2026-11-08",
+        "description": "Groceries"
+      },
+      {
+        "id": "tx-fuel",
+        "amount_cents": -4500,
+        "category": "Transport",
+        "type": "Expense",
+        "date": "2026-11-10",
+        "description": "Fuel"
+      },
+      {
+        "id": "tx-adj",
+        "amount_cents": -245000,
+        "category": "System",
+        "type": "Adjustment",
+        "date": "2026-11-01",
+        "description": "Rent already paid for November"
+      }
+    ],
+    "bill_occurrences": [],
+    "liabilities": [
+      {
+        "id": "debt-card",
+        "name": "Credit Card",
+        "balance_cents": 185000,
+        "apr_basis_points": 2199,
+        "min_payment_cents": 5500,
+        "kind": "revolving",
+        "min_payment_percent_bps": 200,
+        "min_payment_floor_cents": 3500
+      },
+      {
+        "id": "debt-auto",
+        "name": "Auto Loan",
+        "balance_cents": 620000,
+        "apr_basis_points": 649,
+        "min_payment_cents": 28500,
+        "kind": "installment",
+        "due_day_of_month": 15
+      }
+    ]
+  },
+  "legacy_snapshot_without_liabilities": {
+    "version": "2.0",
+    "updated_at": "2026-11-15T00:00:00+00:00",
+    "current_balance_cents": 482300,
+    "incomes": [
+      {
+        "id": "inc-primary",
+        "name": "Primary Paycheck",
+        "amount_cents": 240000,
+        "frequency": "Bi-weekly",
+        "last_payday": "2026-11-07",
+        "next_payday": "2026-11-21"
+      }
+    ],
+    "payments": [
+      {
+        "id": "pmt-rent",
+        "name": "Apartment Rent",
+        "amount_cents": 145000,
+        "due_day": 1,
+        "recurrence": "Monthly",
+        "due_date": null,
+        "is_auto_withdraw": true
+      },
+      {
+        "id": "pmt-util",
+        "name": "Utilities",
+        "amount_cents": 16500,
+        "due_day": 12,
+        "recurrence": "Monthly",
+        "due_date": null,
+        "is_auto_withdraw": true
+      },
+      {
+        "id": "pmt-net",
+        "name": "Internet",
+        "amount_cents": 7900,
+        "due_day": 20,
+        "recurrence": "Monthly",
+        "due_date": null,
+        "is_auto_withdraw": true
+      }
+    ],
+    "transactions": [
+      {
+        "id": "tx-open",
+        "amount_cents": 500000,
+        "category": "System",
+        "type": "Adjustment",
+        "date": "2026-10-01",
+        "description": "Opening balance"
+      },
+      {
+        "id": "tx-pay",
+        "amount_cents": 240000,
+        "category": "Income",
+        "type": "Income",
+        "date": "2026-11-07",
+        "description": "Primary Paycheck"
+      },
+      {
+        "id": "tx-groc",
+        "amount_cents": -8200,
+        "category": "Food",
+        "type": "Expense",
+        "date": "2026-11-08",
+        "description": "Groceries"
+      },
+      {
+        "id": "tx-fuel",
+        "amount_cents": -4500,
+        "category": "Transport",
+        "type": "Expense",
+        "date": "2026-11-10",
+        "description": "Fuel"
+      },
+      {
+        "id": "tx-adj",
+        "amount_cents": -245000,
+        "category": "System",
+        "type": "Adjustment",
+        "date": "2026-11-01",
+        "description": "Rent already paid for November"
+      }
+    ],
+    "bill_occurrences": []
+  },
+  "oracle": {
+    "safe_to_spend_cents": 442200,
+    "overdraft_ppm": 0,
+    "minimum_balance_p10_cents": 442200,
+    "minimum_balance_p50_cents": 442200,
+    "projected_low_cents": 442200,
+    "projected_low_date": "2026-11-20",
+    "ending_balance_cents": 1313846,
+    "first_negative_date": null,
+    "debt_months_to_payoff": 163,
+    "debt_total_interest_cents": 430891,
+    "starting_balance_cents": 482300,
+    "cash_minus_entered_debt_cents": -322700,
+    "recorded_spend_this_month_cents": 12700,
+    "scheduled_outflow_in_horizon_cents": 608454,
+    "p10_label": "Safe to Spend (P10)",
+    "event_count": 22,
+    "seed": 7,
+    "runs": 500,
+    "horizon_days": 90
+  },
+  "surfaces": {
+    "home": [
+      "safe_to_spend_cents",
+      "projected_low_cents",
+      "overdraft_ppm",
+      "p10_label"
+    ],
+    "money": [
+      "starting_balance_cents",
+      "cash_minus_entered_debt_cents"
+    ],
+    "budget": [
+      "recorded_spend_this_month_cents"
+    ],
+    "bills": [
+      "scheduled_outflow_in_horizon_cents"
+    ],
+    "plan": [
+      "debt_months_to_payoff",
+      "safe_to_spend_cents"
+    ],
+    "future": [
+      "minimum_balance_p10_cents",
+      "minimum_balance_p50_cents",
+      "ending_balance_cents"
+    ]
+  }
+}

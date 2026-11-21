@@ -24,6 +24,136 @@ function nextId(prefix: string, rows: { id?: number | string }[]): string {
   return id;
 }
 
+function validIsoDate(value: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const [year, month, day] = value.split("-").map(Number);
+  const parsed = new Date(Date.UTC(year, month - 1, day));
+  return parsed.getUTCFullYear() === year && parsed.getUTCMonth() === month - 1 && parsed.getUTCDate() === day;
+}
+
+function occurrenceSlot(occurrence: { due_date: string; original_due_date?: string | null }): string {
+  return occurrence.original_due_date || occurrence.due_date;
+}
+
+function isScheduledPaymentDate(payment: PaymentItem, value: string): boolean {
+  if (payment.recurrence === "Monthly" && payment.due_day) {
+    const [year, month, day] = value.split("-").map(Number);
+    const lastDay = new Date(Date.UTC(year, month, 0)).getUTCDate();
+    return day === Math.min(payment.due_day, lastDay);
+  }
+  if (!payment.due_date || payment.recurrence === "One-time") return payment.due_date === value;
+  const start = new Date(`${payment.due_date}T00:00:00Z`).getTime();
+  const current = new Date(`${value}T00:00:00Z`).getTime();
+  const days = Math.round((current - start) / 86_400_000);
+  const interval = payment.recurrence === "Weekly" ? 7 : 14;
+  return days >= 0 && days % interval === 0;
+}
+
+/** Mark one stable payment slot paid, atomically adding its matching expense transaction. */
+export function markBillOccurrencePaid(
+  state: LedgerState,
+  paymentId: number | string,
+  slotDate: string,
+  transactionDate: string = slotDate,
+): EditResult {
+  if (!validIsoDate(slotDate) || !validIsoDate(transactionDate)) {
+    return { ok: false, error: "Use valid calendar dates for the bill and transaction." };
+  }
+  const payment = state.payments.find((item) => String(item.id) === String(paymentId));
+  if (!payment) return { ok: false, error: "That bill no longer exists." };
+  const next = clone(state);
+  const occurrence = next.bill_occurrences.find(
+    (item) => String(item.payment_id) === String(paymentId) && occurrenceSlot(item) === slotDate,
+  );
+  if (occurrence?.paid) return { ok: true, state };
+  if (!occurrence && !isScheduledPaymentDate(payment, slotDate)) {
+    return { ok: false, error: "This date is no longer on the bill’s schedule. Reopen the bill and try again." };
+  }
+  const transactionId = nextId("tx", next.transactions);
+  const transaction = {
+    id: transactionId,
+    amount_cents: -payment.amount_cents,
+    category: "Bills",
+    type: "Expense" as const,
+    date: transactionDate,
+    description: payment.name,
+  };
+  next.transactions = [...next.transactions, transaction];
+  next.current_balance_cents += transaction.amount_cents;
+  if (!Number.isSafeInteger(next.current_balance_cents)) {
+    return { ok: false, error: "That payment is outside the supported balance range." };
+  }
+  if (occurrence) {
+    if (occurrence.transaction_id !== undefined && occurrence.transaction_id !== null) {
+      return { ok: false, error: "This bill occurrence already has a transaction." };
+    }
+    occurrence.paid = true;
+    occurrence.transaction_id = transactionId;
+  } else {
+    next.bill_occurrences = [
+      ...next.bill_occurrences,
+      {
+        id: nextId("occ", next.bill_occurrences),
+        payment_id: paymentId,
+        due_date: slotDate,
+        paid: true,
+        transaction_id: transactionId,
+        original_due_date: slotDate,
+        is_user_modified: false,
+      },
+    ];
+  }
+  next.updated_at = new Date().toISOString();
+  return commit(next);
+}
+
+/** Move one payment slot while retaining its original schedule identity. */
+export function moveBillOccurrence(
+  state: LedgerState,
+  paymentId: number | string,
+  slotDate: string,
+  newDate: string,
+): EditResult {
+  if (!validIsoDate(slotDate) || !validIsoDate(newDate)) {
+    return { ok: false, error: "Use valid calendar dates for the original and new bill dates." };
+  }
+  const payment = state.payments.find((item) => String(item.id) === String(paymentId));
+  if (!payment) return { ok: false, error: "That bill no longer exists." };
+  const next = clone(state);
+  const occurrence = next.bill_occurrences.find(
+    (item) => String(item.payment_id) === String(paymentId) && occurrenceSlot(item) === slotDate,
+  );
+  if (occurrence?.paid) return { ok: false, error: "A paid bill occurrence cannot be moved." };
+  if (!occurrence && !isScheduledPaymentDate(payment, slotDate)) {
+    return { ok: false, error: "This date is no longer on the bill’s schedule. Reopen the bill and try again." };
+  }
+  const collision = next.bill_occurrences.some(
+    (item) => item !== occurrence && String(item.payment_id) === String(paymentId) && item.due_date === newDate,
+  );
+  if (collision || (newDate !== slotDate && isScheduledPaymentDate(payment, newDate))) {
+    return { ok: false, error: "That bill already has an occurrence on the new date." };
+  }
+  if (occurrence) {
+    occurrence.due_date = newDate;
+    occurrence.original_due_date = slotDate;
+    occurrence.is_user_modified = true;
+  } else {
+    next.bill_occurrences = [
+      ...next.bill_occurrences,
+      {
+        id: nextId("occ", next.bill_occurrences),
+        payment_id: paymentId,
+        due_date: newDate,
+        paid: false,
+        original_due_date: slotDate,
+        is_user_modified: true,
+      },
+    ];
+  }
+  next.updated_at = new Date().toISOString();
+  return commit(next);
+}
+
 export function dollarsToCents(value: number): number | null {
   if (typeof value !== "number" || !Number.isFinite(value)) return null;
   const cents = Math.round(value * 100);
@@ -146,15 +276,21 @@ export function reconcileBalance(state: LedgerState, balanceCents: number, date:
   if (!Number.isSafeInteger(balanceCents)) {
     return { ok: false, error: "Enter the balance in dollars and cents." };
   }
-  const diff = balanceCents - state.current_balance_cents;
-  if (!Number.isSafeInteger(diff)) {
+  if (!validIsoDate(date)) return { ok: false, error: "Use a valid reconciliation date." };
+  const asOfBalance = state.transactions
+    .filter((tx) => tx.date <= date)
+    .reduce((sum, tx) => sum + BigInt(tx.amount_cents), 0n);
+  const difference = BigInt(balanceCents) - asOfBalance;
+  const diff = Number(difference);
+  const ledgerTotal = Number(BigInt(state.current_balance_cents) + difference);
+  if (!Number.isSafeInteger(diff) || !Number.isSafeInteger(ledgerTotal)) {
     return { ok: false, error: "That balance is outside the supported range." };
   }
   if (diff === 0) {
     return { ok: false, error: "That already matches the recorded balance. No adjustment was added." };
   }
   const next = clone(state);
-  next.current_balance_cents = balanceCents;
+  next.current_balance_cents = ledgerTotal;
   next.updated_at = new Date().toISOString();
   next.transactions = [
     ...next.transactions,
@@ -212,6 +348,11 @@ export function addBill(
 export function removePayment(state: LedgerState, id: number | string): EditResult {
   const next = clone(state);
   next.payments = next.payments.filter((payment) => String(payment.id) !== String(id));
+  for (const debt of next.liabilities ?? []) {
+    if (debt.linked_payment_id != null && String(debt.linked_payment_id) === String(id)) {
+      delete debt.linked_payment_id;
+    }
+  }
   next.bill_occurrences = next.bill_occurrences.filter(
     (occurrence) => String(occurrence.payment_id) !== String(id)
   );
@@ -258,7 +399,7 @@ export function removeIncome(state: LedgerState, id: number | string): EditResul
 
 export function addInstallmentDebt(
   state: LedgerState,
-  debt: { name: string; balanceCents: number; aprBasisPoints: number; minPaymentCents: number }
+  debt: { name: string; balanceCents: number; aprBasisPoints: number; minPaymentCents: number; dueDay?: number; linkedPaymentId?: number | string }
 ): EditResult {
   const name = debt.name.trim();
   if (!name) return { ok: false, error: "Enter a name for the debt." };
@@ -271,6 +412,9 @@ export function addInstallmentDebt(
   if (!Number.isSafeInteger(debt.minPaymentCents) || debt.minPaymentCents < 0) {
     return { ok: false, error: "Enter the minimum payment." };
   }
+  if (debt.dueDay !== undefined && (!Number.isInteger(debt.dueDay) || debt.dueDay < 1 || debt.dueDay > 31)) {
+    return { ok: false, error: "Enter the usual payment day from 1 to 31." };
+  }
   const next = clone(state);
   next.liabilities = [
     ...(next.liabilities ?? []),
@@ -281,8 +425,23 @@ export function addInstallmentDebt(
       apr_basis_points: debt.aprBasisPoints,
       min_payment_cents: debt.minPaymentCents,
       kind: "installment",
+      ...(debt.dueDay === undefined ? {} : { due_day_of_month: debt.dueDay }),
+      ...(debt.linkedPaymentId === undefined ? {} : { linked_payment_id: debt.linkedPaymentId }),
     },
   ];
+  if (debt.linkedPaymentId !== undefined) next.version = "2.2";
+  next.updated_at = new Date().toISOString();
+  return commit(next);
+}
+
+export function updateLiabilityBalance(state: LedgerState, id: string, balanceCents: number): EditResult {
+  if (!Number.isSafeInteger(balanceCents) || balanceCents < 0) {
+    return { ok: false, error: "Enter the amount still owed in dollars, or enter 0 for a paid-off debt." };
+  }
+  const next = clone(state);
+  const debt = next.liabilities.find((item) => item.id === id);
+  if (!debt) return { ok: false, error: "That debt no longer exists." };
+  debt.balance_cents = balanceCents;
   next.updated_at = new Date().toISOString();
   return commit(next);
 }

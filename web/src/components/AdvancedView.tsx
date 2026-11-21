@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import {
   assumptionError,
   DEFAULT_ASSUMPTIONS,
@@ -40,10 +40,14 @@ export function AdvancedView({
   assumptions: Assumptions;
   outcome: ModelOutcome;
   asOf: string;
-  onApply: (next: Assumptions) => void;
+  onApply: (next: Assumptions) => string | null;
 }) {
   const [draft, setDraft] = useState(() => draftFrom(assumptions));
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setDraft(draftFrom(assumptions));
+  }, [assumptions]);
 
   function set<K extends keyof typeof draft>(key: K, value: string) {
     setDraft((current) => ({ ...current, [key]: value }));
@@ -81,8 +85,8 @@ export function AdvancedView({
       setError(problem);
       return;
     }
-    setError(null);
-    onApply(next);
+    const persistenceError = onApply(next);
+    setError(persistenceError);
   }
 
   return (
@@ -159,9 +163,9 @@ export function AdvancedView({
               type="button"
               variant="quiet"
               onClick={() => {
-                setDraft(draftFrom(DEFAULT_ASSUMPTIONS));
-                setError(null);
-                onApply(DEFAULT_ASSUMPTIONS);
+                const persistenceError = onApply(DEFAULT_ASSUMPTIONS);
+                setError(persistenceError);
+                if (!persistenceError) setDraft(draftFrom(DEFAULT_ASSUMPTIONS));
               }}
             >
               Use the default assumptions

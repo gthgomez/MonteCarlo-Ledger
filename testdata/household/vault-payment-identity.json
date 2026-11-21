@@ -1,0 +1,42 @@
+{
+  "as_of": "2028-02-01",
+  "horizon_days": 35,
+  "reserve_cents": 10000,
+  "ledger": {
+    "version": "2.2",
+    "current_balance_cents": 120000,
+    "incomes": [],
+    "payments": [
+      {
+        "id": "payment-car",
+        "name": "Car loan",
+        "amount_cents": 50000,
+        "recurrence": "Monthly",
+        "due_day": 15
+      }
+    ],
+    "transactions": [
+      {"id": "opening", "type": "Adjustment", "amount_cents": 120000, "date": "2028-01-31"}
+    ],
+    "bill_occurrences": [],
+    "liabilities": [
+      {
+        "id": "debt-car",
+        "name": "Car loan",
+        "balance_cents": 300000,
+        "apr_basis_points": 0,
+        "min_payment_cents": 50000,
+        "due_day_of_month": 15,
+        "linked_payment_id": "payment-car"
+      },
+      {
+        "id": "10",
+        "name": "Archived",
+        "balance_cents": 45000,
+        "apr_basis_points": 0,
+        "min_payment_cents": 8000,
+        "is_active": false
+      }
+    ]
+  }
+}

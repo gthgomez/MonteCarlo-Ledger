@@ -1,12 +1,12 @@
 /** Display formatting only. Does not round ledger cents. */
 
 export function formatMoney(cents: number): string {
+  if (!Number.isSafeInteger(cents)) return "—";
   const sign = cents < 0 ? "-" : "";
-  const abs = Math.abs(cents) / 100;
-  return `${sign}$${abs.toLocaleString("en-US", {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  })}`;
+  const abs = BigInt(Math.abs(cents));
+  const dollars = (abs / 100n).toLocaleString("en-US");
+  const remainder = String(abs % 100n).padStart(2, "0");
+  return `${sign}$${dollars}.${remainder}`;
 }
 
 /**

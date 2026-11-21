@@ -14,7 +14,7 @@ interface HomeViewProps {
   usingDemo: boolean;
   needsSetup: boolean;
   copy: PositionCopy;
-  recordedBalanceCents: number;
+  startingBalanceCents: number;
   safeSpendCents: number;
   plannedLowCents: number;
   plannedLowDate: string;
@@ -22,6 +22,7 @@ interface HomeViewProps {
   insights: Insight[];
   assumptionsChanged: boolean;
   horizonDays: number;
+  reserveCents: number;
   runs: number;
   onNavigate: (section: Section) => void;
   createOwn: (input: Parameters<typeof createStarterLedger>[0]) => { ok: true } | { ok: false; error: string };
@@ -32,7 +33,7 @@ export function HomeView({
   usingDemo,
   needsSetup,
   copy,
-  recordedBalanceCents,
+  startingBalanceCents,
   safeSpendCents,
   plannedLowCents,
   plannedLowDate,
@@ -40,6 +41,7 @@ export function HomeView({
   insights,
   assumptionsChanged,
   horizonDays,
+  reserveCents,
   runs,
   onNavigate,
   createOwn,
@@ -90,10 +92,11 @@ export function HomeView({
     setOpen(false);
   }
 
+  const previewDays = Math.min(30, horizonDays);
   const spendDetail =
     safeSpendCents >= 0
-      ? "An estimate of what you could spend while keeping the chosen low point at your reserve. Not a guarantee."
-      : "The chosen low point is below zero, so this is not an amount you can spend.";
+      ? "An estimate of what you could spend while keeping the modeled low point at your reserve."
+      : "The model shows a shortfall against your reserve. This is the size of that gap.";
 
   return (
     <div className="space-y-6">
@@ -175,9 +178,9 @@ export function HomeView({
 
       <div className="grid gap-4 md:grid-cols-3">
         <Metric
-          label="Money recorded"
-          value={formatMoney(recordedBalanceCents)}
-          detail="The sum of transactions in this ledger. Not a forecast."
+          label="Money available now"
+          value={formatMoney(startingBalanceCents)}
+          detail="Based on ledger entries dated today or earlier. Check it against your bank balance."
         />
         <Metric label="Cautious amount to spend" value={formatMoney(safeSpendCents)} detail={spendDetail} />
         <Metric
@@ -188,14 +191,14 @@ export function HomeView({
       </div>
 
       <section className="rounded-2xl border border-line bg-surface p-4 shadow-card sm:p-6">
-        <h2 className="text-lg font-semibold">The next 30 days, if the schedule is exact</h2>
+        <h2 className="text-lg font-semibold">The next {previewDays} {previewDays === 1 ? "day" : "days"}, if the schedule is exact</h2>
         <dl className="mt-4 grid gap-4 sm:grid-cols-3">
           <div>
             <dt className="text-sm text-muted">Scheduled income</dt>
             <dd className="text-xl font-semibold tabular-nums">{formatMoney(slice.scheduledIncomeCents)}</dd>
           </div>
           <div>
-            <dt className="text-sm text-muted">Known bills</dt>
+            <dt className="text-sm text-muted">Scheduled payments and spending</dt>
             <dd className="text-xl font-semibold tabular-nums">{formatMoney(slice.scheduledOutflowCents)}</dd>
           </div>
           <div>
@@ -204,9 +207,23 @@ export function HomeView({
           </div>
         </dl>
         <p className="mt-3 text-sm text-muted">
-          Planned balance is not money you are guaranteed to have. It only follows paychecks and bills already entered.
-          {slice.events.length === 0 ? " Nothing is scheduled in these 30 days." : ""}
+          {slice.events.length === 0
+            ? "No payments or income are scheduled in this period."
+            : "This balance follows the dated income, payments, and spending in your ledger."}
         </p>
+        {slice.events.length > 0 && (
+          <details className="mt-3">
+            <summary className="cursor-pointer rounded-md py-2 font-medium">See what is included</summary>
+            <ul className="divide-y divide-line">
+              {slice.events.map((event, index) => (
+                <li key={index} className="flex flex-wrap justify-between gap-x-4 gap-y-1 py-2 text-sm">
+                  <span>{formatDateLabel(event.date)} · {event.name}</span>
+                  <span className="tabular-nums">{formatMoney(event.amount_cents)}</span>
+                </li>
+              ))}
+            </ul>
+          </details>
+        )}
       </section>
 
       <section className="space-y-3">
@@ -236,6 +253,9 @@ export function HomeView({
       <section className="space-y-3 rounded-2xl border border-line bg-surface p-4 shadow-card sm:p-6" aria-label="How these numbers were calculated">
         <h2 className="text-lg font-semibold">What these numbers mean</h2>
         <p className="text-sm text-muted">{copy.caution}</p>
+        <p className="text-sm text-ink">
+          This {horizonDays}-day estimate keeps {formatMoney(reserveCents)} as your reserve.
+        </p>
         <p className="text-sm text-ink">
           Technical name: {copy.technicalName}. It comes from {runs} modeled futures. The middle outcome is a median
           rank, not an average.
