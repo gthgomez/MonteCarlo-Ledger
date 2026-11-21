@@ -332,7 +332,7 @@ def build_scenario(
     window_end = start + timedelta(days=horizon_days)
     if ledger is None:
         if not read_only:
-            db_manager.sync_bill_occurrences(as_of, window_end.isoformat())
+            db_manager.sync_bill_occurrences(as_of, window_end.isoformat(), include_lookback=False)
         ledger = db_manager.read_ledger_view(as_of, window_end.isoformat())
     liabilities = ledger.get("liabilities") or []
     events = (

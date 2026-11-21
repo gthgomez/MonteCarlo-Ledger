@@ -350,43 +350,17 @@ def test_identical_bills_and_debt_across_persisted_adapters(tmp_path, monkeypatc
     database = tmp_path / "identity.db"
     monkeypatch.setattr(db_manager, "DB_PATH", str(database))
     db_manager.init_db()
-    payment = {
-        "id": "monthly-payment",
-        "name": "Car loan",
-        "amount_cents": 50_000,
-        "recurrence": "Monthly",
-        "due_day": 15,
-    }
-    debt = {
-        "id": "loan",
-        "name": "Car loan",
-        "balance_cents": 300_000,
-        "apr_basis_points": 0,
-        "min_payment_cents": 50_000,
-        "due_day_of_month": 15,
-    }
-    if linked:
-        debt["linked_payment_id"] = payment["id"]
-    doc = {
-        "as_of": "2028-02-01",
-        "horizon_days": 35,
-        "simulation": dict(
-            household["simulation"],
-            surprise_probability_ppm=0,
-            reserve_cents=10_000,
-        ),
-        "ledger": {
-            "version": "2.2" if linked else "2.1",
-            "current_balance_cents": 120_000,
-            "incomes": [],
-            "payments": [payment],
-            "transactions": [{
-                "id": 1, "type": "Adjustment", "amount_cents": 120_000, "date": "2028-01-31",
-            }],
-            "bill_occurrences": [],
-            "liabilities": [debt],
-        },
-    }
+    doc = json.loads((FIXTURE.parent / "vault-payment-identity.json").read_text())
+    if not linked:
+        doc["ledger"]["version"] = "2.1"
+        debt = doc["ledger"]["liabilities"][0]
+        del debt["linked_payment_id"]
+        doc["ledger"]["liabilities"] = [debt]
+    doc["simulation"] = dict(
+        household["simulation"],
+        surprise_probability_ppm=0,
+        reserve_cents=doc["reserve_cents"],
+    )
     sync.restore_ledger_snapshot(doc["ledger"])
     doc["ledger"] = sync.export_ledger_snapshot()
     sync.restore_ledger_snapshot(doc["ledger"])

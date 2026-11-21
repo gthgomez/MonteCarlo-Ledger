@@ -968,7 +968,7 @@ def reschedule_occurrence(occurrence_id: int, due_date: str):
                 (due_date, original, occurrence_id),
             )
 
-def sync_bill_occurrences(start_date: str, end_date: str):
+def sync_bill_occurrences(start_date: str, end_date: str, *, include_lookback: bool = True):
     """
     Synchronizes bill occurrences with the recurring schedule.
 
@@ -976,8 +976,11 @@ def sync_bill_occurrences(start_date: str, end_date: str):
     whether that scheduled slot is already represented (by ``due_date`` *or*
     ``original_due_date``), so a move is never regenerated as a second obligation.
     """
-    # Look back 30 days to catch missed bills that need generation
-    lookback_date = (datetime.strptime(start_date, '%Y-%m-%d') - timedelta(days=30)).strftime('%Y-%m-%d')
+    # Interactive bill management can look back for missed bills. Forecast refresh
+    # must use the existing overdue evidence rather than create past obligations.
+    lookback_date = start_date
+    if include_lookback:
+        lookback_date = (datetime.fromisoformat(start_date) - timedelta(days=30)).date().isoformat()
     payments = [dict(vars(p)) for p in get_all_payments()]
     schedule = budget_engine.get_upcoming_schedule(payments, lookback_date, end_date)
     
