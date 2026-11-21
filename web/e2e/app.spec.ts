@@ -128,7 +128,7 @@ test.describe("decision journeys", () => {
     await expect(page.getByText("Months to Payoff")).toBeVisible();
     await expect(page.getByText("Total Interest Paid")).toBeVisible();
     await expect(
-      page.getByText(/not automatically included in the cash-flow forecast/i)
+      page.getByText(/Minimum payments for debts you entered are already ordinary outflows/i)
     ).toBeVisible();
     await page.getByRole("button", { name: /Avalanche \(APR\)/ }).click();
     await expect(page.getByText("Months to Payoff")).toBeVisible();

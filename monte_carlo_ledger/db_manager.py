@@ -88,14 +88,29 @@ def get_db_connection():
     finally:
         conn.close()
 
+LEDGER_SCHEMA_VERSION = 13
+
+
 def open_ledger_for_read() -> None:
-    """Open an existing ledger for read-only tools; never create a new database file."""
-    if not Path(DB_PATH).is_file():
+    """Validate that an existing ledger can be opened without writing or migrating it."""
+    path = Path(DB_PATH).absolute()
+    if not path.is_file():
         raise FileNotFoundError(
             f"No ledger database at {DB_PATH}. "
-            "Initialize with `python -m monte_carlo_ledger` before starting the MCP server."
+            "Run `python -m monte_carlo_ledger` to set up a ledger first."
         )
-    init_db()
+    conn = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)
+    try:
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+    finally:
+        conn.close()
+    if version < LEDGER_SCHEMA_VERSION:
+        raise ValueError(
+            f"Ledger schema {version} needs an update. "
+            "Run `python -m monte_carlo_ledger` to upgrade it before making a forecast."
+        )
+    if version > LEDGER_SCHEMA_VERSION:
+        raise ValueError(f"Ledger schema {version} requires a newer version of MonteCarlo Ledger.")
 
 
 def init_db():
@@ -136,6 +151,35 @@ def init_db():
             _migrate_v10_to_v11(conn)
         if version < 12:
             _migrate_v11_to_v12(conn)
+        if version < 13:
+            _migrate_v12_to_v13(conn)
+
+
+def _migrate_v12_to_v13(conn: sqlite3.Connection) -> None:
+    """Keep debt identities and add an optional one-to-one payment relationship."""
+    with conn:
+        conn.execute("BEGIN IMMEDIATE")
+        if conn.execute("PRAGMA user_version").fetchone()[0] >= 13:
+            return
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(liabilities)")}
+        if "linked_payment_id" not in columns:
+            conn.execute(
+                "ALTER TABLE liabilities ADD COLUMN linked_payment_id INTEGER "
+                "REFERENCES payments(id) ON DELETE SET NULL"
+            )
+        if "is_active" not in columns:
+            conn.execute(
+                "ALTER TABLE liabilities ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1 "
+                "CHECK(is_active IN (0, 1))"
+            )
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_liabilities_linked_payment "
+            "ON liabilities(linked_payment_id)"
+        )
+        payment_columns = {row["name"] for row in conn.execute("PRAGMA table_info(payments)")}
+        if "snapshot_id" not in payment_columns:
+            conn.execute("ALTER TABLE payments ADD COLUMN snapshot_id TEXT")
+        conn.execute(f"PRAGMA user_version = {LEDGER_SCHEMA_VERSION}")
 
 
 def _migrate_v11_to_v12(conn: sqlite3.Connection):
@@ -431,13 +475,18 @@ def validate_balance_consistency() -> Tuple[bool, int, int]:
     with get_db_connection() as conn:
         # Explicitly begin a transaction to guarantee read snapshot isolation
         conn.execute("BEGIN DEFERRED")
-        res_ledger = conn.execute("SELECT SUM(amount) FROM transactions").fetchone()
-        res_stored = conn.execute("SELECT value FROM settings WHERE key = 'current_balance'").fetchone()
-        
-        ledger = _to_int_strict(res_ledger[0]) if res_ledger and res_ledger[0] is not None else 0
-        stored = _to_int_strict(res_stored['value']) if res_stored else 0
-        
+        ledger, stored = read_balance_consistency(conn)
         return (ledger == stored, ledger, stored)
+
+
+def read_balance_consistency(conn: sqlite3.Connection) -> Tuple[int, int]:
+    """Read ledger and cached balances from the caller's SQLite snapshot."""
+    res_ledger = conn.execute("SELECT SUM(amount) FROM transactions").fetchone()
+    res_stored = conn.execute("SELECT value FROM settings WHERE key = 'current_balance'").fetchone()
+    ledger = _to_int_strict(res_ledger[0]) if res_ledger and res_ledger[0] is not None else 0
+    stored = _to_int_strict(res_stored["value"]) if res_stored else 0
+    return ledger, stored
+
 
 def sync_stored_balance():
     """Updates the cached balance to match the ledger sum."""
@@ -653,13 +702,14 @@ def read_ledger_view(start_date: str, end_date: str) -> Dict[str, Any]:
         income_rows = conn.execute("SELECT * FROM income ORDER BY id ASC").fetchall()
         payment_rows = conn.execute("SELECT * FROM payments ORDER BY name ASC").fetchall()
         occurrence_rows = conn.execute(
-            "SELECT id, payment_id, due_date, paid, transaction_id, "
-            "original_due_date, is_user_modified "
-            "FROM bill_occurrences "
-            "WHERE (due_date >= ? AND due_date <= ?) "
-            "   OR (original_due_date >= ? AND original_due_date <= ?) "
-            "ORDER BY due_date ASC, id ASC",
-            (start_date, end_date, start_date, end_date),
+            "SELECT o.id, o.payment_id, o.due_date, o.paid, o.transaction_id, "
+            "o.original_due_date, o.is_user_modified, t.amount AS transaction_amount "
+            "FROM bill_occurrences o LEFT JOIN transactions t ON t.id = o.transaction_id "
+            "WHERE (o.due_date >= ? AND o.due_date <= ?) "
+            "   OR (COALESCE(o.original_due_date, o.due_date) >= ? "
+            "       AND COALESCE(o.original_due_date, o.due_date) <= ?) "
+            "ORDER BY o.due_date ASC, o.id ASC",
+            (start_date, end_date, start_date[:8] + "01", end_date),
         ).fetchall()
         future_rows = conn.execute(
             "SELECT id, amount, category, type, date, description "
@@ -689,6 +739,11 @@ def read_ledger_view(start_date: str, end_date: str) -> Dict[str, Any]:
             "WHERE o.paid = 0 AND o.due_date < ?",
             (start_date,),
         ).fetchone()
+        liability_rows = conn.execute(
+            "SELECT id, name, balance_cents, apr_basis_points, min_payment_cents, "
+            "kind, min_payment_percent_bps, min_payment_floor_cents, due_day_of_month, "
+            "linked_payment_id, is_active FROM liabilities ORDER BY id"
+        ).fetchall()
         conn.execute("COMMIT")
 
     incomes = [
@@ -726,6 +781,7 @@ def read_ledger_view(start_date: str, end_date: str) -> Dict[str, Any]:
             "due_date": r["due_date"],
             "paid": bool(r["paid"]),
             "transaction_id": r["transaction_id"],
+            "transaction_amount": r["transaction_amount"],
             "original_due_date": r["original_due_date"] or r["due_date"],
             "is_user_modified": bool(r["is_user_modified"]),
         }
@@ -744,11 +800,35 @@ def read_ledger_view(start_date: str, end_date: str) -> Dict[str, Any]:
     ]
     ledger_balance = _to_int_strict(ledger_sum)
     stored_balance = _to_int_strict(stored_row["value"]) if stored_row else 0
+    liabilities: List[Dict[str, Any]] = []
+    for row in liability_rows:
+        item: Dict[str, Any] = {
+            "id": row["id"],
+            "name": row["name"],
+            "balance_cents": _to_int_strict(row["balance_cents"]),
+            "apr_basis_points": _to_int_strict(row["apr_basis_points"]),
+            "min_payment_cents": _to_int_strict(row["min_payment_cents"]),
+            "kind": row["kind"] or "installment",
+        }
+        percent_bps = _to_int_strict(row["min_payment_percent_bps"])
+        floor_cents = _to_int_strict(row["min_payment_floor_cents"])
+        if percent_bps:
+            item["min_payment_percent_bps"] = percent_bps
+        if floor_cents:
+            item["min_payment_floor_cents"] = floor_cents
+        if row["due_day_of_month"] is not None:
+            item["due_day_of_month"] = int(row["due_day_of_month"])
+        if row["linked_payment_id"] is not None:
+            item["linked_payment_id"] = row["linked_payment_id"]
+        if not row["is_active"]:
+            item["is_active"] = False
+        liabilities.append(item)
     return {
         "incomes": incomes,
         "payments": payments,
         "occurrences": occurrences,
         "future_transactions": future_transactions,
+        "liabilities": liabilities,
         "ledger_balance_cents": ledger_balance,
         "starting_balance_cents": _to_int_strict(starting_sum),
         "stored_balance_cents": stored_balance,

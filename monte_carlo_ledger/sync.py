@@ -103,39 +103,49 @@ def decrypt_payload(ciphertext_b64: str, nonce_b64: str, enc_key: bytes) -> Dict
 
 def export_ledger_snapshot() -> Dict[str, Any]:
     """Export local ledger state as a canonical snapshot dictionary."""
-    is_sync, ledger_balance, stored_balance = db_manager.validate_balance_consistency()
-    if not is_sync:
-        raise ValueError(
-            f"Cannot export desynchronized ledger. Stored: {stored_balance}, Ledger: {ledger_balance}. Reconcile first."
-        )
-
-    incomes = [
-        {
-            "id": inc.id,
-            "name": inc.name,
-            "amount_cents": inc.amount,
-            "frequency": inc.frequency,
-            "last_payday": inc.last_payday,
-            "next_payday": inc.next_payday,
-            "expected_amount": inc.expected_amount,
-        }
-        for inc in db_manager.get_all_income()
-    ]
-
-    payments = [
-        {
-            "id": pmt.id,
-            "name": pmt.name,
-            "amount_cents": pmt.amount,
-            "due_day": pmt.due_day,
-            "recurrence": pmt.recurrence,
-            "due_date": pmt.due_date,
-            "is_auto_withdraw": bool(pmt.is_auto_withdraw),
-        }
-        for pmt in db_manager.get_all_payments()
-    ]
-
     with db_manager.get_db_connection() as conn:
+        conn.execute("BEGIN DEFERRED")
+        ledger_balance, stored_balance = db_manager.read_balance_consistency(conn)
+        if ledger_balance != stored_balance:
+            raise ValueError(
+                "Cannot export desynchronized ledger. "
+                f"Stored: {stored_balance}, Ledger: {ledger_balance}. Reconcile first."
+            )
+
+        incomes = [
+            dict(row)
+            for row in conn.execute(
+                "SELECT id, name, amount AS amount_cents, frequency, last_payday, next_payday, "
+                "expected_amount FROM income ORDER BY id"
+            )
+        ]
+        payment_rows = conn.execute(
+            "SELECT id, snapshot_id, name, amount AS amount_cents, due_day, recurrence, "
+            "due_date, is_auto_withdraw FROM payments ORDER BY id"
+        ).fetchall()
+        # Imported canonical IDs are kept verbatim alongside SQLite's integer keys.
+        # New local keys normally export as integers. They use a separate label if
+        # an imported string with the same digits already occupies that identity.
+        payment_ids = {
+            row["id"]: json.loads(row["snapshot_id"])
+            for row in payment_rows if row["snapshot_id"] is not None
+        }
+        used_payment_ids = {str(value) for value in payment_ids.values()}
+        payments = []
+        for row in payment_rows:
+            local_id = row["id"]
+            if local_id not in payment_ids:
+                candidate: int | str = local_id
+                while str(candidate) in used_payment_ids:
+                    candidate = f"local-payment-{candidate}"
+                payment_ids[local_id] = candidate
+                used_payment_ids.add(str(candidate))
+            payment = dict(row)
+            del payment["snapshot_id"]
+            payment["id"] = payment_ids[local_id]
+            payment["is_auto_withdraw"] = bool(payment["is_auto_withdraw"])
+            payments.append(payment)
+
         tx_rows = conn.execute("SELECT id, amount, category, type, date, description FROM transactions ORDER BY id").fetchall()
         transactions = [
             {
@@ -156,7 +166,7 @@ def export_ledger_snapshot() -> Dict[str, Any]:
         occurrences = [
             {
                 "id": r["id"],
-                "payment_id": r["payment_id"],
+                "payment_id": payment_ids[r["payment_id"]],
                 "due_date": r["due_date"],
                 "paid": bool(r["paid"]),
                 "transaction_id": r["transaction_id"],
@@ -168,8 +178,8 @@ def export_ledger_snapshot() -> Dict[str, Any]:
 
         liab_rows = conn.execute(
             "SELECT id, name, balance_cents, apr_basis_points, min_payment_cents, "
-            "kind, min_payment_percent_bps, min_payment_floor_cents, due_day_of_month "
-            "FROM liabilities ORDER BY id"
+            "kind, min_payment_percent_bps, min_payment_floor_cents, due_day_of_month, "
+            "linked_payment_id, is_active FROM liabilities ORDER BY id"
         ).fetchall()
         liabilities = []
         for r in liab_rows:
@@ -188,10 +198,18 @@ def export_ledger_snapshot() -> Dict[str, Any]:
                 item["min_payment_floor_cents"] = r["min_payment_floor_cents"]
             if r["due_day_of_month"] is not None:
                 item["due_day_of_month"] = r["due_day_of_month"]
+            if r["linked_payment_id"] is not None:
+                item["linked_payment_id"] = payment_ids[r["linked_payment_id"]]
+            if not r["is_active"]:
+                item["is_active"] = False
             liabilities.append(item)
 
     return {
-        "version": SNAPSHOT_VERSION,
+        "version": (
+            LINKED_LIABILITY_SNAPSHOT_VERSION
+            if any("linked_payment_id" in row or "is_active" in row for row in liabilities)
+            else SNAPSHOT_VERSION
+        ),
         "updated_at": _utc_now_iso(),
         "current_balance_cents": ledger_balance,
         "incomes": incomes,
@@ -204,7 +222,8 @@ def export_ledger_snapshot() -> Dict[str, Any]:
 
 SNAPSHOT_VERSION = "2.1"
 # 2.0 snapshots predate incomes[].expected_amount; they restore with a null override.
-SUPPORTED_SNAPSHOT_VERSIONS = ("2.0", "2.1")
+LINKED_LIABILITY_SNAPSHOT_VERSION = "2.2"
+SUPPORTED_SNAPSHOT_VERSIONS = ("2.0", SNAPSHOT_VERSION, LINKED_LIABILITY_SNAPSHOT_VERSION)
 # Collections that every supported snapshot must carry. A missing collection is an
 # incomplete snapshot, never an empty one: treating it as empty is the defect that
 # allowed `{"version": "2.1"}` to wipe a populated ledger.
@@ -241,6 +260,7 @@ _ROW_FIELDS = {
         {
             "id", "name", "balance_cents", "apr_basis_points", "min_payment_cents",
             "kind", "min_payment_percent_bps", "min_payment_floor_cents", "due_day_of_month",
+            "linked_payment_id", "is_active",
         }
     ),
 }
@@ -548,6 +568,7 @@ def _validate_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
     payment_amounts = {str(p["id"]): p["amount_cents"] for p in payments}
     txn_by_id = {str(t["id"]): t for t in transactions}
     linked_transactions = set()
+    original_slots: set[tuple[str, str]] = set()
     for index, occ in enumerate(occurrences):
         pay_key = str(occ["payment_id"])
         if pay_key not in payment_amounts:
@@ -555,6 +576,10 @@ def _validate_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
                 f"Snapshot bill_occurrences[{index}].payment_id references unknown id "
                 f"{occ['payment_id']!r}"
             )
+        original_slot = (pay_key, occ.get("original_due_date") or occ["due_date"])
+        if original_slot in original_slots:
+            raise ValueError(f"Snapshot bill_occurrences[{index}] duplicates an original payment slot")
+        original_slots.add(original_slot)
         txn_ref = occ.get("transaction_id")
         if txn_ref is None:
             if occ["paid"] and occ.get("is_user_modified"):
@@ -593,8 +618,28 @@ def _validate_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
 
     contract_liabilities: list = []
     seen_liability_ids: set = set()
+    linked_payment_ids: set[int] = set()
+    payments_by_id = {payment_ids[str(payment["id"])]: payment for payment in payments}
     for index, liab in enumerate(liabilities):
         _validate_row_fields(liab, "liabilities", index)
+        field = f"liabilities[{index}]"
+        if ("linked_payment_id" in liab or "is_active" in liab) and version != LINKED_LIABILITY_SNAPSHOT_VERSION:
+            raise ValueError(f"Snapshot {field} requires snapshot version 2.2")
+        if "is_active" in liab:
+            _require_bool(liab["is_active"], f"{field}.is_active")
+        link = liab.get("linked_payment_id")
+        if link is not None:
+            if isinstance(link, bool) or not isinstance(link, (int, str)):
+                raise ValueError(f"Snapshot {field}.linked_payment_id must be a payment identifier")
+            linked_id = _ref(payment_ids, link, f"{field}.linked_payment_id")
+            if linked_id in linked_payment_ids:
+                raise ValueError(f"Snapshot {field}.linked_payment_id is already linked to another debt")
+            linked_payment_ids.add(linked_id)
+            payment = payments_by_id[linked_id]
+            monthly = payment["recurrence"] == "Monthly" and payment.get("due_day") is not None
+            one_time = payment["recurrence"] == "One-time" and payment.get("due_date") is not None
+            if not (monthly or one_time):
+                raise ValueError(f"Snapshot {field}.linked_payment_id requires a dated monthly or one-time payment")
         lid = _require_str(liab.get("id"), f"liabilities[{index}].id")
         if lid in seen_liability_ids:
             raise ValueError(f"Snapshot liabilities has duplicate identifier {lid!r}")
@@ -708,9 +753,9 @@ def restore_ledger_snapshot(snapshot: Dict[str, Any]) -> None:
         with conn:  # one transaction: commit on success, roll back on any error
             conn.execute("DELETE FROM bill_occurrences")
             conn.execute("DELETE FROM transactions")
+            conn.execute("DELETE FROM liabilities")
             conn.execute("DELETE FROM payments")
             conn.execute("DELETE FROM income")
-            conn.execute("DELETE FROM liabilities")
 
             for inc in incomes:
                 conn.execute(
@@ -729,8 +774,8 @@ def restore_ledger_snapshot(snapshot: Dict[str, Any]) -> None:
 
             for pmt in payments:
                 conn.execute(
-                    "INSERT INTO payments (id, name, amount, due_day, recurrence, due_date, is_auto_withdraw) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    "INSERT INTO payments (id, name, amount, due_day, recurrence, due_date, "
+                    "is_auto_withdraw, snapshot_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         payment_ids[str(pmt["id"])],
                         pmt["name"],
@@ -739,6 +784,7 @@ def restore_ledger_snapshot(snapshot: Dict[str, Any]) -> None:
                         pmt["recurrence"],
                         pmt.get("due_date"),
                         1 if pmt.get("is_auto_withdraw", True) else 0,
+                        json.dumps(pmt["id"]),
                     ),
                 )
 
@@ -782,8 +828,8 @@ def restore_ledger_snapshot(snapshot: Dict[str, Any]) -> None:
                 conn.execute(
                     "INSERT INTO liabilities "
                     "(id, name, balance_cents, apr_basis_points, min_payment_cents, "
-                    "kind, min_payment_percent_bps, min_payment_floor_cents, due_day_of_month) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "kind, min_payment_percent_bps, min_payment_floor_cents, due_day_of_month, "
+                    "linked_payment_id, is_active) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         str(liab["id"]),
                         liab["name"],
@@ -794,6 +840,9 @@ def restore_ledger_snapshot(snapshot: Dict[str, Any]) -> None:
                         liab.get("min_payment_percent_bps", 0),
                         liab.get("min_payment_floor_cents", 0),
                         liab.get("due_day_of_month"),
+                        None if liab.get("linked_payment_id") is None
+                        else _ref(payment_ids, liab["linked_payment_id"], "liabilities.linked_payment_id"),
+                        int(liab.get("is_active", True)),
                     ),
                 )
 
