@@ -296,8 +296,8 @@ def test_old_compatible_snapshot_still_pulls(populated_db, monkeypatch):
     assert restored["current_balance_cents"] == 0
 
 
-def test_pull_fingerprint_describes_the_remapped_local_ledger(populated_db, monkeypatch):
-    """Web string ids become Python integers; ancestry must match what is stored."""
+def test_pull_fingerprint_preserves_canonical_ids_in_the_local_ledger(populated_db, monkeypatch):
+    """SQLite uses integer row keys while the vault export keeps the canonical IDs."""
     remote = _empty_snapshot()
     remote["current_balance_cents"] = 100_000
     remote["transactions"] = [
@@ -318,7 +318,8 @@ def test_pull_fingerprint_describes_the_remapped_local_ledger(populated_db, monk
     cfg = sync.load_sync_config()
     local_fingerprint = sync._local_ledger_fingerprint()
     assert cfg["synced_fingerprint"] == local_fingerprint
-    assert cfg["synced_fingerprint"] != sync._snapshot_fingerprint(remote)
+    assert cfg["synced_fingerprint"] == sync._snapshot_fingerprint(remote)
+    assert sync.export_ledger_snapshot()["transactions"][0]["id"] == "tx-web-1"
 
     # An immediate second pull without edits is a no-op, not a false conflict.
     sync.sync_pull(passphrase="passphrase")

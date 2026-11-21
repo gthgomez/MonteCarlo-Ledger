@@ -15,6 +15,7 @@ import getpass
 import hashlib
 import json
 import os
+import sqlite3
 import sys
 import urllib.error
 import urllib.parse
@@ -101,6 +102,22 @@ def decrypt_payload(ciphertext_b64: str, nonce_b64: str, enc_key: bytes) -> Dict
     return json.loads(plaintext.decode("utf-8"))
 
 
+def _canonical_ids(rows: list[sqlite3.Row], collection: str) -> dict[int, int | str]:
+    """Use the imported ID where available and reserve it against new local keys."""
+    ids = {row["id"]: json.loads(row["snapshot_id"]) for row in rows if row["snapshot_id"] is not None}
+    used = {str(value) for value in ids.values()}
+    for row in rows:
+        local_id = row["id"]
+        if local_id in ids:
+            continue
+        candidate: int | str = local_id
+        while str(candidate) in used:
+            candidate = f"local-{collection}-{candidate}"
+        ids[local_id] = candidate
+        used.add(str(candidate))
+    return ids
+
+
 def export_ledger_snapshot() -> Dict[str, Any]:
     """Export local ledger state as a canonical snapshot dictionary."""
     with db_manager.get_db_connection() as conn:
@@ -112,44 +129,38 @@ def export_ledger_snapshot() -> Dict[str, Any]:
                 f"Stored: {stored_balance}, Ledger: {ledger_balance}. Reconcile first."
             )
 
-        incomes = [
-            dict(row)
-            for row in conn.execute(
-                "SELECT id, name, amount AS amount_cents, frequency, last_payday, next_payday, "
-                "expected_amount FROM income ORDER BY id"
-            )
-        ]
+        income_rows = conn.execute(
+            "SELECT id, snapshot_id, name, amount AS amount_cents, frequency, last_payday, next_payday, "
+            "expected_amount FROM income ORDER BY id"
+        ).fetchall()
+        income_ids = _canonical_ids(income_rows, "income")
+        incomes = []
+        for row in income_rows:
+            income = dict(row)
+            del income["snapshot_id"]
+            income["id"] = income_ids[row["id"]]
+            incomes.append(income)
+
         payment_rows = conn.execute(
             "SELECT id, snapshot_id, name, amount AS amount_cents, due_day, recurrence, "
             "due_date, is_auto_withdraw FROM payments ORDER BY id"
         ).fetchall()
-        # Imported canonical IDs are kept verbatim alongside SQLite's integer keys.
-        # New local keys normally export as integers. They use a separate label if
-        # an imported string with the same digits already occupies that identity.
-        payment_ids = {
-            row["id"]: json.loads(row["snapshot_id"])
-            for row in payment_rows if row["snapshot_id"] is not None
-        }
-        used_payment_ids = {str(value) for value in payment_ids.values()}
+        payment_ids = _canonical_ids(payment_rows, "payment")
         payments = []
         for row in payment_rows:
-            local_id = row["id"]
-            if local_id not in payment_ids:
-                candidate: int | str = local_id
-                while str(candidate) in used_payment_ids:
-                    candidate = f"local-payment-{candidate}"
-                payment_ids[local_id] = candidate
-                used_payment_ids.add(str(candidate))
             payment = dict(row)
             del payment["snapshot_id"]
-            payment["id"] = payment_ids[local_id]
+            payment["id"] = payment_ids[row["id"]]
             payment["is_auto_withdraw"] = bool(payment["is_auto_withdraw"])
             payments.append(payment)
 
-        tx_rows = conn.execute("SELECT id, amount, category, type, date, description FROM transactions ORDER BY id").fetchall()
+        tx_rows = conn.execute(
+            "SELECT id, snapshot_id, amount, category, type, date, description FROM transactions ORDER BY id"
+        ).fetchall()
+        transaction_ids = _canonical_ids(tx_rows, "transaction")
         transactions = [
             {
-                "id": r["id"],
+                "id": transaction_ids[r["id"]],
                 "amount_cents": r["amount"],
                 "category": r["category"],
                 "type": r["type"],
@@ -160,16 +171,17 @@ def export_ledger_snapshot() -> Dict[str, Any]:
         ]
 
         occ_rows = conn.execute(
-            "SELECT id, payment_id, due_date, paid, transaction_id, "
+            "SELECT id, snapshot_id, payment_id, due_date, paid, transaction_id, "
             "original_due_date, is_user_modified FROM bill_occurrences ORDER BY id"
         ).fetchall()
+        occurrence_ids = _canonical_ids(occ_rows, "occurrence")
         occurrences = [
             {
-                "id": r["id"],
+                "id": occurrence_ids[r["id"]],
                 "payment_id": payment_ids[r["payment_id"]],
                 "due_date": r["due_date"],
                 "paid": bool(r["paid"]),
-                "transaction_id": r["transaction_id"],
+                "transaction_id": transaction_ids[r["transaction_id"]] if r["transaction_id"] is not None else None,
                 "original_due_date": r["original_due_date"] or r["due_date"],
                 "is_user_modified": bool(r["is_user_modified"]),
             }
@@ -407,8 +419,6 @@ def _ref(mapping: Dict[str, int], value: Any, field: str) -> int:
 
 def _sqlite_backup(db_path: str, backup_path: str) -> None:
     """Consistent online backup using SQLite's backup API (WAL-safe)."""
-    import sqlite3
-
     with db_manager.get_db_connection() as source:
         destination = sqlite3.connect(backup_path)
         try:
@@ -759,8 +769,8 @@ def restore_ledger_snapshot(snapshot: Dict[str, Any]) -> None:
 
             for inc in incomes:
                 conn.execute(
-                    "INSERT INTO income (id, name, amount, frequency, last_payday, next_payday, expected_amount) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    "INSERT INTO income (id, name, amount, frequency, last_payday, next_payday, expected_amount, snapshot_id) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         income_ids[str(inc["id"])],
                         inc["name"],
@@ -769,6 +779,7 @@ def restore_ledger_snapshot(snapshot: Dict[str, Any]) -> None:
                         inc["last_payday"],
                         inc["next_payday"],
                         inc.get("expected_amount"),
+                        json.dumps(inc["id"]),
                     ),
                 )
 
@@ -790,8 +801,8 @@ def restore_ledger_snapshot(snapshot: Dict[str, Any]) -> None:
 
             for tx in transactions:
                 conn.execute(
-                    "INSERT INTO transactions (id, amount, category, type, date, description) "
-                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    "INSERT INTO transactions (id, amount, category, type, date, description, snapshot_id) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
                     (
                         transaction_ids[str(tx["id"])],
                         tx["amount_cents"],
@@ -799,6 +810,7 @@ def restore_ledger_snapshot(snapshot: Dict[str, Any]) -> None:
                         tx.get("type", "Expense"),
                         tx["date"],
                         tx.get("description"),
+                        json.dumps(tx["id"]),
                     ),
                 )
 
@@ -809,8 +821,8 @@ def restore_ledger_snapshot(snapshot: Dict[str, Any]) -> None:
                     modified = original_due != occ["due_date"]
                 conn.execute(
                     "INSERT INTO bill_occurrences "
-                    "(id, payment_id, due_date, paid, transaction_id, original_due_date, is_user_modified) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    "(id, payment_id, due_date, paid, transaction_id, original_due_date, is_user_modified, snapshot_id) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         occurrence_ids[str(occ["id"])],
                         _ref(payment_ids, occ.get("payment_id"), "bill_occurrences.payment_id"),
@@ -821,6 +833,7 @@ def restore_ledger_snapshot(snapshot: Dict[str, Any]) -> None:
                         else _ref(transaction_ids, occ.get("transaction_id"), "bill_occurrences.transaction_id"),
                         original_due,
                         1 if modified else 0,
+                        json.dumps(occ["id"]),
                     ),
                 )
 

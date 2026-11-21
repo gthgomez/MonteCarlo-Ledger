@@ -363,6 +363,8 @@ def test_identical_bills_and_debt_across_persisted_adapters(tmp_path, monkeypatc
     )
     sync.restore_ledger_snapshot(doc["ledger"])
     doc["ledger"] = sync.export_ledger_snapshot()
+    assert doc["ledger"]["payments"][0]["id"] == "payment-car"
+    assert doc["ledger"]["transactions"][0]["id"] == "opening"
     sync.restore_ledger_snapshot(doc["ledger"])
     python_scenario = scenario_mod.build_scenario(
         doc["as_of"], doc["horizon_days"], include_simulation=doc["simulation"], read_only=True

@@ -88,7 +88,7 @@ def get_db_connection():
     finally:
         conn.close()
 
-LEDGER_SCHEMA_VERSION = 13
+LEDGER_SCHEMA_VERSION = 14
 
 
 def open_ledger_for_read() -> None:
@@ -153,6 +153,21 @@ def init_db():
             _migrate_v11_to_v12(conn)
         if version < 13:
             _migrate_v12_to_v13(conn)
+        if version < 14:
+            _migrate_v13_to_v14(conn)
+
+
+def _migrate_v13_to_v14(conn: sqlite3.Connection) -> None:
+    """Retain canonical snapshot IDs for the other integer-keyed collections."""
+    with conn:
+        conn.execute("BEGIN IMMEDIATE")
+        if conn.execute("PRAGMA user_version").fetchone()[0] >= 14:
+            return
+        for table in ("income", "transactions", "bill_occurrences"):
+            columns = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+            if "snapshot_id" not in columns:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN snapshot_id TEXT")
+        conn.execute("PRAGMA user_version = 14")
 
 
 def _migrate_v12_to_v13(conn: sqlite3.Connection) -> None:
@@ -179,7 +194,7 @@ def _migrate_v12_to_v13(conn: sqlite3.Connection) -> None:
         payment_columns = {row["name"] for row in conn.execute("PRAGMA table_info(payments)")}
         if "snapshot_id" not in payment_columns:
             conn.execute("ALTER TABLE payments ADD COLUMN snapshot_id TEXT")
-        conn.execute(f"PRAGMA user_version = {LEDGER_SCHEMA_VERSION}")
+        conn.execute("PRAGMA user_version = 13")
 
 
 def _migrate_v11_to_v12(conn: sqlite3.Connection):

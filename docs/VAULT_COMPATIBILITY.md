@@ -14,7 +14,7 @@ Older clients must reject 2.2 before replacing their local records. Retain a bac
 
 A debt's optional `linked_payment_id` references a payment in the **same** snapshot, using the same identifier namespace as bill occurrences. A payment may be linked to one debt. A missing link means the debt is independent. A missing `is_active` means the debt is active. These fields require 2.2. Exporters may keep using 2.1 when the ledger has only active, unlinked debts.
 
-Restore replaces a ledger transactionally. It does not combine rows from separate snapshots. Clients validate link references before replacement and translate incoming identifiers using the same mapping for payments and their references. Python stores imported payment IDs separately from SQLite row IDs. Android maps opaque canonical values to Room keys and retains the canonical values in its local database. A link belongs to a single snapshot and carries no meaning in another vault.
+Restore replaces a ledger transactionally. It does not combine rows from separate snapshots. Clients validate link references before replacement and translate incoming identifiers using the same mapping for payments and their references. Python stores imported canonical IDs separately from SQLite row IDs. Android maps opaque canonical values to Room keys and retains the canonical values in its local database. A link belongs to a single snapshot and carries no meaning in another vault.
 
 ## Cash forecasts
 

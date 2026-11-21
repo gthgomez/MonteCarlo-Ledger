@@ -148,6 +148,11 @@ class SnapshotFidelityTest(unittest.TestCase):
         self.assertIn(occ["payment_id"], {payment_id})
         self.assertIn(occ["transaction_id"], tx_ids)
         self.assertEqual(state["balance"], -500)
+        exported = sync.export_ledger_snapshot()
+        for field in ("incomes", "payments", "transactions", "bill_occurrences"):
+            self.assertEqual([row["id"] for row in exported[field]], [row["id"] for row in snapshot[field]])
+        self.assertEqual(exported["bill_occurrences"][0]["payment_id"], "pmt-1")
+        self.assertEqual(exported["bill_occurrences"][0]["transaction_id"], "tx-1")
 
     def test_liabilities_survive_export_restore_round_trip(self):
         self._seed_full_ledger()
