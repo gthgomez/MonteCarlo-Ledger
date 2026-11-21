@@ -160,9 +160,10 @@ export function PlanView({
 
   let debtResult: { months_to_payoff: number; payoff_date: string; total_interest_cents: number; total_paid_cents: number; did_not_converge?: boolean } | null = null;
   let debtCalcError: string | null = null;
-  if (question === "debt" && state.liabilities.length > 0) {
+  const activeDebts = state.liabilities.filter((debt) => debt.is_active !== false);
+  if (question === "debt" && activeDebts.length > 0) {
     try {
-      debtResult = amortize(asOf, state.liabilities, strategy, Math.round(extra * 100));
+      debtResult = amortize(asOf, activeDebts, strategy, Math.round(extra * 100));
     } catch (err: unknown) {
       debtCalcError = err && typeof err === "object" && "code" in err ? String((err as { code: string }).code) : "UNKNOWN_ERROR";
     }
@@ -411,8 +412,8 @@ export function PlanView({
               payments for debts you entered are already ordinary outflows on Home and Future. Extra payments and the
               interest schedule here are not proof you can afford accelerating payoff.
             </p>
-            {state.liabilities.length === 0 ? (
-              <p className="text-sm text-muted">No debts are entered yet.</p>
+            {activeDebts.length === 0 ? (
+              <p className="text-sm text-muted">No active debts are entered.</p>
             ) : debtCalcError ? (
               <Notice tone="danger" title="Calculation Failed">
                 {explainEngineCode(debtCalcError)} <code>{debtCalcError}</code>
@@ -459,7 +460,7 @@ export function PlanView({
                 <li key={debt.id} className="flex flex-wrap items-center justify-between gap-2 py-2 text-sm">
                   <span>
                     {debt.name} · owe {formatMoney(debt.balance_cents)} · {(debt.apr_basis_points / 100).toFixed(2)}% ·{" "}
-                    {debtMinimumLabel(debt)}
+                    {debt.is_active === false ? "Archived" : debtMinimumLabel(debt)}
                   </span>
                   <div className="flex flex-wrap gap-2">
                     <Button type="button" variant="quiet" onClick={() => setBalanceEdit({ id: debt.id, dollars: "" })}>

@@ -122,6 +122,20 @@ function occurrenceState(): LedgerState {
   };
 }
 
+test("reconciling current cash preserves a future payment", () => {
+  const state = occurrenceState();
+  state.transactions.push({
+    id: "future", amount_cents: -2_000, type: "Expense", date: "2027-02-15",
+  });
+  state.current_balance_cents -= 2_000;
+  const result = reconcileBalance(state, 9_000, "2027-01-20");
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.equal(result.state.current_balance_cents, 7_000);
+  assert.equal(result.state.transactions.at(-1)?.amount_cents, -1_000);
+  assert.equal(result.state.transactions.find((tx) => tx.id === "future")?.amount_cents, -2_000);
+});
+
 test("marking a bill occurrence paid creates one matching expense atomically", () => {
   const result = markBillOccurrencePaid(occurrenceState(), "pmt-1", "2027-01-15");
   assert.equal(result.ok, true);

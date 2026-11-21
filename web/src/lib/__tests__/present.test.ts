@@ -101,6 +101,11 @@ test("cash minus entered debt is subtraction, not net worth", () => {
   assert.equal(cashMinusEnteredDebt(345_000, SAMPLE_LEDGER_STATE.liabilities), 345_000 - 240_000 - 850_000);
 });
 
+test("archived debts do not change the cash summary", () => {
+  const archived = SAMPLE_LEDGER_STATE.liabilities.map((debt) => ({ ...debt, is_active: false }));
+  assert.equal(cashMinusEnteredDebt(345_000, archived), 345_000);
+});
+
 test("position copy uses the figures it is given and does not call the median an expected value", () => {
   const copy = describePosition({
     recordedBalanceCents: 345_000,

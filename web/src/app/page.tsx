@@ -396,7 +396,7 @@ export default function Home() {
   const overdue = computeOverdueObligations(state, asOf);
   const nextBill = rows.find((row) => row.amount_cents < 0) ?? null;
   const copy = describePosition({
-    recordedBalanceCents: state.current_balance_cents,
+    recordedBalanceCents: outcome.startingBalanceCents,
     scheduledIncomeCents: slice.scheduledIncomeCents,
     scheduledBillCents: slice.scheduledOutflowCents,
     plannedEndingCents: slice.plannedEndingCents,

@@ -276,15 +276,21 @@ export function reconcileBalance(state: LedgerState, balanceCents: number, date:
   if (!Number.isSafeInteger(balanceCents)) {
     return { ok: false, error: "Enter the balance in dollars and cents." };
   }
-  const diff = balanceCents - state.current_balance_cents;
-  if (!Number.isSafeInteger(diff)) {
+  if (!validIsoDate(date)) return { ok: false, error: "Use a valid reconciliation date." };
+  const asOfBalance = state.transactions
+    .filter((tx) => tx.date <= date)
+    .reduce((sum, tx) => sum + BigInt(tx.amount_cents), 0n);
+  const difference = BigInt(balanceCents) - asOfBalance;
+  const diff = Number(difference);
+  const ledgerTotal = Number(BigInt(state.current_balance_cents) + difference);
+  if (!Number.isSafeInteger(diff) || !Number.isSafeInteger(ledgerTotal)) {
     return { ok: false, error: "That balance is outside the supported range." };
   }
   if (diff === 0) {
     return { ok: false, error: "That already matches the recorded balance. No adjustment was added." };
   }
   const next = clone(state);
-  next.current_balance_cents = balanceCents;
+  next.current_balance_cents = ledgerTotal;
   next.updated_at = new Date().toISOString();
   next.transactions = [
     ...next.transactions,

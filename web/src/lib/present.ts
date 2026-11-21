@@ -162,6 +162,7 @@ export function transactionSumCents(transactions: TransactionItem[]): number | n
 export function enteredDebtCents(liabilities: LiabilityItem[] | undefined): number | null {
   let sum = 0;
   for (const debt of liabilities ?? []) {
+    if (debt.is_active === false) continue;
     if (!Number.isSafeInteger(debt.balance_cents) || debt.balance_cents < 0) return null;
     if (sum > Number.MAX_SAFE_INTEGER - debt.balance_cents) return null;
     sum += debt.balance_cents;
