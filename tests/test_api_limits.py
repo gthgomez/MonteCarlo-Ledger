@@ -13,6 +13,7 @@ AS_OF = "2026-10-01"
 @pytest.fixture()
 def client(tmp_path, monkeypatch):
     monkeypatch.setattr(db_manager, "DB_PATH", str(tmp_path / "ledger.db"))
+    db_manager.init_db()
     with TestClient(api.app) as test_client:
         db_manager.add_transaction(
             500_000, "System", "Opening", t_type="Adjustment", date_str="2026-09-01"
@@ -103,3 +104,14 @@ def test_read_only_requests_do_not_mutate_the_ledger(client):
         response = client.get(path, params=params)
         assert response.status_code == 200, (path, response.text)
     assert _db_dump() == before, "read-only HTTP operations must not mutate the ledger"
+
+
+
+def test_api_startup_and_forecast_do_not_create_missing_ledger(tmp_path, monkeypatch):
+    path = tmp_path / "missing.db"
+    monkeypatch.setattr(db_manager, "DB_PATH", str(path))
+    with TestClient(api.app) as test_client:
+        response = test_client.get("/v1/forecast", params={"as_of": AS_OF})
+    assert response.status_code == 503
+    assert response.json()["detail"]["error"] == "LEDGER_UNAVAILABLE"
+    assert not path.exists()

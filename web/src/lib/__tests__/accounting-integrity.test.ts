@@ -117,7 +117,7 @@ test("future-dated transactions are events, not opening cash", () => {
   assert.deepEqual(future, [{ date: "2026-11-15", amount_cents: -40000, type: "expense", name: "future" }]);
 });
 
-test("overdue obligations are reported but not projected", () => {
+test("overdue unpaid obligations are reported and charged at the start", () => {
   const state = parse(base({
     payments: [
       { id: "p1", name: "Past", amount_cents: 25000, recurrence: "One-time", due_date: "2026-10-15", is_auto_withdraw: true },
@@ -130,7 +130,9 @@ test("overdue obligations are reported but not projected", () => {
     count: 1, total_cents: 25000, earliest_date: "2026-10-15",
   });
   const scenario = buildScenarioFromLedger(state, AS_OF, 30);
-  assert.deepEqual(expenses(scenario), []);
+  assert.deepEqual(expenses(scenario), [
+    { date: AS_OF, amount_cents: -25_000, type: "expense", name: "Past" },
+  ]);
 });
 
 test("snapshot rejects one transaction paying two bills", () => {

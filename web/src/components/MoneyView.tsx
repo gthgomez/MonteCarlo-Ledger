@@ -39,17 +39,17 @@ export function MoneyView({
   const [payday, setPayday] = useState(asOf);
   const [incomeError, setIncomeError] = useState<string | null>(null);
 
-  const [reconcile, setReconcile] = useState((state.current_balance_cents / 100).toFixed(2));
+  const [reconcile, setReconcile] = useState((startingBalanceCents / 100).toFixed(2));
   const [reconcileError, setReconcileError] = useState<string | null>(null);
 
   const sum = transactionSumCents(state.transactions);
   const matches = sum === state.current_balance_cents;
   const debt = enteredDebtCents(state.liabilities);
-  const net = cashMinusEnteredDebt(state.current_balance_cents, state.liabilities);
+  const net = cashMinusEnteredDebt(startingBalanceCents, state.liabilities);
   const futureCount = state.transactions.filter((tx) => tx.date > asOf).length;
   const reconcileCents = dollarsToCents(Number(reconcile));
   const reconcileDiff =
-    reconcileCents === null ? null : reconcileCents - state.current_balance_cents;
+    reconcileCents === null ? null : reconcileCents - startingBalanceCents;
 
   function submitRecord(event: React.FormEvent) {
     event.preventDefault();
@@ -118,12 +118,12 @@ export function MoneyView({
     <div className="space-y-6">
       <Panel
         title="What you have"
-        lede="Recorded money is the sum of transactions in this ledger. Expected paychecks are a schedule, not money already received."
+        lede="This balance uses transactions dated today or earlier. Expected paychecks appear on their scheduled dates."
       >
-        <p className="text-3xl font-semibold tabular-nums">{formatMoney(state.current_balance_cents)}</p>
+        <p className="text-3xl font-semibold tabular-nums">{formatMoney(startingBalanceCents)}</p>
         {matches ? (
           <p className="mt-2 text-sm text-muted">
-            This matches the sum of {state.transactions.length} recorded {state.transactions.length === 1 ? "transaction" : "transactions"}.
+            The ledger total of {formatMoney(state.current_balance_cents)} matches {state.transactions.length} recorded {state.transactions.length === 1 ? "transaction" : "transactions"}.
           </p>
         ) : (
           <div className="mt-3">
@@ -142,14 +142,14 @@ export function MoneyView({
         )}
         {debt !== null && debt > 0 && net !== null && (
           <p className="mt-3 text-sm text-muted">
-            Debt balances you entered total {formatMoney(debt)}. Recorded cash minus those balances is {formatMoney(net)}.
+            Active debt balances you entered total {formatMoney(debt)}. Cash today minus those balances is {formatMoney(net)}.
             That is not full net worth. It ignores anything you did not enter.
           </p>
         )}
         <div className="mt-4">
           <Explain term="net worth">
             Net worth is what you own minus what you owe. This screen only subtracts the debt balances stored here from
-            the recorded cash balance. It is not a complete net worth.
+            today’s cash balance. A full net worth would include your other assets and debts.
           </Explain>
         </div>
       </Panel>
@@ -274,7 +274,7 @@ export function MoneyView({
         <form onSubmit={submitReconcile} className="max-w-md space-y-3">
           <label className="block text-sm font-medium">
             Balance you want recorded ($)
-            <input className={`${fieldClass} mt-1`} inputMode="decimal" value={reconcile} onChange={(e) => setReconcile(e.target.value)} />
+            <input className={`${fieldClass} mt-1`} inputMode="decimal" value={reconcile} required onChange={(e) => setReconcile(e.target.value)} />
           </label>
           {reconcileDiff !== null && reconcileDiff !== 0 && (
             <p className="text-sm text-muted">

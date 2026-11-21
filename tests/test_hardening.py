@@ -46,15 +46,10 @@ class TestHardening(unittest.TestCase):
         self.assertEqual(ledger, 1000)
         self.assertEqual(stored, 500)
 
-    def test_overdue_bills_are_excluded_from_canonical_scenario(self):
-        """MCD-0014: occurrences dated before ``as_of`` are not projected.
-
-        The legacy ``timeline_service`` hoisted a 30-day past-due lookback into the
-        forecast window; that behaviour contradicted the contract and has been removed.
-        """
+    def test_forecast_refresh_does_not_create_past_occurrences(self):
+        """Known overdue rows count. Refreshing a forecast never invents historical rows."""
         as_of = date.today()
         past_due = (as_of - timedelta(days=5)).strftime('%Y-%m-%d')
-        end_date = (as_of + timedelta(days=30)).strftime('%Y-%m-%d')
 
         with db_manager.get_db_connection() as conn:
             with conn:
@@ -65,7 +60,7 @@ class TestHardening(unittest.TestCase):
 
         built = scenario.build_scenario(as_of.strftime('%Y-%m-%d'), 30, read_only=False)
         names = [e["name"] for e in built["events"]]
-        self.assertNotIn('Past Due Bill', names, "overdue bills must not be projected (MCD-0014)")
+        self.assertNotIn('Past Due Bill', names, "refresh must not create a past unpaid occurrence")
         self.assertGreaterEqual(all(e["date"] >= as_of.strftime('%Y-%m-%d') for e in built["events"]), True)
 
     def test_future_bill_is_projected(self):

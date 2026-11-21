@@ -12,6 +12,12 @@ import { PlanView } from "@/components/PlanView";
 import { SyncModal } from "@/components/SyncModal";
 import { Notice } from "@/components/ui";
 import { DEFAULT_ASSUMPTIONS, type Assumptions } from "@/lib/assumptions";
+import {
+  ASSUMPTIONS_STORAGE_KEY,
+  loadAssumptions,
+  parseSavedAssumptions,
+  saveAssumptions,
+} from "@/lib/assumptions-persistence";
 import { EMPTY_TARGETS, loadBudgetTargets, saveBudgetTargets, type BudgetTargets } from "@/lib/budget-targets";
 import { localDateIso } from "@/lib/dates";
 import { createStarterLedger, type EditResult } from "@/lib/ledger-edits";
@@ -35,11 +41,22 @@ import { parseLedgerState } from "@/lib/validate";
 
 const THEME_KEY = "mc-theme";
 
+function browserStorage(): Storage | null {
+  try {
+    return window.localStorage;
+  } catch {
+    return null;
+  }
+}
+
 export default function Home() {
   const [state, setState] = useState<LedgerState>(SAMPLE_LEDGER_STATE);
   const [usingDemo, setUsingDemo] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [saveWarning, setSaveWarning] = useState<string | null>(null);
+  const [assumptionsError, setAssumptionsError] = useState<string | null>(null);
+  const [assumptionsWarning, setAssumptionsWarning] = useState<string | null>(null);
+  const [assumptionsRaw, setAssumptionsRaw] = useState<string | null>(null);
   const [storedRaw, setStoredRaw] = useState<string | null>(null);
   const [isLoaded, setIsLoaded] = useState(false);
   const [isSyncModalOpen, setIsSyncModalOpen] = useState(false);
@@ -51,6 +68,20 @@ export default function Home() {
   const [theme, setTheme] = useState<"light" | "dark" | null>(null);
 
   useEffect(() => {
+    const savedAssumptions = loadAssumptions(browserStorage());
+    if (savedAssumptions.ok) {
+      setAssumptions(savedAssumptions.assumptions);
+      setAssumptionsWarning(savedAssumptions.warning);
+      if (savedAssumptions.migrated) {
+        // Legacy records are hydrated read-only. Writing a migrated copy during startup
+        // can race an explicit save in another tab and overwrite newer assumptions.
+        setAssumptionsWarning("Older financial settings were loaded. Save under Advanced to update their format.");
+      }
+    } else {
+      setAssumptionsError(savedAssumptions.error);
+      setAssumptionsRaw(savedAssumptions.raw);
+    }
+
     try {
       const saved = localStorage.getItem(LEDGER_STORAGE_KEY);
       if (saved) {
@@ -92,6 +123,43 @@ export default function Home() {
     setIsLoaded(true);
   }, []);
 
+  useEffect(() => {
+    function receiveAssumptions(event: StorageEvent) {
+      if (event.key !== ASSUMPTIONS_STORAGE_KEY && event.key !== null) return;
+      let currentRaw: string | null = null;
+      try {
+        const storage = browserStorage();
+        if (!storage) throw new Error("Browser storage unavailable");
+        currentRaw = storage.getItem(ASSUMPTIONS_STORAGE_KEY);
+      } catch {
+        setAssumptionsError("Financial settings could not be read from this browser.");
+        return;
+      }
+      // Storage events may be delivered out of order; the durable key is the source of truth,
+      // not the event's historical newValue payload.
+      const loaded = parseSavedAssumptions(currentRaw);
+      if (!loaded.ok) {
+        setAssumptionsRaw(loaded.raw);
+        setAssumptionsError(loaded.error);
+        setAssumptionsWarning(null);
+        return;
+      }
+      setAssumptions(loaded.assumptions);
+      setAssumptionsError(null);
+      setAssumptionsRaw(null);
+      if (loaded.migrated) {
+        setAssumptionsWarning("Older financial settings from another tab were loaded. Save under Advanced to update their format.");
+      } else if (currentRaw === null) {
+        setAssumptionsWarning("Financial settings were removed in another tab. Default assumptions are now active.");
+      } else {
+        setAssumptionsWarning("Financial settings were updated in another tab.");
+      }
+    }
+
+    window.addEventListener("storage", receiveAssumptions);
+    return () => window.removeEventListener("storage", receiveAssumptions);
+  }, []);
+
   const asOf = useMemo(() => localDateIso(), []);
 
   const evaluation = useMemo(() => evaluateLedger(state, asOf, assumptions), [state, asOf, assumptions]);
@@ -113,17 +181,27 @@ export default function Home() {
     setTheme(next);
   }
 
-  function handleUpdateState(nextState: LedgerState) {
-    setState(nextState);
-    setUsingDemo(false);
+  function handleUpdateState(nextState: LedgerState): string | null {
     try {
-      localStorage.setItem(LEDGER_STORAGE_KEY, JSON.stringify(nextState));
+      if (localStorage.getItem(LEDGER_STORAGE_KEY) !== storedRaw) {
+        const message = "This ledger changed in another tab. Reload and try your edit again.";
+        setSaveWarning(message);
+        return message;
+      }
+      const serialized = JSON.stringify(nextState);
+      localStorage.setItem(LEDGER_STORAGE_KEY, serialized);
+      if (localStorage.getItem(LEDGER_STORAGE_KEY) !== serialized) {
+        throw new Error("The stored ledger did not match your change.");
+      }
+      setStoredRaw(serialized);
+      setState(nextState);
+      setUsingDemo(false);
       setSaveWarning(null);
-    } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : "quota or browser restriction";
-      setSaveWarning(
-        `Could not save your ledger to local storage (${message}). The change is visible but not durable.`
-      );
+      return null;
+    } catch {
+      const message = "The edit could not be saved. Reload to check your saved ledger before trying again.";
+      setSaveWarning(message);
+      return message;
     }
   }
 
@@ -133,11 +211,25 @@ export default function Home() {
       setSaveWarning(saved.error);
       return saved;
     }
+    setStoredRaw(JSON.stringify(nextState));
     setState(nextState);
     setUsingDemo(false);
     setSaveWarning(null);
     if (vaultId) setCurrentVaultId(vaultId);
     return { ok: true };
+  }
+
+  function handleApplyAssumptions(nextAssumptions: Assumptions): string | null {
+    const saved = saveAssumptions(browserStorage(), nextAssumptions);
+    if (!saved.ok) {
+      setAssumptionsWarning(saved.error);
+      return saved.error;
+    }
+    setAssumptions(nextAssumptions);
+    setAssumptionsError(null);
+    setAssumptionsWarning(null);
+    setAssumptionsRaw(null);
+    return null;
   }
 
   function handleResetDemo() {
@@ -147,7 +239,9 @@ export default function Home() {
     setLoadError(null);
     setSaveWarning(null);
     try {
-      localStorage.setItem(LEDGER_STORAGE_KEY, JSON.stringify(SAMPLE_LEDGER_STATE));
+      const serialized = JSON.stringify(SAMPLE_LEDGER_STATE);
+      localStorage.setItem(LEDGER_STORAGE_KEY, serialized);
+      setStoredRaw(serialized);
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : "storage error";
       setSaveWarning(`Could not save the demo ledger (${message}).`);
@@ -166,6 +260,7 @@ export default function Home() {
 
   function onEdit(result: EditResult) {
     if (result.ok) handleUpdateState(result.state);
+    else setSaveWarning(result.error);
   }
 
   function saveTargets(next: BudgetTargets): string | null {
@@ -220,6 +315,45 @@ export default function Home() {
     );
   }
 
+  if (assumptionsError) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-canvas p-6 text-ink">
+        <div className="w-full max-w-xl space-y-4 rounded-2xl border border-warning bg-warning-soft p-6">
+          <h1 className="text-lg font-semibold">Financial Settings Not Loaded</h1>
+          <p className="text-sm">{assumptionsError}</p>
+          <p className="text-sm text-muted">
+            Your ledger is still saved on this device. No forecast is shown until the settings are repaired or you
+            choose the defaults. Choosing defaults will not replace your ledger.
+          </p>
+          {assumptionsRaw && (
+            <a
+              href={"data:text/json;charset=utf-8," + encodeURIComponent(assumptionsRaw)}
+              download="montecarlo-financial-settings-recovery.json"
+              className="inline-flex min-h-11 items-center rounded-lg border border-line bg-surface px-3 text-sm font-semibold"
+            >
+              Download saved settings
+            </a>
+          )}
+          <div className="flex flex-wrap gap-3">
+            <button
+              type="button"
+              onClick={() => {
+                const problem = handleApplyAssumptions(DEFAULT_ASSUMPTIONS);
+                if (problem) setAssumptionsError(problem);
+              }}
+              className="inline-flex min-h-11 items-center rounded-lg bg-accent px-3 text-sm font-semibold text-on-accent"
+            >
+              Use default financial assumptions
+            </button>
+            <a href="/" className="inline-flex min-h-11 items-center rounded-lg border border-line bg-surface px-3 text-sm font-semibold">
+              Retry
+            </a>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   if (evaluation.status === "error") {
     return (
       <div className="flex min-h-screen items-center justify-center bg-canvas p-6 text-ink">
@@ -261,20 +395,21 @@ export default function Home() {
 
   const outcome = evaluation.outcome;
   const rows = evaluation.rows;
-  const slice = slicePlan(rows, asOf, 30, outcome.startingBalanceCents);
+  const slice = slicePlan(rows, asOf, Math.min(30, assumptions.horizonDays), outcome.startingBalanceCents);
   const sum = transactionSumCents(state.transactions);
   const currentSpend = spendingThisMonth(state.transactions, asOf);
   const previousSpend = spendingLastMonth(state.transactions, asOf);
   const overdue = computeOverdueObligations(state, asOf);
   const nextBill = rows.find((row) => row.amount_cents < 0) ?? null;
   const copy = describePosition({
-    recordedBalanceCents: state.current_balance_cents,
+    recordedBalanceCents: outcome.startingBalanceCents,
     scheduledIncomeCents: slice.scheduledIncomeCents,
     scheduledBillCents: slice.scheduledOutflowCents,
     plannedEndingCents: slice.plannedEndingCents,
     windowDays: 30,
     safeSpendCents: outcome.safeSpendCents,
-    difficultLowCents: outcome.minimumBalanceP10Cents,
+    // Same trough that produced safe-to-spend (quantile + reserve), not a hard-coded P10 field.
+    difficultLowCents: outcome.safeSpendCents + outcome.reserveCents,
     reserveCents: outcome.reserveCents,
     quantileNum: outcome.quantileNum,
     quantileDen: outcome.quantileDen,
@@ -327,13 +462,14 @@ export default function Home() {
       <main id="content" className="mx-auto w-full min-w-0 max-w-5xl flex-1 space-y-4 px-4 py-6">
         <p className="text-sm text-muted">{SECTION_QUESTION[section]}</p>
         {saveWarning && <Notice tone="warning" title="Not saved">{saveWarning}</Notice>}
+        {assumptionsWarning && <Notice tone="warning" title="Financial settings">{assumptionsWarning}</Notice>}
         {section === "home" && (
           <HomeView
             asOf={asOf}
             usingDemo={usingDemo}
             needsSetup={needsSetup}
             copy={copy}
-            recordedBalanceCents={state.current_balance_cents}
+            startingBalanceCents={outcome.startingBalanceCents}
             safeSpendCents={outcome.safeSpendCents}
             plannedLowCents={outcome.projectedLowCents}
             plannedLowDate={outcome.projectedLowDate}
@@ -341,13 +477,14 @@ export default function Home() {
             insights={insights}
             assumptionsChanged={assumptionsChanged}
             horizonDays={assumptions.horizonDays}
+            reserveCents={assumptions.reserveCents}
             runs={outcome.runs}
             onNavigate={navigate}
             createOwn={(input) => {
               const created = createStarterLedger(input);
               if (!created.ok) return created;
-              handleUpdateState(created.state);
-              return { ok: true };
+              const saveError = handleUpdateState(created.state);
+              return saveError ? { ok: false, error: saveError } : { ok: true };
             }}
           />
         )}
@@ -382,7 +519,7 @@ export default function Home() {
           <FutureView asOf={asOf} outcome={outcome} rows={rows} assumptionsChanged={assumptionsChanged} />
         )}
         {section === "advanced" && (
-          <AdvancedView assumptions={assumptions} outcome={outcome} asOf={asOf} onApply={setAssumptions} />
+          <AdvancedView assumptions={assumptions} outcome={outcome} asOf={asOf} onApply={handleApplyAssumptions} />
         )}
       </main>
       <footer className="border-t border-line px-4 py-6 text-center text-sm text-muted">

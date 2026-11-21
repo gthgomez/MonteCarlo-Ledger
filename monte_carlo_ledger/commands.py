@@ -16,21 +16,11 @@ from typing import Any, Dict, List, Optional
 from . import db_manager, decisions
 from .contract import ContractError
 
-COMMANDS = {
-    "forecast",
-    "risk",
-    "safe-to-spend",
-    "simulate-purchase",
-    "simulate-paycheck-delay",
-    "overdraft",
-    "sync",
-    "export-snapshot",
-}
-
 
 def _format_money(cents: int) -> str:
     sign = "-" if cents < 0 else ""
-    return f"{sign}${abs(cents) / 100:,.2f}"
+    dollars, remainder = divmod(abs(cents), 100)
+    return f"{sign}${dollars:,}.{remainder:02d}"
 
 
 def _emit(obj: Dict[str, Any], as_json: bool, human: Optional[List[str]] = None) -> None:
@@ -126,6 +116,9 @@ def main(argv: List[str]) -> int:
         # Machine-readable typed failure: automation gets a stable code, humans get one line.
         print(f"error: {exc.code}: {exc}", file=sys.stderr)
         return 2
+    except FileNotFoundError as exc:
+        print(f"error: LEDGER_MISSING: {exc}", file=sys.stderr)
+        return 3
     except (ValueError, OverflowError) as exc:
         print(f"error: INVALID_INPUT: {exc}", file=sys.stderr)
         return 2
@@ -135,7 +128,13 @@ def main(argv: List[str]) -> int:
 
 
 def _dispatch(args) -> int:
-    db_manager.init_db()
+    if args.command == "sync":
+        if args.sync_action == "pull":
+            db_manager.init_db()
+        elif args.sync_action in {"init", "push"}:
+            db_manager.open_ledger_for_read()
+    else:
+        db_manager.open_ledger_for_read()
 
     if args.command == "forecast":
         result = decisions.forecast(args.as_of, args.horizon)

@@ -12,7 +12,13 @@ from datetime import date, timedelta
 from typing import Any, Dict, List, Optional
 
 from . import budget_engine, db_manager
-from .contract import CONTRACT_VERSION, ContractError, recurrence_dates
+from .contract import (
+    CONTRACT_VERSION,
+    ContractError,
+    checked_add,
+    recurrence_dates,
+    round_half_away,
+)
 
 _INCOME_FREQUENCY = {
     "Weekly": "weekly",
@@ -109,13 +115,13 @@ def _bill_events_from(
     for occ in occurrences:
         if occ["paid"]:
             continue
-        if not (lo <= occ["due_date"] < hi):
+        if occ["due_date"] >= hi:
             continue
         pmt = payment_by_id.get(occ["payment_id"])
         if pmt is None:
             continue
         events.append({
-            "date": occ["due_date"],
+            "date": max(lo, occ["due_date"]),
             "amount_cents": -int(pmt.amount),
             "type": "expense",
             "name": pmt.name,
@@ -158,6 +164,139 @@ def _future_transaction_events(
     return events
 
 
+def _planning_minimum_payment_cents(
+    liability: Dict[str, Any], balance_cents: Optional[int] = None
+) -> int:
+    """Cash-plan minimum for one liability at the supplied balance.
+
+    Matches Contract 2.0 ``minimum_payment`` on the current balance so everyday
+    Safe-to-Spend includes debt outflows without changing engine injection rules.
+    """
+    balance = (
+        int(liability.get("balance_cents") or 0)
+        if balance_cents is None
+        else int(balance_cents)
+    )
+    if balance <= 0:
+        return 0
+    if liability.get("kind", "installment") != "revolving":
+        return min(int(liability.get("min_payment_cents") or 0), balance)
+    percent = round_half_away(
+        balance * int(liability.get("min_payment_percent_bps") or 0), 10_000
+    )
+    floor = int(liability.get("min_payment_floor_cents") or 0)
+    return min(max(percent, floor), balance)
+
+
+def _liability_min_payment_events(
+    liabilities: List[Dict[str, Any]],
+    payments: List[Any],
+    as_of: date,
+    window_end: date,
+    occurrences: Optional[List[Dict[str, Any]]] = None,
+) -> List[Dict[str, Any]]:
+    """Emit monthly debt minimums, with credit only for explicit payment links."""
+    occurrences = occurrences or []
+    owners: Dict[int, int] = {}
+    for liability in liabilities:
+        link = liability.get("linked_payment_id")
+        if link is not None:
+            owners[link] = owners.get(link, 0) + 1
+    payments_by_id = {payment.id: payment for payment in payments}
+    occurrences_by_slot: Dict[tuple[int, str], Dict[str, Any]] = {}
+    for row in occurrences:
+        if row["payment_id"] not in owners:
+            continue
+        slot = (row["payment_id"], row.get("original_due_date") or row["due_date"])
+        if slot in occurrences_by_slot:
+            raise ValueError(f"Linked payment {row['payment_id']} has duplicate occurrences for {slot[1]}")
+        occurrences_by_slot[slot] = row
+    # Generate upcoming slots with the same recurrence helper used by bill events.
+    schedule = budget_engine.get_upcoming_schedule(
+        [vars(payment) for payment in payments if owners.get(payment.id) == 1],
+        as_of.isoformat(),
+        window_end.isoformat(),
+    )
+    moved_destinations = {
+        (row["payment_id"], row["due_date"]) for row in occurrences if row["is_user_modified"]
+    }
+    scheduled_slots = {(row["payment_id"], row["date"]) for row in schedule} - moved_destinations
+
+    events: List[Dict[str, Any]] = []
+    lo, hi = as_of.isoformat(), window_end.isoformat()
+    # Stable identity order keeps same-day event order, and therefore seeded risk
+    # draws, consistent with the Web adapter even when snapshots use another order.
+    for liability in sorted(liabilities, key=lambda item: str(item.get("id") or "")):
+        name = str(liability.get("name") or "Debt payment")
+        due_day = int(liability.get("due_day_of_month") or 1)
+        if due_day < 1 or due_day > 31:
+            due_day = 1
+        if not liability.get("is_active", True):
+            continue
+        link = liability.get("linked_payment_id")
+        payment = payments_by_id.get(link) if link is not None and owners[link] == 1 else None
+
+        remaining_balance = int(liability.get("balance_cents") or 0)
+        cursor_year, cursor_month = as_of.year, as_of.month
+        first_due = True
+        # Walk calendar months that can intersect [as_of, window_end).
+        for _ in range(horizon_month_span(as_of, window_end) + 2):
+            if not first_due:
+                interest = round_half_away(
+                    remaining_balance * int(liability.get("apr_basis_points") or 0),
+                    120_000,
+                )
+                remaining_balance = checked_add(remaining_balance, interest)
+            first_due = False
+            amount = _planning_minimum_payment_cents(liability, remaining_balance)
+            if amount <= 0:
+                break
+            last_day = calendar.monthrange(cursor_year, cursor_month)[1]
+            day = min(due_day, last_day)
+            due = date(cursor_year, cursor_month, day)
+            # If this month's due day has passed, the minimum is still an outstanding
+            # obligation. Put it at the start of the forecast window so it reduces
+            # current available cash instead of disappearing until next month.
+            event_date = max(due, as_of)
+            event_date_iso = event_date.isoformat()
+            if lo <= event_date_iso < hi:
+                covered = 0
+                already_paid = 0
+                if payment is not None:
+                    slot = (payment.id, due.isoformat())
+                    occurrence = occurrences_by_slot.get(slot)
+                    if slot in scheduled_slots or occurrence is not None:
+                        # The bill adapter includes overdue unpaid rows at as_of.
+                        if occurrence is not None and occurrence["paid"]:
+                            posted_amount = occurrence.get("transaction_amount")
+                            paid_amount = payment.amount if posted_amount is None else max(0, -posted_amount)
+                            covered = already_paid = min(amount, paid_amount)
+                        else:
+                            covered = min(amount, payment.amount)
+                if covered < amount:
+                    events.append(
+                        {
+                            "date": event_date_iso,
+                            "amount_cents": -(amount - covered),
+                            "type": "expense",
+                            "name": name,
+                        }
+                    )
+                remaining_balance -= amount - already_paid
+            if cursor_month == 12:
+                cursor_year += 1
+                cursor_month = 1
+            else:
+                cursor_month += 1
+            if date(cursor_year, cursor_month, 1) >= window_end:
+                break
+    return events
+
+
+def horizon_month_span(as_of: date, window_end: date) -> int:
+    return (window_end.year - as_of.year) * 12 + (window_end.month - as_of.month)
+
+
 def _bill_events_readonly(as_of: date, window_end: date) -> List[Dict[str, Any]]:
     """Standalone readonly projection (opens its own consistent view)."""
     view = db_manager.read_ledger_view(as_of.isoformat(), window_end.isoformat())
@@ -193,12 +332,16 @@ def build_scenario(
     window_end = start + timedelta(days=horizon_days)
     if ledger is None:
         if not read_only:
-            db_manager.sync_bill_occurrences(as_of, window_end.isoformat())
+            db_manager.sync_bill_occurrences(as_of, window_end.isoformat(), include_lookback=False)
         ledger = db_manager.read_ledger_view(as_of, window_end.isoformat())
+    liabilities = ledger.get("liabilities") or []
     events = (
         _bill_events_from(ledger["payments"], ledger["occurrences"], start, window_end)
         + _income_events_from(ledger["incomes"], start, window_end)
         + _future_transaction_events(ledger["future_transactions"], start, window_end)
+        + _liability_min_payment_events(
+            liabilities, ledger["payments"], start, window_end, ledger["occurrences"]
+        )
     )
     starting_balance = ledger["starting_balance_cents"]
     scenario: Dict[str, Any] = {
@@ -209,6 +352,17 @@ def build_scenario(
         "horizon_days": horizon_days,
         "events": events,
     }
+    # Contract 2.0 keeps amortization in the debt block; adapters also add ordinary
+    # minimum-payment expense events so everyday Safe-to-Spend includes entered debts.
+    # Omit the liabilities key when empty (Web/legacy parity); never invent debt rows.
+    active_liabilities = [
+        {key: value for key, value in item.items() if key not in ("linked_payment_id", "is_active")}
+        for item in liabilities
+        if item.get("is_active", True)
+    ]
+    if active_liabilities:
+        scenario["liabilities"] = active_liabilities
+        scenario["debt_strategy"] = "snowball"
     if include_simulation is not None:
         scenario["simulation"] = include_simulation
     return scenario

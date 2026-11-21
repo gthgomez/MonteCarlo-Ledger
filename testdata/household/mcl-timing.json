@@ -1,0 +1,44 @@
+{
+  "as_of": "2027-02-01",
+  "horizon_days": 65,
+  "ledger": {
+    "version": "2.2",
+    "updated_at": "2027-02-01T00:00:00Z",
+    "current_balance_cents": 68000,
+    "incomes": [
+      {"id": "income-month-end", "name": "Month end", "amount_cents": 30000, "frequency": "Monthly", "last_payday": "2027-01-31", "next_payday": "2027-02-28"},
+      {"id": "income-recorded", "name": "Recorded source", "amount_cents": 80000, "frequency": "Monthly", "last_payday": "2027-02-10", "next_payday": "2027-03-10"}
+    ],
+    "payments": [
+      {"id": "bill-rule", "name": "Rule only", "amount_cents": 2000, "recurrence": "Monthly", "due_day": 31, "due_date": null},
+      {"id": "bill-moved", "name": "Moved bill", "amount_cents": 1500, "recurrence": "One-time", "due_date": "2027-02-15"}
+    ],
+    "transactions": [
+      {"id": "opening", "type": "Adjustment", "date": "2027-01-31", "amount_cents": 10000},
+      {"id": "early-expense", "type": "Expense", "date": "2027-02-03", "amount_cents": -20000, "description": "Early expense"},
+      {"id": "receipt", "type": "Income", "date": "2027-02-10", "amount_cents": 80000, "description": "Recorded receipt"},
+      {"id": "settlement", "type": "Expense", "date": "2027-02-28", "amount_cents": -2000, "description": "Paid rule"}
+    ],
+    "bill_occurrences": [
+      {"id": "paid-slot", "payment_id": "bill-rule", "paid": true, "transaction_id": "settlement", "due_date": "2027-02-28", "original_due_date": "2027-02-28"},
+      {"id": "moved-slot", "payment_id": "bill-moved", "paid": false, "is_user_modified": true, "due_date": "2027-02-17", "original_due_date": "2027-02-15"}
+    ],
+    "liabilities": []
+  },
+  "expected": {
+    "opening_cents": 10000,
+    "minimum_cents": -10000,
+    "minimum_date": "2027-02-03",
+    "ending_cents": 204500,
+    "event_dates_and_cents": [
+      ["2027-02-03", -20000],
+      ["2027-02-10", 80000],
+      ["2027-02-17", -1500],
+      ["2027-02-28", 30000],
+      ["2027-02-28", -2000],
+      ["2027-03-10", 80000],
+      ["2027-03-31", 30000],
+      ["2027-03-31", -2000]
+    ]
+  }
+}
