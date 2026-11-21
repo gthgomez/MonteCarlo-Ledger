@@ -397,7 +397,7 @@ test.describe("beginner financial journey", () => {
     await page.getByLabel("Category").fill("Groceries");
     await page.getByRole("button", { name: "Record this" }).click();
     await expect(page.getByText("Groceries").first()).toBeVisible();
-    await expect(page.getByText(/This matches the sum of/)).toBeVisible();
+    await expect(page.getByText("The ledger total of $1,720.00 matches 2 recorded transactions.")).toBeVisible();
 
     await page.getByRole("button", { name: "Budget", exact: true }).click();
     await expect(page.getByText("Groceries").first()).toBeVisible();
