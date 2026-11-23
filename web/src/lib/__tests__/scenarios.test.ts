@@ -165,6 +165,29 @@ test("extra debt payment rejects unsupported amounts and dates outside the half-
   }
 });
 
+test("a fixed extra payment does not shift the other seeded random draws", () => {
+  const ledger = emptyLedger(10_000);
+  ledger.payments = [{
+    id: "bill", name: "Ordinary bill", amount_cents: 10_000, recurrence: "Monthly", due_day: 11,
+  }];
+  const assumptions = {
+    ...DEFAULT_ASSUMPTIONS,
+    seed: 11, runs: 10, horizonDays: 10,
+    expenseVariationMin: -20, expenseVariationMax: 20, surpriseProbabilityPpm: 0,
+  };
+  const baseline = evaluateLedger(ledger, AS_OF, assumptions);
+  const draft = evaluateExtraDebtPayment(ledger, AS_OF, assumptions, 1, AS_OF);
+  assert.equal(baseline.status, "ok");
+  assert.equal(draft.status, "ok");
+  if (baseline.status !== "ok" || draft.status !== "ok") return;
+  // The ten bill draws for seed 11 are 1%, 3%, 1%, −13%, −11%, 14%, −19%, −17%, 16%, 1%.
+  // Six runs go below zero either way. The worst low is 16% of $100 plus the exact cent.
+  assert.equal(baseline.outcome.overdraftPpm, 600_000);
+  assert.equal(draft.outcome.overdraftPpm, 600_000);
+  assert.equal(baseline.outcome.minimumBalanceP10Cents, -1_600);
+  assert.equal(draft.outcome.minimumBalanceP10Cents, -1_601);
+});
+
 test("an unknown bill is not given a made-up result", () => {
   const result = evaluateBillAmount(SAMPLE_LEDGER_STATE, AS_OF, DEFAULT_ASSUMPTIONS, "missing", 1_000);
   assert.equal(result.status, "error");
@@ -203,4 +226,68 @@ test("a bill larger than the balance produces a negative plan without a substitu
   assert.ok(result.outcome.projectedLowCents < 0);
   assert.ok(result.outcome.firstNegativeDate);
   assert.ok(result.outcome.safeSpendCents < 0);
+});
+
+test("an extra debt payment is frozen against bill variance but the linked minimum still varies", () => {
+  // Hand oracle: $1,000 cash, a $100 linked minimum, and a $980 extra today.
+  // Exact schedule: 1000 - 100 - 980 = -$80. A fixed -50% bill variance halves
+  // only the minimum, so every modeled low is 1000 - 50 - 980 = -$30.
+  const ledger = emptyLedger(100_000);
+  ledger.version = "2.2";
+  ledger.payments = [
+    { id: "loan-bill", name: "Loan bill", amount_cents: 10_000, recurrence: "Monthly", due_day: 10 },
+  ];
+  ledger.liabilities = [{
+    id: "loan", name: "Loan", balance_cents: 10_000, apr_basis_points: 0,
+    min_payment_cents: 10_000, due_day_of_month: 10, linked_payment_id: "loan-bill",
+  }];
+  const saved = structuredClone(ledger);
+  const assumptions = {
+    ...DEFAULT_ASSUMPTIONS,
+    horizonDays: 30,
+    runs: 10,
+    expenseVariationMin: -50,
+    expenseVariationMax: -50,
+    surpriseProbabilityPpm: 0,
+    reserveCents: 0,
+  };
+  const result = evaluateExtraDebtPayment(ledger, AS_OF, assumptions, 98_000, AS_OF);
+  assert.equal(result.status, "ok");
+  if (result.status !== "ok") return;
+  assert.deepEqual(result.rows.map(({ date, amount_cents }) => [date, amount_cents]), [
+    [AS_OF, -10_000],
+    [AS_OF, -98_000],
+  ]);
+  assert.equal(result.outcome.projectedLowCents, -8_000);
+  assert.equal(result.outcome.safeSpendCents, -3_000);
+  assert.equal(result.outcome.overdraftPpm, 1_000_000);
+  assert.equal(result.outcome.firstNegativeDate, AS_OF);
+  assert.deepEqual(ledger, saved);
+});
+
+test("the extra-payment category override does not change the purchase caller", () => {
+  const ledger = emptyLedger(100_000);
+  ledger.version = "2.2";
+  ledger.payments = [
+    { id: "loan-bill", name: "Loan bill", amount_cents: 10_000, recurrence: "Monthly", due_day: 10 },
+  ];
+  ledger.liabilities = [{
+    id: "loan", name: "Loan", balance_cents: 10_000, apr_basis_points: 0,
+    min_payment_cents: 10_000, due_day_of_month: 10, linked_payment_id: "loan-bill",
+  }];
+  const assumptions = {
+    ...DEFAULT_ASSUMPTIONS,
+    horizonDays: 30,
+    runs: 10,
+    expenseVariationMin: -50,
+    expenseVariationMax: -50,
+    surpriseProbabilityPpm: 0,
+    reserveCents: 0,
+  };
+  const purchase = evaluatePurchase(ledger, AS_OF, assumptions, 98_000, AS_OF);
+  assert.equal(purchase.status, "ok");
+  if (purchase.status !== "ok") return;
+  // A purchase is ordinary spending, so the -50% bill variance still applies to it.
+  assert.equal(purchase.outcome.projectedLowCents, -8_000);
+  assert.equal(purchase.outcome.safeSpendCents, 46_000);
 });

@@ -120,7 +120,8 @@ export function PlanView({
 }) {
   const [question, setQuestion] = useState<Question>("purchase");
   const [purchaseAmount, setPurchaseAmount] = useState(350);
-  const [purchaseDate, setPurchaseDate] = useState(asOf);
+  const [purchaseDateInput, setPurchaseDate] = useState<string | null>(null);
+  const purchaseDate = purchaseDateInput ?? asOf;
   const [delayDays, setDelayDays] = useState(3);
   const [billId, setBillId] = useState(String(state.payments[0]?.id ?? ""));
   const [billAmount, setBillAmount] = useState(100);
@@ -130,7 +131,8 @@ export function PlanView({
   const [strategy, setStrategy] = useState<"snowball" | "avalanche">("snowball");
   const [extra, setExtra] = useState(100);
   const [paymentDollars, setPaymentDollars] = useState("");
-  const [paymentDate, setPaymentDate] = useState(asOf);
+  const [paymentDateInput, setPaymentDate] = useState<string | null>(null);
+  const paymentDate = paymentDateInput ?? asOf;
   const [paymentPreview, setPaymentPreview] = useState<{ amountCents: number; date: string } | null>(null);
   const [paymentError, setPaymentError] = useState<string | null>(null);
   const [debtName, setDebtName] = useState("");

@@ -47,8 +47,11 @@ cannot explain, or data they can lose without a warning, is a release defect.
 3. Exercise modeled uncertainty separately with a fixed seed, exact inputs, and model ranges.
    Compare Web and Python only with the same scenario, seed, settings, and supported fields.
    Include boundary cases: opening cash already short, no eligible paycheck, zero/below-reserve
-   headroom, month-end/leap-year recurrence, partial settlement, and a payment just outside the
-   horizon. A reproducible seed or synthetic backtest checks implementation, not calibration.
+   headroom, month-end/leap-year recurrence, partial settlement, an unresolved one-time overdue bill,
+   and a bill on the first excluded day. Check that a fixed dated extra debt payment stays fixed
+   and compares the same draws of other bills and surprises. This Web what-if is not a new
+   serialized contract option. A reproducible seed or synthetic backtest checks implementation,
+   not calibration.
 4. For future historical validation, freeze a consented, de-identified corpus and evaluate
    predictions from past cutoffs against later complete observations. Record coverage, sample
    size, missing data, and performance against a simple baseline, broken down by 30-, 60-, and
@@ -67,12 +70,14 @@ cannot explain, or data they can lose without a warning, is a release defect.
   references, make a known edit, and push a new revision. From a second clean browser session
   restore it, compare opening/forecast results and reference/occurrence counts, then reload and
   re-pull. Check wrong passphrase, invalid/unsupported snapshot or write failure, and a revision
-  conflict. A failed pull must leave the prior local state unchanged; a conflict must not silently
-  overwrite another client's update. Preserve good local data before resolving a conflict.
+   conflict. A failed pull must leave the prior local state unchanged; a conflict must not silently
+   overwrite another client's update. Preserve good local data before resolving a conflict. Also hold
+   a Web pull while another tab saves an edit, and verify that the older pull cannot commit over it.
 - Test local persistence independently of sync: current tab with network off, online reload without
   vault access, and opening offline after a prior visit. Report each independently; a loaded tab
-  working offline is not proof that an offline cold start works. Do not claim first-ever offline
-  load for a hosted browser app.
+   working offline is not proof that an offline cold start works. In the loaded tab check the
+   cash date and default transaction date across local midnight; a date the user chose must not
+   change. Do not claim first-ever offline load for a hosted browser app.
 - If hosted staging is authorized later, record the exact preview build, isolated database and
   synthetic-only fixture scope (no secrets in the record). Repeat Web ↔ Python, including restart
   and conflict handling. Stop if staging identity or isolation cannot be established. Separately

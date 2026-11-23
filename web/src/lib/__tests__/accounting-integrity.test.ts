@@ -205,3 +205,46 @@ test("moved-occurrence fields survive parsing", () => {
   assert.equal(state.bill_occurrences[0].original_due_date, "2026-11-01");
   assert.equal(state.bill_occurrences[0].is_user_modified, true);
 });
+
+test("a past one-time bill with no occurrence is overdue for review but not charged", () => {
+  const state = parse(base({
+    payments: [
+      { id: "p1", name: "Car repair", amount_cents: 90000, recurrence: "One-time", due_date: "2026-10-25", is_auto_withdraw: false },
+      { id: "p2", name: "Subscription", amount_cents: 1000, recurrence: "Monthly", due_day: 15, is_auto_withdraw: false },
+    ],
+  }));
+  assert.deepEqual(computeOverdueObligations(state, AS_OF), {
+    count: 1,
+    total_cents: 90000,
+    earliest_date: "2026-10-25",
+    unresolved_one_time_count: 1,
+    unresolved_one_time_cents: 90000,
+  });
+  // The historical $900 is not invented as an expense; the in-window $10 bill remains.
+  assert.deepEqual(expenses(buildScenarioFromLedger(state, AS_OF, 30)), [
+    { date: "2026-11-15", amount_cents: -1000, type: "expense", name: "Subscription" },
+  ]);
+});
+
+test("paid or moved one-time slots are not counted as unresolved overdue bills", () => {
+  const payments = [
+    { id: "p1", name: "Car repair", amount_cents: 90000, recurrence: "One-time" as const, due_date: "2026-10-25", is_auto_withdraw: false },
+  ];
+  const paid = parse(base({
+    payments,
+    bill_occurrences: [{ id: "o1", payment_id: "p1", due_date: "2026-10-25", paid: true }],
+  }));
+  assert.deepEqual(computeOverdueObligations(paid, AS_OF), {
+    count: 0, total_cents: 0, earliest_date: null,
+  });
+  const moved = parse(base({
+    payments,
+    bill_occurrences: [{
+      id: "o1", payment_id: "p1", due_date: "2026-11-05",
+      original_due_date: "2026-10-25", paid: false, is_user_modified: true,
+    }],
+  }));
+  assert.deepEqual(computeOverdueObligations(moved, AS_OF), {
+    count: 0, total_cents: 0, earliest_date: null,
+  });
+});

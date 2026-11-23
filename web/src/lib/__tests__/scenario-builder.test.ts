@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { runScenario } from "../../contract/engine";
-import { buildScenarioFromLedger, planningMinimumPaymentCents } from "../scenario-builder";
+import { buildScenarioFromLedger, planningMinimumPaymentCents, projectBillPayments, unresolvedPastOneTimeSlots } from "../scenario-builder";
+import { markBillOccurrencePaid, moveBillOccurrence } from "../ledger-edits";
 import { LedgerState } from "../types";
 
 function emptyState(overrides: Partial<LedgerState> = {}): LedgerState {
@@ -543,4 +544,86 @@ test("expected_amount overrides only the first projected paycheck", () => {
     .map((e: any) => e.amount_cents);
   assert.equal(amounts[0], 235000);
   assert.deepEqual(amounts.slice(1), [220000, 220000, 220000]);
+});
+
+test("a past one-time slot without an occurrence is reviewable but not a cash event", () => {
+  const state = emptyState({
+    current_balance_cents: 100_000,
+    transactions: [
+      { id: "tx-open", amount_cents: 100_000, type: "Adjustment", category: "Opening", date: "2026-11-01", description: "Opening" },
+    ],
+    payments: [
+      { id: "repair", name: "Car repair", amount_cents: 90_000, recurrence: "One-time", due_date: "2026-11-09" },
+      { id: "subscription", name: "Subscription", amount_cents: 1_000, recurrence: "Monthly", due_day: 15 },
+    ],
+  });
+  const scenario = buildScenarioFromLedger(state, "2026-11-10", 30);
+  // The historical $900 is not invented as an expense; the in-window $10 bill remains.
+  assert.deepEqual(
+    scenario.events.map((event: any) => [event.date, event.amount_cents, event.name]),
+    [["2026-11-15", -1_000, "Subscription"]]
+  );
+  const unresolved = unresolvedPastOneTimeSlots(state, "2026-11-10");
+  assert.deepEqual(unresolved.map((slot) => [slot.payment.name, slot.dueDate]), [["Car repair", "2026-11-09"]]);
+  const projected = projectBillPayments(state, "2026-11-10", "2026-12-10");
+  assert.ok(projected.slots.some((slot) => slot.payment.name === "Car repair" && slot.dueDate === "2026-11-09"));
+  assert.ok(projected.slots.some((slot) => slot.payment.name === "Subscription" && slot.dueDate === "2026-11-15"));
+});
+
+test("paid and moved one-time slots are already resolved for review", () => {
+  const base = emptyState({
+    payments: [
+      { id: "repair", name: "Car repair", amount_cents: 90_000, recurrence: "One-time", due_date: "2026-11-09" },
+    ],
+  });
+  const paid = {
+    ...base,
+    bill_occurrences: [{ id: "occ-paid", payment_id: "repair", due_date: "2026-11-09", paid: true }],
+  };
+  assert.deepEqual(unresolvedPastOneTimeSlots(paid, "2026-11-10"), []);
+  assert.equal(
+    projectBillPayments(paid, "2026-11-10", "2026-12-10").slots.some((slot) => slot.payment.name === "Car repair"),
+    false
+  );
+  const moved = {
+    ...base,
+    bill_occurrences: [{
+      id: "occ-moved", payment_id: "repair", due_date: "2026-11-20",
+      original_due_date: "2026-11-09", paid: false, is_user_modified: true,
+    }],
+  };
+  assert.deepEqual(unresolvedPastOneTimeSlots(moved, "2026-11-10"), []);
+  const movedScenario = buildScenarioFromLedger(moved, "2026-11-10", 30);
+  assert.deepEqual(
+    movedScenario.events.map((event: any) => [event.date, event.amount_cents]),
+    [["2026-11-20", -90_000]]
+  );
+});
+
+test("marking paid or moving the unresolved one-time slot clears its warning", () => {
+  const state = emptyState({
+    current_balance_cents: 100_000,
+    transactions: [
+      { id: "tx-open", amount_cents: 100_000, type: "Adjustment", category: "Opening", date: "2026-11-01", description: "Opening" },
+    ],
+    payments: [
+      { id: "repair", name: "Car repair", amount_cents: 90_000, recurrence: "One-time", due_date: "2026-11-09" },
+    ],
+  });
+  const paid = markBillOccurrencePaid(state, "repair", "2026-11-09", "2026-11-10");
+  assert.equal(paid.ok, true);
+  if (!paid.ok) return;
+  assert.deepEqual(unresolvedPastOneTimeSlots(paid.state, "2026-11-10"), []);
+  assert.ok(paid.state.bill_occurrences.some((occ) => occ.paid && occ.transaction_id === "tx-2"));
+  assert.equal(paid.state.transactions.at(-1)?.amount_cents, -90_000);
+
+  const moved = moveBillOccurrence(state, "repair", "2026-11-09", "2026-11-10");
+  assert.equal(moved.ok, true);
+  if (!moved.ok) return;
+  assert.deepEqual(unresolvedPastOneTimeSlots(moved.state, "2026-11-10"), []);
+  assert.deepEqual(
+    buildScenarioFromLedger(moved.state, "2026-11-10", 30).events
+      .map((event: any) => [event.date, event.amount_cents]),
+    [["2026-11-10", -90_000]]
+  );
 });

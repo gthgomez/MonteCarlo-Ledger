@@ -12,8 +12,9 @@ import {
   type EditResult,
 } from "@/lib/ledger-edits";
 import { formatMoney } from "@/lib/money-format";
+import type { OverdueAssessment } from "@/lib/overdue";
 import { type PlanSlice } from "@/lib/present";
-import { projectBillPayments } from "@/lib/scenario-builder";
+import { paymentOccurrenceKey, projectBillPayments } from "@/lib/scenario-builder";
 import { type LedgerState, type PaymentItem } from "@/lib/types";
 import { Button, fieldClass, Notice, Panel } from "./ui";
 
@@ -31,14 +32,15 @@ export function BillsView({
   slice: PlanSlice;
   horizonDays: number;
   assumptions: Assumptions;
-  overdue: { count: number; total_cents: number; earliest_date: string | null };
+  overdue: OverdueAssessment;
   onEdit: (result: EditResult) => void;
 }) {
   const [name, setName] = useState("");
   const [amount, setAmount] = useState("100");
   const [recurrence, setRecurrence] = useState<PaymentItem["recurrence"]>("Monthly");
   const [dueDay, setDueDay] = useState("15");
-  const [dueDate, setDueDate] = useState(asOf);
+  const [dueDateInput, setDueDate] = useState<string | null>(null);
+  const dueDate = dueDateInput ?? asOf;
   const [auto, setAuto] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [moveDates, setMoveDates] = useState<Record<string, string>>({});
@@ -79,7 +81,10 @@ export function BillsView({
       {overdue.count > 0 && (
         <Notice tone="warning" title={`${overdue.count} past-due unpaid ${overdue.count === 1 ? "bill" : "bills"}`}>
           They total {formatMoney(overdue.total_cents)}
-          {overdue.earliest_date ? `, earliest ${formatDateLabel(overdue.earliest_date)}` : ""}. The forecast counts them today while they are unpaid.
+          {overdue.earliest_date ? `, earliest ${formatDateLabel(overdue.earliest_date)}` : ""}.{" "}
+          {(overdue.unresolved_one_time_count ?? 0) > 0
+            ? "A one-time bill with no recorded occurrence is not in the plan until you mark it paid or move it below; no expense was added automatically."
+            : "The forecast counts them today while they are unpaid."}
         </Notice>
       )}
       <Panel
@@ -199,8 +204,8 @@ export function BillsView({
               {billSlots.map(({ payment, slotDate, dueDate }) => {
                 if (payment.id === undefined) return null;
                 const paymentId = payment.id;
-                const key = `${paymentId}::${slotDate}`;
-                const selectedDate = moveDates[key] ?? dueDate;
+                const key = paymentOccurrenceKey(paymentId, slotDate);
+                const selectedDate = moveDates[key] ?? (dueDate < asOf ? asOf : dueDate);
                 return (
                   <li
                     key={key}

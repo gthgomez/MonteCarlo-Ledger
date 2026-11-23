@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { X, Cloud, Lock, Terminal, Upload, Download, Check, AlertCircle, RefreshCw } from "lucide-react";
 import {
   pushVault,
@@ -10,17 +10,28 @@ import {
 import { LedgerState } from "@/lib/types";
 import { parseLedgerState } from "@/lib/validate";
 import { PersistenceResult } from "@/lib/sync-state";
+import type { LedgerChangeOptions } from "@/lib/persistence";
 
 interface SyncModalProps {
   isOpen: boolean;
   onClose: () => void;
   currentState: LedgerState;
+  /** Exact durable snapshot corresponding to the ledger currently shown in this tab. */
+  currentStoredRaw: string | null;
   onApplyState: (
     nextState: LedgerState,
-    vaultId?: string,
-    syncRevision?: number
-  ) => PersistenceResult;
+    options: LedgerChangeOptions
+  ) => Promise<PersistenceResult>;
   currentVaultId?: string;
+}
+
+type ActiveOperation = "push" | "pull" | "import";
+
+interface PullTarget {
+  vaultId: string;
+  passphrase: string;
+  /** Snapshot authorized before the pull request started; null means no stored ledger. */
+  expectedRaw: string | null;
 }
 
 /** An unguessable default vault id (the metadata endpoint reveals existence). */
@@ -30,14 +41,23 @@ function randomVaultId(): string {
   return `vault-${Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("")}`;
 }
 
+function describeError(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
 export function SyncModal({
   isOpen,
   onClose,
   currentState,
+  currentStoredRaw,
   onApplyState,
   currentVaultId,
 }: SyncModalProps) {
   const dialogRef = useRef<HTMLDialogElement>(null);
+  const operationSeq = useRef(0);
+  const abortRef = useRef<AbortController | null>(null);
+  const fileReaderRef = useRef<FileReader | null>(null);
+  const activeOperationRef = useRef<ActiveOperation | null>(null);
   const [tab, setTab] = useState<"cloud" | "file" | "cli">("cloud");
 
   // Cloud Sync form. The default id is random so vaults are not enumerable.
@@ -45,8 +65,18 @@ export function SyncModal({
   const [passphrase, setPassphrase] = useState("");
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const [isLoading, setIsLoading] = useState(false);
-  const [pullConflict, setPullConflict] = useState(false);
+  const [activeOperation, setActiveOperation] = useState<ActiveOperation | null>(null);
+  const [pendingConflict, setPendingConflict] = useState<PullTarget | null>(null);
+  const isLoading = activeOperation !== null;
+
+  const invalidateOperation = useCallback(() => {
+    operationSeq.current += 1;
+    abortRef.current?.abort();
+    abortRef.current = null;
+    fileReaderRef.current?.abort();
+    fileReaderRef.current = null;
+    activeOperationRef.current = null;
+  }, []);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -55,21 +85,81 @@ export function SyncModal({
     const opener = document.activeElement;
     dialog.showModal();
     return () => {
+      if (activeOperationRef.current !== "push") invalidateOperation();
       dialog.close();
       if (opener instanceof HTMLElement && opener.isConnected) opener.focus();
     };
-  }, [isOpen]);
+  }, [isOpen, invalidateOperation]);
+
+  // Closing invalidates any in-flight pull/import and drops a stale confirmation.
+  // A push is not cancelled here; handleClose refuses to close while it is running.
+  useEffect(() => {
+    if (isOpen) return;
+    invalidateOperation();
+    setActiveOperation(null);
+    setPendingConflict(null);
+    setStatusMessage(null);
+    setErrorMessage(null);
+  }, [isOpen, invalidateOperation]);
 
   if (!isOpen) return null;
 
+  function startOperation(kind: ActiveOperation, cancellable: boolean) {
+    operationSeq.current += 1;
+    const controller = cancellable ? new AbortController() : null;
+    abortRef.current = controller;
+    activeOperationRef.current = kind;
+    setActiveOperation(kind);
+    return { id: operationSeq.current, controller };
+  }
+
+  function isCurrent(id: number, controller: AbortController | null): boolean {
+    return operationSeq.current === id && !controller?.signal.aborted;
+  }
+
+  function finishOperation(id: number) {
+    if (operationSeq.current !== id) return;
+    abortRef.current = null;
+    fileReaderRef.current = null;
+    activeOperationRef.current = null;
+    setActiveOperation(null);
+  }
+
+  function handleClose() {
+    if (activeOperationRef.current === "push") {
+      setErrorMessage(
+        "A push is still being sent to the vault. Wait for it to finish before closing so its result is not hidden."
+      );
+      return;
+    }
+    // Pulls/imports have not committed yet. Cancelling the signal also prevents a
+    // request already queued for the write lock from replacing the ledger later.
+    invalidateOperation();
+    setActiveOperation(null);
+    setPendingConflict(null);
+    setStatusMessage(null);
+    setErrorMessage(null);
+    onClose();
+  }
+
+  function changeVaultTarget(update: () => void) {
+    update();
+    setPendingConflict(null);
+    setErrorMessage(null);
+    setStatusMessage(null);
+  }
+
   const handlePushToCloud = async () => {
+    if (activeOperationRef.current) return;
     if (!vaultId.trim() || !passphrase.trim()) {
+      setStatusMessage(null);
       setErrorMessage("Please enter both Vault ID and Passphrase.");
       return;
     }
-    setIsLoading(true);
+    const { id } = startOperation("push", false);
     setErrorMessage(null);
     setStatusMessage(null);
+    setPendingConflict(null);
 
     try {
       // Salt discovery happens inside pushVault: an existing vault is always
@@ -78,39 +168,51 @@ export function SyncModal({
       const { revision, ancestryPersisted } = await pushVault(
         vaultId.trim(),
         passphrase,
-        currentState
+        currentState,
+        { expectedLedgerRaw: currentStoredRaw }
       );
+      if (operationSeq.current !== id) return;
+      setErrorMessage(null);
       setStatusMessage(
         ancestryPersisted
           ? `Successfully pushed encrypted snapshot to Cloud Vault (rev ${revision})!`
           : `Pushed to Cloud Vault (rev ${revision}), but the local sync ancestry could not be saved. Pull before the next push.`
       );
-    } catch (err: any) {
-      setErrorMessage(err.message || "Failed to push to vault.");
+    } catch (err: unknown) {
+      if (operationSeq.current !== id) return;
+      setErrorMessage(describeError(err) || "Failed to push to vault.");
     } finally {
-      setIsLoading(false);
+      finishOperation(id);
     }
   };
 
-  const handlePullFromCloud = async (allowOverwriteLocal = false) => {
-    if (!vaultId.trim() || !passphrase.trim()) {
-      setErrorMessage("Please enter both Vault ID and Passphrase.");
-      return;
-    }
-    setIsLoading(true);
+  const runPull = async (target: PullTarget, allowOverwriteLocal: boolean) => {
+    if (activeOperationRef.current) return;
+    const { id, controller } = startOperation("pull", true);
+    if (!controller) return;
     setErrorMessage(null);
     setStatusMessage(null);
-    setPullConflict(false);
+    setPendingConflict(null);
 
     try {
       const { state, revision } = await pullVault(
-        vaultId.trim(),
-        passphrase,
+        target.vaultId,
+        target.passphrase,
         currentState,
         { allowOverwriteLocal }
       );
+      // Closing (or another operation) invalidates this request before any write.
+      if (!isCurrent(id, controller)) return;
       // Do not claim success unless the browser durably stored the restored ledger.
-      const applied = onApplyState(state, vaultId.trim(), revision);
+      // The exact authorized raw snapshot is re-checked under the shared write lock.
+      const applied = await onApplyState(state, {
+        expectedRaw: target.expectedRaw,
+        vaultId: target.vaultId,
+        syncRevision: revision,
+        signal: controller.signal,
+        requireLock: true,
+      });
+      if (!isCurrent(id, controller)) return;
       if (!applied.ok) {
         setErrorMessage(
           `Vault decrypted but the restore was not persisted: ${applied.error}`
@@ -118,38 +220,104 @@ export function SyncModal({
         return;
       }
       setStatusMessage(`Successfully pulled, decrypted and saved vault (rev ${revision})!`);
-    } catch (err: any) {
+    } catch (err: unknown) {
+      if (!isCurrent(id, controller)) return;
       if (err instanceof VaultLocalChangesError && !allowOverwriteLocal) {
-        setPullConflict(true);
-        setErrorMessage(err.message);
+        setPendingConflict(target);
+        setErrorMessage(describeError(err));
       } else {
-        setErrorMessage(err.message || "Failed to pull from vault. Check passphrase.");
+        setErrorMessage(
+          describeError(err) || "Failed to pull from vault. Check passphrase."
+        );
       }
     } finally {
-      setIsLoading(false);
+      finishOperation(id);
     }
+  };
+
+  const handlePullFromCloud = () => {
+    if (activeOperationRef.current) return;
+    if (!vaultId.trim() || !passphrase.trim()) {
+      setStatusMessage(null);
+      setErrorMessage("Please enter both Vault ID and Passphrase.");
+      return;
+    }
+    // Capture the exact snapshot visible when the user authorized this pull. If
+    // another tab edits while the request is in flight, the lock comparison fails.
+    void runPull(
+      {
+        vaultId: vaultId.trim(),
+        passphrase,
+        expectedRaw: currentStoredRaw,
+      },
+      false
+    );
+  };
+
+  const handleConfirmOverwrite = () => {
+    if (!pendingConflict || activeOperationRef.current) return;
+    // Reuse the captured target/authorization. Confirmation must not silently apply
+    // to a different vault or to a ledger snapshot the user did not see.
+    void runPull(pendingConflict, true);
   };
 
   const handleImportFile = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (!file) return;
+    const input = e.currentTarget;
+    // Reset immediately so choosing the same file again still fires a change event.
+    input.value = "";
+    if (!file || activeOperationRef.current) return;
+
+    const { id, controller } = startOperation("import", true);
+    if (!controller) return;
+    setStatusMessage(null);
+    setErrorMessage(null);
+    setPendingConflict(null);
+    const expectedRaw = currentStoredRaw;
 
     const reader = new FileReader();
-    reader.onload = (event) => {
+    fileReaderRef.current = reader;
+    reader.onload = async (event) => {
+      if (!isCurrent(id, controller)) return;
+      let replacing = false;
       try {
         const parsed = JSON.parse(event.target?.result as string);
         const validated = parseLedgerState(parsed);
         if (!validated.ok) {
           throw new Error(validated.error);
         }
-        const applied = onApplyState(validated.state);
+        // Validation happens before any replace. Both messages are cleared so an
+        // older success cannot sit beside a rejection (or vice versa).
+        replacing = true;
+        const applied = await onApplyState(validated.state, {
+          expectedRaw,
+          signal: controller.signal,
+          requireLock: true,
+        });
+        if (!isCurrent(id, controller)) return;
         if (!applied.ok) {
           throw new Error(applied.error);
         }
+        setErrorMessage(null);
         setStatusMessage("Successfully imported ledger backup file!");
-      } catch (err: any) {
-        setErrorMessage("Import rejected (your current ledger is unchanged): " + err.message);
+      } catch (err: unknown) {
+        if (!isCurrent(id, controller)) return;
+        setStatusMessage(null);
+        setErrorMessage(
+          (replacing ? "Import could not be saved: " : "Import rejected (your current ledger is unchanged): ") +
+          describeError(err)
+        );
+      } finally {
+        finishOperation(id);
       }
+    };
+    reader.onerror = () => {
+      if (!isCurrent(id, controller)) return;
+      setStatusMessage(null);
+      setErrorMessage(
+        "Import rejected (your current ledger is unchanged): the file could not be read."
+      );
+      finishOperation(id);
     };
     reader.readAsText(file);
   };
@@ -160,7 +328,7 @@ export function SyncModal({
       aria-labelledby="sync-title"
       onCancel={(event) => {
         event.preventDefault();
-        onClose();
+        handleClose();
       }}
       className="m-auto max-h-[90vh] w-[calc(100%_-_2rem)] max-w-lg overflow-y-auto rounded-2xl border border-line bg-surface p-5 text-ink shadow-card backdrop:bg-ink/50"
     >
@@ -173,7 +341,7 @@ export function SyncModal({
           </div>
           <button
             type="button"
-            onClick={onClose}
+            onClick={handleClose}
             aria-label="Close synchronization"
             className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-lg text-ink"
           >
@@ -239,7 +407,7 @@ export function SyncModal({
               encrypted snapshot, vault ID, and sync metadata. It does not receive your passphrase or encryption key.
             </p>
             <p className="text-ink">
-              A pull replaces the ledger in this browser. Export first if there is anything you want to keep.
+              A pull replaces the ledger in this browser. To keep a copy, close Sync and use Export in the header first.
               Budget targets and forecast settings, including your reserve, stay in this browser and are not
               recovered from the vault. Android-only data needs a separate native backup.
             </p>
@@ -251,7 +419,8 @@ export function SyncModal({
                 type="text"
                 placeholder="e.g. personal-budget-vault"
                 value={vaultId}
-                onChange={(e) => setVaultId(e.target.value)}
+                disabled={isLoading}
+                onChange={(e) => changeVaultTarget(() => setVaultId(e.target.value))}
                 className="w-full px-3 py-2 rounded-lg bg-inset border border-line text-ink focus:outline-none focus:border-accent"
               />
             </div>
@@ -265,7 +434,8 @@ export function SyncModal({
                 type="password"
                 placeholder="Enter secret passphrase"
                 value={passphrase}
-                onChange={(e) => setPassphrase(e.target.value)}
+                disabled={isLoading}
+                onChange={(e) => changeVaultTarget(() => setPassphrase(e.target.value))}
                 className="w-full px-3 py-2 rounded-lg bg-inset border border-line text-ink focus:outline-none focus:border-accent"
               />
             </div>
@@ -277,27 +447,28 @@ export function SyncModal({
                 className="flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-accent hover:opacity-90 disabled:opacity-50 text-on-accent font-semibold transition"
               >
                 <Upload className="w-3.5 h-3.5" />
-                <span>{isLoading ? "Encrypting..." : "Push (Upload)"}</span>
+                <span>{activeOperation === "push" ? "Encrypting..." : "Push (Upload)"}</span>
               </button>
 
               <button
-                onClick={() => handlePullFromCloud(false)}
+                onClick={handlePullFromCloud}
                 disabled={isLoading}
                 className="flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-inset hover:bg-surface disabled:opacity-50 text-ink font-semibold border border-line transition"
               >
                 <Download className="w-3.5 h-3.5" />
-                <span>{isLoading ? "Decrypting..." : "Pull (Download)"}</span>
+                <span>{activeOperation === "pull" ? "Decrypting..." : "Pull (Download)"}</span>
               </button>
             </div>
 
-            {pullConflict && (
+            {pendingConflict && (
               <div className="space-y-2 rounded-xl border border-warning bg-warning-soft p-3">
                 <p className="text-ink">
                   This device has ledger edits that were never synchronized. Pulling now
-                  would replace them. Export a backup from the header first, then confirm.
+                  would replace them. Close this dialog and export a backup from the header
+                  first, then reopen Sync and pull again before confirming.
                 </p>
                 <button
-                  onClick={() => handlePullFromCloud(true)}
+                  onClick={handleConfirmOverwrite}
                   disabled={isLoading}
                   className="min-h-11 rounded-lg bg-accent px-3 py-2 font-semibold text-on-accent disabled:opacity-50"
                 >
@@ -336,15 +507,23 @@ export function SyncModal({
         {tab === "file" && (
           <div className="space-y-4 text-xs">
             <p className="text-muted">
-              Export from the header to save an unencrypted ledger file. Keep it private. Importing a valid file
-              here replaces this ledger. Budget targets and forecast settings are not in the file.
+              Close this dialog, then export from the header to save an unencrypted ledger file. Keep it private.
+              Importing a valid file here replaces this ledger. Budget targets and forecast settings are not in the file.
             </p>
 
             <label className="flex flex-col items-center justify-center border-2 border-dashed border-line hover:border-accent focus-within:outline focus-within:outline-accent rounded-xl p-6 cursor-pointer bg-inset hover:bg-inset transition">
               <Upload className="w-6 h-6 text-muted mb-2" />
-              <span className="font-semibold text-ink">Click to select backup JSON file</span>
+              <span className="font-semibold text-ink">
+                {activeOperation === "import" ? "Reading backup…" : "Click to select backup JSON file"}
+              </span>
               <span className="text-[11px] text-muted mt-1">Accepts canonical .json snapshot</span>
-              <input type="file" accept=".json" onChange={handleImportFile} className="sr-only" />
+              <input
+                type="file"
+                accept=".json"
+                onChange={handleImportFile}
+                disabled={isLoading}
+                className="sr-only"
+              />
             </label>
           </div>
         )}

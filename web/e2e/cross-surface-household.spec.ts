@@ -192,11 +192,13 @@ test("move and record a generated bill without posting a duplicate", async ({ pa
   const firstBill = page.getByRole("listitem", { name: /^Internet due/ }).first();
   await firstBill.getByLabel(/^New date for Internet/).fill("2028-02-19");
   await firstBill.getByRole("button", { name: "Move", exact: true }).click();
-  await expect(firstBill.getByLabel(/^New date for Internet/)).toHaveValue("2028-02-19");
+  const movedBill = page.getByRole("listitem", { name: "Internet due Feb 19, 2028", exact: true });
+  // The draft input already displays the typed date; the row label only moves after the durable save.
+  await expect(movedBill).toBeVisible();
   await page.reload();
-  await expect(firstBill.getByLabel(/^New date for Internet/)).toHaveValue("2028-02-19");
-  await firstBill.getByRole("button", { name: "Mark paid" }).click();
-  await expect(firstBill.getByLabel(/^New date for Internet/)).not.toHaveValue("2028-02-19");
+  await expect(movedBill.getByLabel(/^New date for Internet/)).toHaveValue("2028-02-19");
+  await movedBill.getByRole("button", { name: "Mark paid" }).click();
+  await expect(movedBill).toHaveCount(0);
   await page.reload();
 
   const saved = await page.evaluate(() => JSON.parse(localStorage.getItem("montecarlo_ledger_state_v2") ?? "null"));

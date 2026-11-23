@@ -1,4 +1,4 @@
-import { runScenario, timelineRows, type TimelineRow } from "../contract/engine";
+import { runScenario, runScenarioWithFixedDraftExpense, timelineRows, type TimelineRow } from "../contract/engine";
 import { ContractError } from "../contract/money";
 import { Assumptions, assumptionError, toSimulationConfig } from "./assumptions";
 import { addDaysIso, isIsoDate } from "./dates";
@@ -67,9 +67,11 @@ function outcomeFrom(raw: any, assumptions: Assumptions, scenario: any): ModelOu
   };
 }
 
-function runBuilt(scenario: any, assumptions: Assumptions): EvalResult {
+function runBuilt(scenario: any, assumptions: Assumptions, fixedDraftExpenseCategory?: string): EvalResult {
   try {
-    const raw = runScenario(scenario);
+    const raw = fixedDraftExpenseCategory === undefined
+      ? runScenario(scenario)
+      : runScenarioWithFixedDraftExpense(scenario, fixedDraftExpenseCategory);
     if (!raw.risk || !raw.forecast) {
       return fail("UNKNOWN_ERROR", "The engine returned a result without a forecast.");
     }
@@ -107,6 +109,9 @@ export function evaluatePurchase(
   return evaluateDatedOutflow(state, asOf, assumptions, amountCents, date, "Simulated Purchase");
 }
 
+/** Private marker for the extra outflow; it is never posted or persisted. */
+const EXTRA_DEBT_PAYMENT_CATEGORY = "extra-debt-payment";
+
 /** Adds just the proposed cash outflow. It does not rewrite a liability or its future minimums. */
 export function evaluateExtraDebtPayment(
   state: LedgerState,
@@ -115,7 +120,7 @@ export function evaluateExtraDebtPayment(
   amountCents: number,
   date: string
 ): EvalResult {
-  return evaluateDatedOutflow(state, asOf, assumptions, amountCents, date, "Extra debt payment");
+  return evaluateDatedOutflow(state, asOf, assumptions, amountCents, date, "Extra debt payment", EXTRA_DEBT_PAYMENT_CATEGORY);
 }
 
 function evaluateDatedOutflow(
@@ -124,7 +129,8 @@ function evaluateDatedOutflow(
   assumptions: Assumptions,
   amountCents: number,
   date: string,
-  name: string
+  name: string,
+  fixedCategory?: string
 ): EvalResult {
   const problem = assumptionError(assumptions);
   if (problem) return fail("INVALID_ASSUMPTIONS", problem);
@@ -149,8 +155,9 @@ function evaluateDatedOutflow(
       amount_cents: -amountCents,
       type: "expense",
       name,
+      ...(fixedCategory === undefined ? {} : { category: fixedCategory }),
     });
-    return runBuilt(scenario, assumptions);
+    return runBuilt(scenario, assumptions, fixedCategory);
   } catch (err) {
     return fromThrown(err);
   }

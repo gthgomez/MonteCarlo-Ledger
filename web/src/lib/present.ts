@@ -1,6 +1,7 @@
 import { quantilePlainName } from "./assumptions";
-import { addDaysIso, calendarMonthWindow, previousMonthWindow, relativeDay } from "./dates";
+import { addDaysIso, calendarMonthWindow, formatDateLabel, previousMonthWindow, relativeDay } from "./dates";
 import { formatMoney } from "./money-format";
+import { firstOneTimeBillOutsideWindow, unresolvedPastOneTimeSlots } from "./scenario-builder";
 import type { LedgerState, LiabilityItem, TransactionItem } from "./types";
 import type { Section } from "./sections";
 
@@ -15,7 +16,8 @@ export interface TimelineLike {
 /** When to withhold modeled spending advice while still showing the known schedule. */
 export function spendingGuidanceIssue(
   state: Pick<LedgerState, "payments" | "bill_occurrences">,
-  rows: TimelineLike[]
+  rows: TimelineLike[],
+  asOf: string
 ): string | null {
   const datedPayments = new Set(state.bill_occurrences.map((item) => String(item.payment_id)));
   const missingDate = state.payments.some((payment) =>
@@ -26,10 +28,35 @@ export function spendingGuidanceIssue(
   if (missingDate) {
     return "A saved bill is missing a date. Review your bills so the plan does not leave out a required payment.";
   }
+  const unresolved = unresolvedPastOneTimeSlots(state, asOf);
+  if (unresolved.length > 0) {
+    const first = unresolved[0];
+    const amount = formatMoney(first.payment.amount_cents);
+    const due = `${formatDateLabel(first.dueDate)} (${first.dueDate})`;
+    const subject = unresolved.length === 1
+      ? `The one-time bill “${first.payment.name}” for ${amount} was due ${due} and has no recorded payment`
+      : `${unresolved.length} one-time bills due before today have no recorded payment, starting with “${first.payment.name}” for ${amount} on ${due}`;
+    return `${subject}. The plan leaves ${unresolved.length === 1 ? "it" : "them"} out. In Bills, record any payments you made or move the bill to the date you expect to pay before relying on spending estimates.`;
+  }
   if (!rows.some((row) => row.type === "expense")) {
     return "No payments are included in this plan window. Check your bill dates or try a longer window under Advanced.";
   }
   return null;
+}
+
+/**
+ * A known unpaid one-time bill that starts after the half-open plan window.
+ * Informational only: it does not change the horizon or withhold in-window guidance.
+ */
+export function beyondWindowBillNotice(
+  state: Pick<LedgerState, "payments" | "bill_occurrences">,
+  asOf: string,
+  horizonDays: number
+): string | null {
+  if (!Number.isInteger(horizonDays) || horizonDays < 1) return null;
+  const next = firstOneTimeBillOutsideWindow(state, addDaysIso(asOf, horizonDays));
+  if (!next) return null;
+  return `The one-time bill “${next.payment.name}” for ${formatMoney(next.payment.amount_cents)} is due ${formatDateLabel(next.dueDate)} (${next.dueDate}), after this ${horizonDays}-day plan window, so this plan does not include it. Extend the plan window under Advanced if you want it counted.`;
 }
 
 export interface PlanSlice {
@@ -307,7 +334,7 @@ export function buildInsights(input: {
       id: "overdue",
       tone: "attention",
       title: `${input.overdueCount} unpaid ${input.overdueCount === 1 ? "bill is" : "bills are"} past the due date`,
-      detail: `They total ${formatMoney(input.overdueCents)}, earliest ${relativeDay(input.asOf, input.overdueEarliest)}. The forecast counts them today while they are unpaid.`,
+      detail: `They total ${formatMoney(input.overdueCents)}, earliest ${relativeDay(input.asOf, input.overdueEarliest)}. Recorded unpaid occurrences are counted today; a one-time bill with no recorded occurrence is left out until you mark it paid or move it in Bills.`,
       action: { label: "Review bills", section: "bills" },
     });
   }

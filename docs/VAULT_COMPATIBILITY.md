@@ -24,12 +24,19 @@ location. A vault copy is encrypted before upload, but the server handles vault 
 authentication and revision metadata. Clearing browser storage does not remove a server-side vault
 snapshot. Neither kind of copy is a record-by-record merge.
 
-To recover on Web, open **Sync → Encrypted vault** and pull with the vault ID and passphrase, or
-use **Sync → Local JSON Backup** to import an exported ledger. If the target has a ledger you
-want to keep, use **Export** first. After restoring, check the recorded balance, the next required
-payment and any bill-to-debt links. Re-enter browser-only settings under **Budget** and **Advanced**;
-they can differ from the settings used when the ledger was last viewed. If validation fails or
-you see a conflict, retain the local copy and resolve the mismatch before pushing anything back.
+If the browser has a ledger you want to keep, close **Sync** and use **Export** in the header first.
+To recover, open **Sync → Encrypted vault** and pull with the vault ID and passphrase, or use
+**Sync → Local JSON Backup** to import an exported ledger. Closing Sync while a restore is pending
+discards that restore. Web Sync and ledger replacement require cross-tab locking; use a
+current browser on HTTPS or loopback. Close older versions of the app in other tabs before
+synchronizing. If the saved ledger changed after the tab loaded it, reload and review the newer
+ledger before trying again. If storage fails during restore, the app checks that previous saved
+data was preserved and reports if it could not verify that.
+
+After restoring, check the recorded balance, the next required payment and any bill-to-debt links.
+Re-enter browser-only settings under **Budget** and **Advanced**; they can differ from the settings
+used when the ledger was last viewed. If validation fails or you see a conflict, retain the local
+copy and resolve the mismatch before pushing anything back.
 
 ## Payment links
 
@@ -42,6 +49,11 @@ Restore replaces a ledger transactionally. It does not combine rows from separat
 The linked payment covers a debt minimum only for the matching schedule slot. A moved occurrence is matched using its original date, and its cash event uses the revised date. A linked bill below the minimum leaves a debt shortfall. A posted settlement covers only the amount recorded for that slot. The forecast starts from the entered outstanding debt balance and does not apply a recorded settlement to it a second time.
 
 Persisted overdue unpaid occurrences count at the start of the plan. A forecast refresh does not invent past recurring payments. The scheduled bill represents the entered cash commitment. Keep that schedule up to date after payoff or when a lender changes its automatic debit. Deleting a linked bill removes the relationship and leaves any active outstanding debt in the forecast. Archived debts are retained in storage.
+
+On Web, a one-time bill with a past due date and no saved occurrence needs review before
+the app offers spending or risk guidance. In **Bills**, record the payment if it happened
+or move the bill to the date you expect to pay. An upcoming one-time bill outside the chosen
+window is not included in its estimates; extend the window under **Advanced** to plan for it.
 
 ## Verification limits
 

@@ -6,6 +6,7 @@ import { createStarterLedger, dollarsToCents } from "@/lib/ledger-edits";
 import { formatMoney } from "@/lib/money-format";
 import { type Insight, type PlanSlice, type PositionCopy } from "@/lib/present";
 import { type Section } from "@/lib/sections";
+import { type PersistenceResult } from "@/lib/sync-state";
 import { type IncomeItem } from "@/lib/types";
 import { Button, Explain, fieldClass, Metric, Notice } from "./ui";
 
@@ -26,7 +27,7 @@ interface HomeViewProps {
   reserveCents: number;
   runs: number;
   onNavigate: (section: Section) => void;
-  createOwn: (input: Parameters<typeof createStarterLedger>[0]) => { ok: true } | { ok: false; error: string };
+  createOwn: (input: Parameters<typeof createStarterLedger>[0]) => Promise<PersistenceResult>;
 }
 
 export function HomeView({
@@ -49,18 +50,21 @@ export function HomeView({
   createOwn,
 }: HomeViewProps) {
   const [open, setOpen] = useState(needsSetup && !usingDemo);
+  const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [balance, setBalance] = useState("");
   const [incomeName, setIncomeName] = useState("");
   const [incomeAmount, setIncomeAmount] = useState("");
   const [frequency, setFrequency] = useState<IncomeItem["frequency"]>("Bi-weekly");
-  const [payday, setPayday] = useState(asOf);
+  const [paydayInput, setPayday] = useState<string | null>(null);
+  const payday = paydayInput ?? asOf;
   const [billName, setBillName] = useState("");
   const [billAmount, setBillAmount] = useState("");
   const [dueDay, setDueDay] = useState("1");
 
-  function submitOwn(event: React.FormEvent) {
+  async function submitOwn(event: React.FormEvent) {
     event.preventDefault();
+    if (saving) return;
     const balanceCents = dollarsToCents(Number(balance));
     if (balance.trim() === "" || balanceCents === null) {
       setError("Enter the money you have now, in dollars. Use 0 if you are starting from nothing.");
@@ -85,7 +89,9 @@ export function HomeView({
       }
       bill = { name: billName, amountCents, dueDay: day };
     }
-    const created = createOwn({ asOf, balanceCents, income, bill });
+    setSaving(true);
+    const created = await createOwn({ asOf, balanceCents, income, bill });
+    setSaving(false);
     if (!created.ok) {
       setError(created.error);
       return;
@@ -167,7 +173,7 @@ export function HomeView({
               {error}
             </p>
           )}
-          <Button type="submit">Save and show my plan</Button>
+          <Button type="submit" disabled={saving}>Save and show my plan</Button>
         </form>
       )}
 

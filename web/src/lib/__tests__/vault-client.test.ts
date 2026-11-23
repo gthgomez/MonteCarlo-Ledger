@@ -13,6 +13,7 @@ import {
   readSyncRecord,
 } from "../sync-state";
 import { deriveVaultKeys, encryptVault } from "../crypto";
+import { LEDGER_LOCK_NAME, LEDGER_STORAGE_KEY } from "../persistence";
 import { SAMPLE_LEDGER_STATE, LedgerState } from "../types";
 
 class FakeStorage implements SyncStorage {
@@ -183,6 +184,67 @@ test("sequential stale writes cannot overwrite a newer remote snapshot", async (
     );
     assert.equal(server.vaults.get("vault-1")!.revision, 3);
     assert.equal(readSyncRecord("vault-1", b)?.baseRevision, 1);
+  });
+});
+
+test("a push keeps its base if shared ancestry advances during the metadata lookup", async () => {
+  await withServer(async (server) => {
+    const local = new FakeStorage();
+    const otherDevice = new FakeStorage();
+    const pass = "synthetic passphrase";
+    const oldState = mutateState(0);
+    const newState = mutateState(100);
+    await pushVault("vault-1", pass, oldState, { storage: local });
+    commitSynchronizedState("vault-1", 1, oldState, otherDevice);
+    await pushVault("vault-1", pass, newState, { storage: otherDevice });
+    const before = server.log.length;
+    globalThis.fetch = (input, init) => {
+      // The original tab hasn't seen the snapshot, but a sibling tab has pulled it.
+      commitSynchronizedState("vault-1", 2, newState, local);
+      return server.fetchImpl(input, init);
+    };
+
+    await assert.rejects(
+      () => pushVault("vault-1", pass, oldState, { storage: local }),
+      /changed on another device/
+    );
+    assert.equal(server.vaults.get("vault-1")?.revision, 2);
+    assert.deepEqual(server.log.slice(before), ["GET /api/vault/vault-1/metadata"]);
+  });
+});
+
+test("a stale displayed ledger is refused under the shared lock before a push contacts the vault", async () => {
+  await withServer(async (server) => {
+    const originalNavigator = Object.getOwnPropertyDescriptor(globalThis, "navigator");
+    const storage = new FakeStorage();
+    const stale = mutateState(0);
+    storage.setItem(LEDGER_STORAGE_KEY, JSON.stringify(mutateState(100)));
+    const lockRequests: string[] = [];
+    Object.defineProperty(globalThis, "navigator", {
+      configurable: true,
+      value: {
+        locks: {
+          async request(name: string, _options: unknown, callback: () => unknown) {
+            lockRequests.push(name);
+            return callback();
+          },
+        },
+      },
+    });
+    try {
+      await assert.rejects(
+        () => pushVault("vault-1", "synthetic passphrase", stale, {
+          storage,
+          expectedLedgerRaw: JSON.stringify(stale),
+        }),
+        /saved ledger changed in another tab/
+      );
+      assert.deepEqual(lockRequests, [LEDGER_LOCK_NAME]);
+      assert.deepEqual(server.log, []);
+    } finally {
+      if (originalNavigator) Object.defineProperty(globalThis, "navigator", originalNavigator);
+      else Reflect.deleteProperty(globalThis, "navigator");
+    }
   });
 });
 

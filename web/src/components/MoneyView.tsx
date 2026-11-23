@@ -30,13 +30,15 @@ export function MoneyView({
   const [amount, setAmount] = useState("");
   const [category, setCategory] = useState("");
   const [description, setDescription] = useState("");
-  const [date, setDate] = useState(asOf);
+  const [dateInput, setDate] = useState<string | null>(null);
+  const date = dateInput ?? asOf;
   const [formError, setFormError] = useState<string | null>(null);
 
   const [incomeName, setIncomeName] = useState("");
   const [incomeAmount, setIncomeAmount] = useState("");
   const [frequency, setFrequency] = useState<IncomeItem["frequency"]>("Bi-weekly");
-  const [payday, setPayday] = useState(asOf);
+  const [paydayInput, setPayday] = useState<string | null>(null);
+  const payday = paydayInput ?? asOf;
   const [incomeError, setIncomeError] = useState<string | null>(null);
 
   const [reconcile, setReconcile] = useState((startingBalanceCents / 100).toFixed(2));

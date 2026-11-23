@@ -19,10 +19,10 @@ import {
   saveAssumptions,
 } from "@/lib/assumptions-persistence";
 import { EMPTY_TARGETS, loadBudgetTargets, saveBudgetTargets, type BudgetTargets } from "@/lib/budget-targets";
-import { localDateIso } from "@/lib/dates";
 import { createStarterLedger, type EditResult } from "@/lib/ledger-edits";
-import { applyLedgerBundle, LEDGER_STORAGE_KEY } from "@/lib/persistence";
+import { LEDGER_STORAGE_KEY, saveLedgerChange, type LedgerChangeOptions } from "@/lib/persistence";
 import {
+  beyondWindowBillNotice,
   buildInsights,
   categoryOverages,
   describePosition,
@@ -38,6 +38,7 @@ import { SECTION_QUESTION, sectionFromHash, type Section } from "@/lib/sections"
 import { PersistenceResult, VAULT_ID_STORAGE_KEY } from "@/lib/sync-state";
 import { SAMPLE_LEDGER_STATE, type LedgerState } from "@/lib/types";
 import { computeOverdueObligations } from "@/lib/overdue";
+import { useFinancialDate } from "@/lib/use-financial-date";
 import { parseLedgerState } from "@/lib/validate";
 
 const THEME_KEY = "mc-theme";
@@ -85,7 +86,7 @@ export default function Home() {
 
     try {
       const saved = localStorage.getItem(LEDGER_STORAGE_KEY);
-      if (saved) {
+      if (saved !== null) {
         setStoredRaw(saved);
         let parsed: unknown;
         try {
@@ -161,7 +162,7 @@ export default function Home() {
     return () => window.removeEventListener("storage", receiveAssumptions);
   }, []);
 
-  const asOf = useMemo(() => localDateIso(), []);
+  const asOf = useFinancialDate();
 
   const evaluation = useMemo(() => evaluateLedger(state, asOf, assumptions), [state, asOf, assumptions]);
 
@@ -182,42 +183,27 @@ export default function Home() {
     setTheme(next);
   }
 
-  function handleUpdateState(nextState: LedgerState): string | null {
-    try {
-      if (localStorage.getItem(LEDGER_STORAGE_KEY) !== storedRaw) {
-        const message = "This ledger changed in another tab. Reload and try your edit again.";
-        setSaveWarning(message);
-        return message;
-      }
-      const serialized = JSON.stringify(nextState);
-      localStorage.setItem(LEDGER_STORAGE_KEY, serialized);
-      if (localStorage.getItem(LEDGER_STORAGE_KEY) !== serialized) {
-        throw new Error("The stored ledger did not match your change.");
-      }
-      setStoredRaw(serialized);
-      setState(nextState);
-      setUsingDemo(false);
-      setSaveWarning(null);
-      return null;
-    } catch {
-      const message = "The edit could not be saved. Reload to check your saved ledger before trying again.";
-      setSaveWarning(message);
-      return message;
-    }
-  }
-
-  function handleApplyState(nextState: LedgerState, vaultId?: string, syncRevision?: number): PersistenceResult {
-    const saved = applyLedgerBundle(nextState, vaultId, syncRevision);
-    if (!saved.ok) {
-      setSaveWarning(saved.error);
-      return saved;
-    }
+  function showSavedLedger(nextState: LedgerState, demo = false) {
     setStoredRaw(JSON.stringify(nextState));
     setState(nextState);
-    setUsingDemo(false);
+    setUsingDemo(demo);
     setSaveWarning(null);
-    if (vaultId) setCurrentVaultId(vaultId);
-    return { ok: true };
+  }
+
+  async function handleUpdateState(nextState: LedgerState): Promise<PersistenceResult> {
+    const saved = await saveLedgerChange(nextState, { expectedRaw: storedRaw });
+    if (saved.ok) showSavedLedger(nextState);
+    else setSaveWarning(saved.error);
+    return saved;
+  }
+
+  async function handleApplyState(nextState: LedgerState, options: LedgerChangeOptions): Promise<PersistenceResult> {
+    const saved = await saveLedgerChange(nextState, { ...options, requireLock: true });
+    if (saved.ok) {
+      showSavedLedger(nextState);
+      if (options.vaultId) setCurrentVaultId(options.vaultId);
+    }
+    return saved;
   }
 
   function handleApplyAssumptions(nextAssumptions: Assumptions): string | null {
@@ -233,20 +219,15 @@ export default function Home() {
     return null;
   }
 
-  function handleResetDemo() {
+  async function handleResetDemo() {
     if (!confirm("Replace this ledger with the sample demo data? Your local changes will be replaced.")) return;
-    setState(SAMPLE_LEDGER_STATE);
-    setUsingDemo(true);
-    setLoadError(null);
-    setSaveWarning(null);
-    try {
-      const serialized = JSON.stringify(SAMPLE_LEDGER_STATE);
-      localStorage.setItem(LEDGER_STORAGE_KEY, serialized);
-      setStoredRaw(serialized);
-    } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : "storage error";
-      setSaveWarning(`Could not save the demo ledger (${message}).`);
+    const saved = await saveLedgerChange(SAMPLE_LEDGER_STATE, { expectedRaw: storedRaw, requireLock: true });
+    if (!saved.ok) {
+      setSaveWarning(saved.error);
+      return;
     }
+    showSavedLedger(SAMPLE_LEDGER_STATE, true);
+    setLoadError(null);
   }
 
   function handleExportJson() {
@@ -260,7 +241,7 @@ export default function Home() {
   }
 
   function onEdit(result: EditResult) {
-    if (result.ok) handleUpdateState(result.state);
+    if (result.ok) void handleUpdateState(result.state);
     else setSaveWarning(result.error);
   }
 
@@ -290,6 +271,7 @@ export default function Home() {
             No forecast is shown because the stored financial data could not be validated. The raw data has not been
             deleted or replaced.
           </p>
+          {saveWarning && <Notice tone="warning" title="Not saved">{saveWarning}</Notice>}
           <div className="flex flex-wrap gap-3">
             {storedRaw && (
               <a
@@ -377,6 +359,7 @@ export default function Home() {
           <p className="text-sm text-muted">
             This is usually caused by an edited ledger entry or an amount outside the supported range.
           </p>
+          {saveWarning && <Notice tone="warning" title="Not saved">{saveWarning}</Notice>}
           <div className="flex flex-wrap gap-3">
             <button
               type="button"
@@ -398,7 +381,9 @@ export default function Home() {
   const rows = evaluation.rows;
   const previewDays = Math.min(30, assumptions.horizonDays);
   const slice = slicePlan(rows, asOf, previewDays, outcome.startingBalanceCents);
-  const guidanceIssue = spendingGuidanceIssue(state, rows);
+  const guidanceIssue = spendingGuidanceIssue(state, rows, asOf);
+  const windowNotice = beyondWindowBillNotice(state, asOf, assumptions.horizonDays);
+  const isForecastSection = section === "plan" || section === "future" || section === "advanced";
   const showGuidance = guidanceIssue === null;
   const safeSpendCents = showGuidance ? outcome.safeSpendCents : null;
   const sum = transactionSumCents(state.transactions);
@@ -467,6 +452,12 @@ export default function Home() {
         <p className="text-sm text-muted">{SECTION_QUESTION[section]}</p>
         {saveWarning && <Notice tone="warning" title="Not saved">{saveWarning}</Notice>}
         {assumptionsWarning && <Notice tone="warning" title="Financial settings">{assumptionsWarning}</Notice>}
+        {isForecastSection && guidanceIssue && (
+          <Notice tone="warning" title="Not enough information to suggest spending">{guidanceIssue}</Notice>
+        )}
+        {(section === "home" || section === "bills" || isForecastSection) && windowNotice && (
+          <Notice tone="info" title="A bill is outside the plan window">{windowNotice}</Notice>
+        )}
         {section === "home" && (
           <HomeView
             asOf={asOf}
@@ -485,11 +476,10 @@ export default function Home() {
             reserveCents={assumptions.reserveCents}
             runs={outcome.runs}
             onNavigate={navigate}
-            createOwn={(input) => {
+            createOwn={async (input) => {
               const created = createStarterLedger(input);
               if (!created.ok) return created;
-              const saveError = handleUpdateState(created.state);
-              return saveError ? { ok: false, error: saveError } : { ok: true };
+              return handleUpdateState(created.state);
             }}
           />
         )}
@@ -534,6 +524,7 @@ export default function Home() {
         isOpen={isSyncModalOpen}
         onClose={() => setIsSyncModalOpen(false)}
         currentState={state}
+        currentStoredRaw={storedRaw}
         onApplyState={handleApplyState}
         currentVaultId={currentVaultId}
       />
