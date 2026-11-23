@@ -9,13 +9,15 @@ import {
   updateLiabilityBalance,
   aprPercentToBasisPoints,
   dollarsToCents,
+  parseDollarsToCents,
   removeLiability,
   type EditResult,
 } from "@/lib/ledger-edits";
 import { explainEngineCode, formatMoney, formatProbability } from "@/lib/money-format";
-import { evenSetAside } from "@/lib/present";
+import { evenSetAside, formatCautiousSpend } from "@/lib/present";
 import {
   evaluateBillAmount,
+  evaluateExtraDebtPayment,
   evaluateIncomeDelay,
   evaluateMonthlySetAside,
   evaluatePurchase,
@@ -40,11 +42,13 @@ function Compare({
   title,
   base,
   next,
+  showGuidance,
   note,
 }: {
   title: string;
   base: ModelOutcome;
   next: EvalResult;
+  showGuidance: boolean;
   note: string;
 }) {
   if (next.status === "error") {
@@ -54,12 +58,15 @@ function Compare({
       </Notice>
     );
   }
+  const compared = next.outcome;
   const rows = [
-    ["Cautious amount to spend", base.safeSpendCents, next.outcome.safeSpendCents],
-    ["Chance of running short", base.overdraftPpm, next.outcome.overdraftPpm],
-    ["Lowest point if the schedule is exact", base.projectedLowCents, next.outcome.projectedLowCents],
-    ["Ending balance if the schedule is exact", base.endingBalanceCents, next.outcome.endingBalanceCents],
-  ] as const;
+    ...(showGuidance ? [
+      ["Cautious amount to spend", formatCautiousSpend(base.safeSpendCents, base.reserveCents), formatCautiousSpend(compared.safeSpendCents, compared.reserveCents)],
+      ["Chance of running short", formatProbability(base.overdraftPpm), formatProbability(compared.overdraftPpm)],
+    ] : []),
+    ["Lowest point if the schedule is exact", formatMoney(base.projectedLowCents), formatMoney(compared.projectedLowCents)],
+    ["Ending balance if the schedule is exact", formatMoney(base.endingBalanceCents), formatMoney(compared.endingBalanceCents)],
+  ];
   return (
     <div className="min-w-0 rounded-xl border border-line bg-inset p-4">
       <h3 className="text-base font-semibold">{title}</h3>
@@ -77,20 +84,21 @@ function Compare({
             {rows.map(([label, from, to]) => (
               <tr key={label} className="border-t border-line">
                 <th scope="row" className="py-2 pr-3 font-medium">
-                  {label === "Chance of running short" ? "Chance of running short" : label}
+                  {label}
                 </th>
-                <td className="py-2 pr-3 tabular-nums">
-                  {label === "Chance of running short" ? formatProbability(from) : formatMoney(from)}
-                </td>
-                <td className="py-2 tabular-nums font-semibold">
-                  {label === "Chance of running short" ? formatProbability(to) : formatMoney(to)}
-                </td>
+                <td className="py-2 pr-3 tabular-nums">{from}</td>
+                <td className="py-2 tabular-nums font-semibold">{to}</td>
               </tr>
             ))}
           </tbody>
         </table>
       </div>
-      <p className="mt-3 text-sm text-muted">{note}</p>
+      {showGuidance && (
+        <p className="mt-3 text-sm text-muted">
+          The chance of running short is the share of simulated plans that went below zero, not measured odds.
+        </p>
+      )}
+      {note && <p className="mt-3 text-sm text-muted">{note}</p>}
     </div>
   );
 }
@@ -100,12 +108,14 @@ export function PlanView({
   asOf,
   assumptions,
   base,
+  showGuidance,
   onEdit,
 }: {
   state: LedgerState;
   asOf: string;
   assumptions: Assumptions;
   base: ModelOutcome;
+  showGuidance: boolean;
   onEdit: (result: EditResult) => void;
 }) {
   const [question, setQuestion] = useState<Question>("purchase");
@@ -119,6 +129,10 @@ export function PlanView({
   const [months, setMonths] = useState("12");
   const [strategy, setStrategy] = useState<"snowball" | "avalanche">("snowball");
   const [extra, setExtra] = useState(100);
+  const [paymentDollars, setPaymentDollars] = useState("");
+  const [paymentDate, setPaymentDate] = useState(asOf);
+  const [paymentPreview, setPaymentPreview] = useState<{ amountCents: number; date: string } | null>(null);
+  const [paymentError, setPaymentError] = useState<string | null>(null);
   const [debtName, setDebtName] = useState("");
   const [debtBalance, setDebtBalance] = useState("");
   const [debtApr, setDebtApr] = useState("");
@@ -150,6 +164,13 @@ export function PlanView({
   const asideResult = useMemo(
     () => (question === "aside" ? evaluateMonthlySetAside(state, asOf, assumptions, Math.round(aside * 100)) : null),
     [question, state, asOf, assumptions, aside]
+  );
+  const hasOutstandingDebt = state.liabilities.some((debt) => debt.is_active !== false && debt.balance_cents > 0);
+  const extraPayment = useMemo(
+    () => question === "debt" && hasOutstandingDebt && paymentPreview
+      ? evaluateExtraDebtPayment(state, asOf, assumptions, paymentPreview.amountCents, paymentPreview.date)
+      : null,
+    [question, hasOutstandingDebt, paymentPreview, state, asOf, assumptions]
   );
 
   const goalCents = dollarsToCents(Number(goal));
@@ -209,6 +230,17 @@ export function PlanView({
     onEdit(result);
   }
 
+  function compareExtraPayment(event: React.FormEvent) {
+    event.preventDefault();
+    const amountCents = parseDollarsToCents(paymentDollars);
+    if (amountCents === null || amountCents <= 0) {
+      setPaymentError("Enter an amount above $0 with at most two decimal places, like 150 or 150.25.");
+      return;
+    }
+    setPaymentError(null);
+    setPaymentPreview({ amountCents, date: paymentDate });
+  }
+
   return (
     <div className="space-y-4">
       <Panel
@@ -231,6 +263,12 @@ export function PlanView({
             </button>
           ))}
         </div>
+
+        {!showGuidance && (
+          <div className="mt-3">
+            <Notice tone="info">Comparisons show scheduled balances only. Check for missing bill dates or payments outside the plan window before using the comparison to decide what you can afford.</Notice>
+          </div>
+        )}
 
         {question === "purchase" && purchase && (
           <div className="mt-4 grid gap-4 lg:grid-cols-2">
@@ -275,8 +313,9 @@ export function PlanView({
               title="How this changes the plan"
               base={base}
               next={purchase}
+              showGuidance={showGuidance}
               note={
-                purchase.status === "ok"
+                showGuidance && purchase.status === "ok"
                   ? purchase.outcome.safeSpendCents >= 0
                     ? "In this simulation the cautious amount stays at or above zero after the purchase. That is a model estimate, not a guarantee."
                     : "In this simulation the cautious amount goes below zero. That is a model estimate, not a guarantee you will overdraw."
@@ -307,7 +346,8 @@ export function PlanView({
               title="If that paycheck arrives late"
               base={base}
               next={delay}
-              note="In this simulation the chance of running short is the share of modeled futures that go negative. It is not a promise that a paycheck will be late."
+              showGuidance={showGuidance}
+              note="This compares cash if payday moves. It does not estimate how likely a delay is."
             />
           </div>
         )}
@@ -349,6 +389,7 @@ export function PlanView({
                   title="If that bill used the new amount"
                   base={base}
                   next={bill}
+                  showGuidance={showGuidance}
                   note="In this simulation only that bill's amount changes. Other assumptions stay as they are."
                 />
               </>
@@ -399,6 +440,7 @@ export function PlanView({
                 title="If that amount leaves the account monthly"
                 base={base}
                 next={asideResult}
+                showGuidance={showGuidance}
                 note="The ending balance here is what would remain in this account, not a savings pile. In this simulation the difference is the cash-flow effect of moving the money out."
               />
             </div>
@@ -410,7 +452,7 @@ export function PlanView({
             <p className="text-sm text-muted">
               Snowball pays the smallest balance first. Avalanche (APR) pays the highest interest rate first. Minimum
               payments for debts you entered are already ordinary outflows on Home and Future. Extra payments and the
-              interest schedule here are not proof you can afford accelerating payoff.
+              interest schedule in the strategy comparison do not change the cash forecast.
             </p>
             {activeDebts.length === 0 ? (
               <p className="text-sm text-muted">No active debts are entered.</p>
@@ -455,6 +497,52 @@ export function PlanView({
                 )}
               </div>
             ) : null}
+            {hasOutstandingDebt && (
+              <section className="min-w-0 space-y-3 rounded-xl border border-line p-4">
+                <h3 className="font-semibold">Check a one-time extra payment</h3>
+                <p className="text-sm text-muted">
+                  See what happens to your cash if you pay more on a specific day, on top of your usual bills and debt
+                minimums. This is separate from the monthly payoff comparison. It doesn’t record a payment or
+                check what your lender will accept or change.
+                </p>
+                <form className="space-y-3" onSubmit={compareExtraPayment}>
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <label className="block min-w-0 text-sm font-medium">
+                      One-time extra payment ($)
+                      <input className={`${fieldClass} mt-1`} inputMode="decimal" value={paymentDollars}
+                        onChange={(event) => {
+                          setPaymentDollars(event.target.value);
+                          setPaymentPreview(null);
+                          setPaymentError(null);
+                        }}
+                      />
+                    </label>
+                    <label className="block min-w-0 text-sm font-medium">
+                      Date of extra payment
+                      <input className={`${fieldClass} mt-1`} type="date" value={paymentDate} min={asOf}
+                        max={addDaysIso(windowEnd, -1)} required onChange={(event) => {
+                          setPaymentDate(event.target.value);
+                          setPaymentPreview(null);
+                        }}
+                      />
+                    </label>
+                  </div>
+                  {paymentError && <p className="text-sm text-danger" role="alert">{paymentError}</p>}
+                  <Button type="submit">Compare with cash plan</Button>
+                </form>
+                <div aria-live="polite">
+                  {extraPayment && (
+                    <Compare
+                      title="If you make this extra payment"
+                      base={base}
+                      next={extraPayment}
+                      showGuidance={showGuidance}
+                      note="In the exact schedule this amount leaves on the date you chose. The other dated payments stay the same."
+                    />
+                  )}
+                </div>
+              </section>
+            )}
             <ul className="divide-y divide-line">
               {state.liabilities.map((debt) => (
                 <li key={debt.id} className="flex flex-wrap items-center justify-between gap-2 py-2 text-sm">

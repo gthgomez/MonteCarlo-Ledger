@@ -35,11 +35,13 @@ export function AdvancedView({
   assumptions,
   outcome,
   asOf,
+  showGuidance,
   onApply,
 }: {
   assumptions: Assumptions;
   outcome: ModelOutcome;
   asOf: string;
+  showGuidance: boolean;
   onApply: (next: Assumptions) => string | null;
 }) {
   const [draft, setDraft] = useState(() => draftFrom(assumptions));
@@ -178,7 +180,7 @@ export function AdvancedView({
         </p>
       </Panel>
 
-      <Panel title="Technical result" lede="These fields are the engine output for the assumptions currently applied. They are estimates.">
+      {showGuidance ? <Panel title="Technical result" lede="These fields are the engine output for the assumptions currently applied. They are estimates.">
         <dl className="grid gap-3 text-sm sm:grid-cols-2">
           <div>
             <dt className="text-muted">As of</dt>
@@ -243,7 +245,9 @@ export function AdvancedView({
             With the default rank, the cautious amount and Safe to Spend (P10) are the same figure.
           </p>
         )}
-      </Panel>
+      </Panel> : (
+        <Notice tone="info">Modeled spending and risk results need a bill or other upcoming payment. You can still change the assumptions above.</Notice>
+      )}
     </div>
   );
 }

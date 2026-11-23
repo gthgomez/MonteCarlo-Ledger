@@ -15,7 +15,8 @@ interface HomeViewProps {
   needsSetup: boolean;
   copy: PositionCopy;
   startingBalanceCents: number;
-  safeSpendCents: number;
+  safeSpendCents: number | null;
+  guidanceIssue: string | null;
   plannedLowCents: number;
   plannedLowDate: string;
   slice: PlanSlice;
@@ -35,6 +36,7 @@ export function HomeView({
   copy,
   startingBalanceCents,
   safeSpendCents,
+  guidanceIssue,
   plannedLowCents,
   plannedLowDate,
   slice,
@@ -93,10 +95,8 @@ export function HomeView({
   }
 
   const previewDays = Math.min(30, horizonDays);
-  const spendDetail =
-    safeSpendCents >= 0
-      ? "An estimate of what you could spend while keeping the modeled low point at your reserve."
-      : "The model shows a shortfall against your reserve. This is the size of that gap.";
+  const hasGap = safeSpendCents !== null && safeSpendCents < 0;
+  const hasReserve = reserveCents > 0;
 
   return (
     <div className="space-y-6">
@@ -113,8 +113,8 @@ export function HomeView({
       )}
       {needsSetup && !usingDemo && (
         <Notice tone="warning" title="Start with what you know">
-          Start by adding the money you have, your monthly income, and the bills you pay regularly. The plan stays
-          quiet until those are entered. Nothing here is guessed.
+           Start by adding the money you have, your income, and the bills you pay regularly. The plan can only use the
+           entries you give it.
         </Notice>
       )}
       {(open || (needsSetup && !usingDemo)) && (
@@ -182,7 +182,24 @@ export function HomeView({
           value={formatMoney(startingBalanceCents)}
           detail="Based on ledger entries dated today or earlier. Check it against your bank balance."
         />
-        <Metric label="Cautious amount to spend" value={formatMoney(safeSpendCents)} detail={spendDetail} />
+        {safeSpendCents !== null ? (
+          <Metric
+            label={hasGap ? (hasReserve ? "Gap to your safety reserve" : "Modeled cash shortfall") : "Cautious amount to spend"}
+            value={formatMoney(Math.abs(safeSpendCents))}
+            detail={hasGap
+              ? hasReserve
+                ? `Nothing is left for extra spending in this estimate. Falling below your ${formatMoney(reserveCents)} reserve does not necessarily mean going below zero.`
+                : "The selected modeled low point goes below zero without extra spending. This is an estimate, not a guarantee."
+              : `An estimate of what you could spend while keeping ${formatMoney(reserveCents)} set aside in the modeled low point. It is not your current balance.`}
+          />
+        ) : (
+          <Notice tone="info" title="Not enough information to suggest spending">
+            {guidanceIssue}
+            <div className="mt-2">
+              <Button type="button" variant="quiet" onClick={() => onNavigate("bills")}>Review bills</Button>
+            </div>
+          </Notice>
+        )}
         <Metric
           label="Lowest point if the schedule is exact"
           value={formatMoney(plannedLowCents)}
@@ -250,7 +267,7 @@ export function HomeView({
         )}
       </section>
 
-      <section className="space-y-3 rounded-2xl border border-line bg-surface p-4 shadow-card sm:p-6" aria-label="How these numbers were calculated">
+      {safeSpendCents !== null && <section className="space-y-3 rounded-2xl border border-line bg-surface p-4 shadow-card sm:p-6" aria-label="How these numbers were calculated">
         <h2 className="text-lg font-semibold">What these numbers mean</h2>
         <p className="text-sm text-muted">{copy.caution}</p>
         <p className="text-sm text-ink">
@@ -275,7 +292,7 @@ export function HomeView({
             They show how fragile the plan is. They are not promises.
           </Explain>
         </div>
-      </section>
+      </section>}
     </div>
   );
 }

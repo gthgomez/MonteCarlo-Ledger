@@ -21,11 +21,12 @@ import pytest
 
 from monte_carlo_ledger import db_manager, decisions, sync
 from monte_carlo_ledger import scenario as scenario_mod
-from monte_carlo_ledger.contract import run_scenario
+from monte_carlo_ledger.contract import event_rows, run_scenario
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FIXTURE = REPO_ROOT / "testdata" / "household" / "cross-surface-household.json"
 TIMING_FIXTURE = REPO_ROOT / "testdata" / "household" / "mcl-timing.json"
+QUALIFICATION_FIXTURE = REPO_ROOT / "testdata" / "household" / "qualification-household.json"
 
 
 @pytest.fixture(scope="module")
@@ -76,6 +77,7 @@ const label = safeSpendTechnicalName(doc.simulation.quantile_num, doc.simulation
 console.log(JSON.stringify({
   scenario,
   result,
+  rows,
   surfaces: {
     safe_to_spend_cents: result.risk.safe_to_spend_cents,
     overdraft_ppm: result.risk.negative_balance_probability_ppm,
@@ -163,6 +165,86 @@ def test_month_end_and_future_receipt_fixture_is_chronological(tmp_path, monkeyp
     assert result["forecast"]["minimum_balance_cents"] == doc["expected"]["minimum_cents"]
     assert result["forecast"]["minimum_balance_date"] == doc["expected"]["minimum_date"]
     assert result["forecast"]["ending_balance_cents"] == doc["expected"]["ending_cents"]
+
+
+def test_web_and_python_match_the_settled_browser_household_oracle(tmp_path, monkeypatch):
+    doc = json.loads(QUALIFICATION_FIXTURE.read_text(encoding="utf-8"))
+    household = doc["household"]
+    saved = doc["expected_saved_ledger"]
+    paid = doc["oracles"]["after_marking_moved_rent_paid"]
+    assumptions = doc["assumptions"]
+    quantile_num, quantile_den = map(int, assumptions["quantile"].split("/"))
+    simulation = {
+        "runs": assumptions["runs"],
+        "seed": assumptions["seed"],
+        "quantile_num": quantile_num,
+        "quantile_den": quantile_den,
+        "income_variation_min": assumptions["incomeVariationMin"],
+        "income_variation_max": assumptions["incomeVariationMax"],
+        "expense_variation_min": assumptions["expenseVariationMin"],
+        "expense_variation_max": assumptions["expenseVariationMax"],
+        "surprise_probability_ppm": assumptions["surpriseProbabilityPpm"],
+        "surprise_amount_min": assumptions["surpriseAmountMinCents"],
+        "surprise_amount_max": assumptions["surpriseAmountMaxCents"],
+        "surprise_check_interval_days": assumptions["surpriseIntervalDays"],
+        "reserve_cents": assumptions["reserveCents"],
+    }
+    rent_id = saved["rent_payment_id"]
+    snapshot = {
+        "version": saved["version"],
+        "updated_at": doc["clock_iso"],
+        "current_balance_cents": saved["current_balance_cents"],
+        "incomes": [{"id": "pay", "last_payday": household["income"]["next_payday"], **household["income"]}],
+        "payments": [
+            {"id": rent_id, **household["rent"]},
+            {"id": saved["car_payment_id"], **household["car_payment"]},
+        ],
+        "transactions": [
+            {
+                "id": "opening",
+                "type": "Adjustment",
+                "date": doc["as_of"],
+                "amount_cents": household["opening_cash_cents"],
+            },
+            {"id": "rent-paid", **paid["transaction"]},
+        ],
+        "bill_occurrences": [
+            {
+                "id": "rent-slot",
+                "payment_id": rent_id,
+                "transaction_id": "rent-paid",
+                "is_user_modified": True,
+                **paid["occurrence"],
+            },
+        ],
+        "liabilities": [{
+            "id": "car-debt", "kind": "installment", "apr_basis_points": 0, **saved["linked_liability"],
+        }],
+    }
+    monkeypatch.setattr(db_manager, "DB_PATH", str(tmp_path / "settled.db"))
+    db_manager.init_db()
+    sync.restore_ledger_snapshot(snapshot)
+    py = scenario_mod.build_scenario(
+        doc["as_of"], doc["horizon_days"], include_simulation=simulation, read_only=True
+    )
+    browser, payload = _web_scenario_and_result({**doc, "ledger": snapshot, "simulation": simulation})
+
+    assert browser["starting_balance_cents"] == py["starting_balance_cents"] == paid["recorded_balance_cents"]
+    expected_rows = [
+        (r["date"], r["name"], r["amount_cents"], r["running_balance_cents"])
+        for r in paid["events"]
+    ]
+    assert [(r["date"], r["name"], r["amount"], r["balance_after"]) for r in event_rows(py)] == expected_rows
+    assert [(r["date"], r["name"], r["amount_cents"], r["balance_after_cents"]) for r in payload["rows"]] == expected_rows
+    for result in (run_scenario(py), payload["result"]):
+        assert result["forecast"] == {
+            "minimum_balance_cents": paid["low_cents"],
+            "minimum_balance_date": paid["low_date"],
+            "ending_balance_cents": paid["ending_balance_cents"],
+            "first_negative_date": None,
+        }
+        assert result["risk"]["safe_to_spend_cents"] == paid["cautious_amount_cents"]
+        assert result["risk"]["negative_balance_probability_ppm"] == 0
 
 
 def test_web_and_python_share_seed_bound_evaluation(restored_db, household):

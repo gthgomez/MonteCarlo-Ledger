@@ -9,8 +9,8 @@ export interface OverdueAssessment {
 /**
  * Unpaid obligations whose due date is before `asOf`.
  *
- * Contract 2.0 deliberately excludes overdue events from the forward cash-flow
- * window, so they are reported separately rather than injected into the forecast.
+ * The bill adapter brings recorded unpaid occurrences into the plan on `asOf`.
+ * This assessment describes their original overdue state, not extra cash events.
  */
 export function computeOverdueObligations(
   state: LedgerState,

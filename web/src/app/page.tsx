@@ -28,6 +28,7 @@ import {
   describePosition,
   slicePlan,
   spendingDeltaNote,
+  spendingGuidanceIssue,
   spendingLastMonth,
   spendingThisMonth,
   transactionSumCents,
@@ -395,7 +396,11 @@ export default function Home() {
 
   const outcome = evaluation.outcome;
   const rows = evaluation.rows;
-  const slice = slicePlan(rows, asOf, Math.min(30, assumptions.horizonDays), outcome.startingBalanceCents);
+  const previewDays = Math.min(30, assumptions.horizonDays);
+  const slice = slicePlan(rows, asOf, previewDays, outcome.startingBalanceCents);
+  const guidanceIssue = spendingGuidanceIssue(state, rows);
+  const showGuidance = guidanceIssue === null;
+  const safeSpendCents = showGuidance ? outcome.safeSpendCents : null;
   const sum = transactionSumCents(state.transactions);
   const currentSpend = spendingThisMonth(state.transactions, asOf);
   const previousSpend = spendingLastMonth(state.transactions, asOf);
@@ -406,16 +411,14 @@ export default function Home() {
     scheduledIncomeCents: slice.scheduledIncomeCents,
     scheduledBillCents: slice.scheduledOutflowCents,
     plannedEndingCents: slice.plannedEndingCents,
-    windowDays: 30,
-    safeSpendCents: outcome.safeSpendCents,
-    // Same trough that produced safe-to-spend (quantile + reserve), not a hard-coded P10 field.
-    difficultLowCents: outcome.safeSpendCents + outcome.reserveCents,
+    windowDays: previewDays,
+    safeSpendCents,
     reserveCents: outcome.reserveCents,
     quantileNum: outcome.quantileNum,
     quantileDen: outcome.quantileDen,
     runs: outcome.runs,
     isDemo: usingDemo,
-    hasSchedule: rows.length > 0,
+    hasSchedule: slice.events.length > 0,
   });
   const spendingNote =
     currentSpend.totalCents === 0 && previousSpend.totalCents === 0
@@ -435,7 +438,8 @@ export default function Home() {
     nextBill,
     spendingNote,
     overage: categoryOverages(currentSpend.byCategory, targets.categories)[0] ?? null,
-    safeSpendCents: outcome.safeSpendCents,
+    safeSpendCents,
+    reserveCents: outcome.reserveCents,
     overdraftPpm: outcome.overdraftPpm,
     runs: outcome.runs,
     ledgerMatches: sum === state.current_balance_cents,
@@ -470,7 +474,8 @@ export default function Home() {
             needsSetup={needsSetup}
             copy={copy}
             startingBalanceCents={outcome.startingBalanceCents}
-            safeSpendCents={outcome.safeSpendCents}
+            safeSpendCents={safeSpendCents}
+            guidanceIssue={guidanceIssue}
             plannedLowCents={outcome.projectedLowCents}
             plannedLowDate={outcome.projectedLowDate}
             slice={slice}
@@ -513,13 +518,13 @@ export default function Home() {
           />
         )}
         {section === "plan" && (
-          <PlanView state={state} asOf={asOf} assumptions={assumptions} base={outcome} onEdit={onEdit} />
+          <PlanView state={state} asOf={asOf} assumptions={assumptions} base={outcome} showGuidance={showGuidance} onEdit={onEdit} />
         )}
         {section === "future" && (
-          <FutureView asOf={asOf} outcome={outcome} rows={rows} assumptionsChanged={assumptionsChanged} />
+          <FutureView asOf={asOf} outcome={outcome} rows={rows} showGuidance={showGuidance} assumptionsChanged={assumptionsChanged} />
         )}
         {section === "advanced" && (
-          <AdvancedView assumptions={assumptions} outcome={outcome} asOf={asOf} onApply={handleApplyAssumptions} />
+          <AdvancedView assumptions={assumptions} outcome={outcome} asOf={asOf} showGuidance={showGuidance} onApply={handleApplyAssumptions} />
         )}
       </main>
       <footer className="border-t border-line px-4 py-6 text-center text-sm text-muted">

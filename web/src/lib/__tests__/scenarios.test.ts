@@ -6,6 +6,7 @@ import { DEFAULT_ASSUMPTIONS } from "../assumptions";
 import { buildScenarioFromLedger } from "../scenario-builder";
 import {
   evaluateBillAmount,
+  evaluateExtraDebtPayment,
   evaluateIncomeDelay,
   evaluateLedger,
   evaluateMonthlySetAside,
@@ -107,6 +108,61 @@ test("delaying income with no paycheck returns NO_INCOME", () => {
   const result = evaluateIncomeDelay(emptyLedger(10_000), AS_OF, DEFAULT_ASSUMPTIONS, 3);
   assert.equal(result.status, "error");
   if (result.status === "error") assert.equal(result.code, "NO_INCOME");
+});
+
+test("an extra debt payment consumes the reserve margin once without changing a linked minimum", () => {
+  const ledger = emptyLedger(100_000);
+  ledger.version = "2.2";
+  ledger.payments = [
+    { id: "rent", name: "Rent", amount_cents: 60_000, recurrence: "Monthly", due_day: 11 },
+    { id: "loan-bill", name: "Loan bill", amount_cents: 20_000, recurrence: "Monthly", due_day: 12 },
+  ];
+  ledger.liabilities = [{
+    id: "loan", name: "Loan", balance_cents: 90_000, apr_basis_points: 0,
+    min_payment_cents: 20_000, due_day_of_month: 12, linked_payment_id: "loan-bill",
+  }];
+  const saved = structuredClone(ledger);
+  const assumptions = {
+    ...DEFAULT_ASSUMPTIONS,
+    horizonDays: 10, runs: 10, reserveCents: 10_000, surpriseProbabilityPpm: 0,
+  };
+  const baseline = evaluateLedger(ledger, AS_OF, assumptions);
+  const inside = evaluateExtraDebtPayment(ledger, AS_OF, assumptions, 15_000, AS_OF);
+  const lastDay = evaluateExtraDebtPayment(ledger, AS_OF, assumptions, 25_000, "2026-11-19");
+  assert.equal(baseline.status, "ok");
+  assert.equal(inside.status, "ok");
+  assert.equal(lastDay.status, "ok");
+  if (baseline.status !== "ok" || inside.status !== "ok" || lastDay.status !== "ok") return;
+  // $1,000 - $600 rent - $200 loan = $200 low, then $100 reserved. The
+  // $150 extra leaves $50 in cash ($50 below reserve), not an overdraft.
+  assert.equal(baseline.outcome.safeSpendCents, 10_000);
+  assert.equal(inside.outcome.endingBalanceCents, 5_000);
+  assert.equal(inside.outcome.safeSpendCents, -5_000);
+  assert.equal(inside.outcome.firstNegativeDate, null);
+  assert.equal(inside.outcome.overdraftPpm, 0);
+  assert.deepEqual(inside.rows.map(({ date, amount_cents }) => [date, amount_cents]), [
+    [AS_OF, -15_000], ["2026-11-11", -60_000], ["2026-11-12", -20_000],
+  ]);
+  assert.equal(lastDay.outcome.endingBalanceCents, -5_000);
+  assert.equal(lastDay.outcome.firstNegativeDate, "2026-11-19");
+  assert.equal(lastDay.outcome.overdraftPpm, 1_000_000);
+  assert.deepEqual(ledger, saved);
+});
+
+test("extra debt payment rejects unsupported amounts and dates outside the half-open window", () => {
+  const assumptions = { ...DEFAULT_ASSUMPTIONS, horizonDays: 10 };
+  const ledger = emptyLedger(100_000);
+  for (const [amount, date, code] of [
+    [1, "2026-11-09", "EVENT_OUT_OF_HORIZON"],
+    [1, "2026-11-20", "EVENT_OUT_OF_HORIZON"],
+    [1, "2026-11-31", "INVALID_DATE"],
+    [0, AS_OF, "INVALID_AMOUNT"],
+    [1.25, AS_OF, "INVALID_AMOUNT"],
+  ] as const) {
+    const result = evaluateExtraDebtPayment(ledger, AS_OF, assumptions, amount, date);
+    assert.equal(result.status, "error");
+    if (result.status === "error") assert.equal(result.code, code);
+  }
 });
 
 test("an unknown bill is not given a made-up result", () => {

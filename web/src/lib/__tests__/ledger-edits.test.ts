@@ -10,6 +10,7 @@ import {
   dollarsToCents,
   markBillOccurrencePaid,
   moveBillOccurrence,
+  parseDollarsToCents,
   reconcileBalance,
   recordCashflow,
   removePayment,
@@ -20,6 +21,15 @@ import { transactionSumCents } from "../present";
 test("dollar entry becomes integer cents", () => {
   assert.equal(dollarsToCents(45.2), 4520);
   assert.equal(dollarsToCents(Number.NaN), null);
+});
+
+test("exact dollar entry rejects fractions of a cent and unsafe totals", () => {
+  assert.equal(parseDollarsToCents("150.2"), 15_020);
+  assert.equal(parseDollarsToCents("0.01"), 1);
+  assert.equal(parseDollarsToCents("90071992547409.91"), Number.MAX_SAFE_INTEGER);
+  for (const invalid of ["", "0.005", "1e2", "90071992547409.92"]) {
+    assert.equal(parseDollarsToCents(invalid), null);
+  }
 });
 
 test("APR text becomes basis points without binary float drift", () => {

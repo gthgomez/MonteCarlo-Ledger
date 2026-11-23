@@ -10,6 +10,27 @@ The vault snapshot version describes stored records. The calculation contract re
 
 Older clients must reject 2.2 before replacing their local records. Retain a backup and upgrade every client that needs to open a 2.2 ledger. Android uses its native encrypted backup for inactive bills, account-linked debts, and debts with statement closing dates. Vault snapshots do not include Android-specific account data, goals, assets, or rules.
 
+## What follows the ledger
+
+| Data | Shared vault and Web JSON ledger backup | How to preserve the rest |
+| --- | --- | --- |
+| Recorded cash entries, income schedules, supported bills and their dated occurrences and settlements | Included. Links between records belong to the same snapshot. | Keep a separate local ledger backup before a restore or an upgrade. |
+| Supported debts and minimums | Included; payment links and inactive debt state require 2.2 readers. | Keep the originating client's backup if it stores additional debt fields. |
+| Web budget targets, forecast settings (including reserve, window, and risk assumptions), theme | Not included. They stay in that browser profile; pulling into a fresh profile does not recover them. | Keep a separate record of the settings you want to reproduce. Different inputs can yield different forecasts from identical ledger data. |
+| Android-only accounts, assets, goals, and rules; inactive bills, account-linked debts, and statement closing dates | Not included in the portable snapshot. Use Android's native encrypted backup, not a vault pull, to preserve this data. | Retain the native backup and qualify its restore on the intended Android build. |
+
+The Web export is **unencrypted JSON**. Treat it as sensitive and keep it offline or in a protected
+location. A vault copy is encrypted before upload, but the server handles vault identifiers,
+authentication and revision metadata. Clearing browser storage does not remove a server-side vault
+snapshot. Neither kind of copy is a record-by-record merge.
+
+To recover on Web, open **Sync → Encrypted vault** and pull with the vault ID and passphrase, or
+use **Sync → Local JSON Backup** to import an exported ledger. If the target has a ledger you
+want to keep, use **Export** first. After restoring, check the recorded balance, the next required
+payment and any bill-to-debt links. Re-enter browser-only settings under **Budget** and **Advanced**;
+they can differ from the settings used when the ledger was last viewed. If validation fails or
+you see a conflict, retain the local copy and resolve the mismatch before pushing anything back.
+
 ## Payment links
 
 A debt's optional `linked_payment_id` references a payment in the **same** snapshot, using the same identifier namespace as bill occurrences. A payment may be linked to one debt. A missing link means the debt is independent. A missing `is_active` means the debt is active. These fields require 2.2. Exporters may keep using 2.1 when the ledger has only active, unlinked debts.

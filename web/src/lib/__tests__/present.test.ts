@@ -9,9 +9,11 @@ import {
   categoryOverages,
   describePosition,
   evenSetAside,
+  formatCautiousSpend,
   recordedSpending,
   slicePlan,
   spendingDeltaNote,
+  spendingGuidanceIssue,
   spendingLastMonth,
   spendingThisMonth,
   transactionSumCents,
@@ -49,6 +51,23 @@ test("an empty window keeps the starting balance", () => {
   assert.equal(slice.events.length, 0);
   assert.equal(slice.plannedEndingCents, 345_000);
   assert.equal(slice.scheduledOutflowCents, 0);
+});
+
+test("missing bill dates withhold spending guidance even when another bill is scheduled", () => {
+  const state = {
+    payments: [
+      { id: "dated", recurrence: "Monthly" as const, name: "Dated bill", due_day: 15, amount_cents: 2000 },
+      { id: "undated", recurrence: "Monthly" as const, name: "Undated bill", amount_cents: 3000 },
+    ],
+    bill_occurrences: [],
+  };
+  const rows = [{
+    date: "2026-11-15", name: "Dated bill", type: "expense", amount_cents: -2000, balance_after_cents: 8000,
+  }];
+  assert.match(spendingGuidanceIssue(state, rows) ?? "", /missing a date/);
+  const complete = { ...state, payments: [state.payments[0]] };
+  assert.match(spendingGuidanceIssue(complete, []) ?? "", /in this plan window/);
+  assert.equal(spendingGuidanceIssue(complete, rows), null);
 });
 
 test("recorded spending ignores future expenses and non-expense rows", () => {
@@ -114,7 +133,6 @@ test("position copy uses the figures it is given and does not call the median an
     plannedEndingCents: 113_000,
     windowDays: 30,
     safeSpendCents: 80_000,
-    difficultLowCents: 80_000,
     reserveCents: 0,
     quantileNum: 1,
     quantileDen: 10,
@@ -140,8 +158,7 @@ test("a negative cautious amount is not described as money you could spend", () 
     plannedEndingCents: -4_900,
     windowDays: 30,
     safeSpendCents: -4_000,
-    difficultLowCents: -4_000,
-    reserveCents: 0,
+    reserveCents: 10_000,
     quantileNum: 1,
     quantileDen: 10,
     runs: 100,
@@ -149,7 +166,31 @@ test("a negative cautious amount is not described as money you could spend", () 
     hasSchedule: true,
   });
   assert.match(copy.lead, /no cautious amount left to spend/);
+  assert.match(copy.lead, /short of your reserve by \$40\.00/);
+  assert.doesNotMatch(copy.lead, /the low point is -\$40/);
   assert.doesNotMatch(copy.lead, /you could spend/);
+});
+
+test("negative modeled cash with no reserve is a shortfall, not a reserve gap", () => {
+  const input = {
+    recordedBalanceCents: 100,
+    scheduledIncomeCents: 0,
+    scheduledBillCents: 5_000,
+    plannedEndingCents: -4_900,
+    windowDays: 30,
+    safeSpendCents: -4_900,
+    reserveCents: 0,
+    quantileNum: 1,
+    quantileDen: 10,
+    runs: 100,
+    isDemo: false,
+    hasSchedule: true,
+  };
+  assert.match(describePosition(input).lead, /the low point is -\$49\.00 \(below zero\)/);
+  assert.doesNotMatch(describePosition(input).lead, /short of your reserve/);
+  assert.doesNotMatch(describePosition({ ...input, safeSpendCents: null }).lead, /cautious|modeled/);
+  assert.equal(formatCautiousSpend(-4_900, 0), "None ($49.00 modeled cash shortfall)");
+  assert.equal(formatCautiousSpend(-4_900, 10_000), "None ($49.00 below reserve)");
 });
 
 test("custom quantile copy matches the same trough used for safe-to-spend", () => {
@@ -162,7 +203,6 @@ test("custom quantile copy matches the same trough used for safe-to-spend", () =
     plannedEndingCents: 100_000,
     windowDays: 30,
     safeSpendCents: trough - reserve,
-    difficultLowCents: trough,
     reserveCents: reserve,
     quantileNum: 1,
     quantileDen: 5,
@@ -194,6 +234,7 @@ test("insights do not invent a grocery comparison", () => {
     spendingNote: spendingDeltaNote(0, 7_500),
     overage: null,
     safeSpendCents: 1_000,
+    reserveCents: 0,
     overdraftPpm: 0,
     runs: 500,
     ledgerMatches: true,
@@ -205,7 +246,7 @@ test("insights do not invent a grocery comparison", () => {
   assert.doesNotMatch(text, /more than last month/);
 });
 
-test("overdue insight uses the supplied totals and stays out of the forward plan", () => {
+test("overdue insight says the forecast counts the supplied unpaid amounts today", () => {
   const insights = buildInsights({
     asOf: AS_OF,
     isDemo: false,
@@ -219,6 +260,7 @@ test("overdue insight uses the supplied totals and stays out of the forward plan
     spendingNote: null,
     overage: null,
     safeSpendCents: 100,
+    reserveCents: 0,
     overdraftPpm: 0,
     runs: 10,
     ledgerMatches: true,
@@ -226,7 +268,7 @@ test("overdue insight uses the supplied totals and stays out of the forward plan
   const overdue = insights.find((item) => item.id === "overdue");
   assert.ok(overdue);
   assert.match(overdue.detail, /\$42\.00/);
-  assert.match(overdue.detail, /does not include them/);
+  assert.match(overdue.detail, /forecast counts them today while they are unpaid/);
 });
 
 test("even set-aside is integer division with a remainder, not a forecast", () => {

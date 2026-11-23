@@ -1,7 +1,7 @@
 import { quantilePlainName } from "./assumptions";
 import { addDaysIso, calendarMonthWindow, previousMonthWindow, relativeDay } from "./dates";
 import { formatMoney } from "./money-format";
-import type { LiabilityItem, TransactionItem } from "./types";
+import type { LedgerState, LiabilityItem, TransactionItem } from "./types";
 import type { Section } from "./sections";
 
 export interface TimelineLike {
@@ -10,6 +10,26 @@ export interface TimelineLike {
   type: string;
   amount_cents: number;
   balance_after_cents: number;
+}
+
+/** When to withhold modeled spending advice while still showing the known schedule. */
+export function spendingGuidanceIssue(
+  state: Pick<LedgerState, "payments" | "bill_occurrences">,
+  rows: TimelineLike[]
+): string | null {
+  const datedPayments = new Set(state.bill_occurrences.map((item) => String(item.payment_id)));
+  const missingDate = state.payments.some((payment) =>
+    !payment.due_date
+    && !(payment.recurrence === "Monthly" && payment.due_day)
+    && !(payment.recurrence === "One-time" && datedPayments.has(String(payment.id)))
+  );
+  if (missingDate) {
+    return "A saved bill is missing a date. Review your bills so the plan does not leave out a required payment.";
+  }
+  if (!rows.some((row) => row.type === "expense")) {
+    return "No payments are included in this plan window. Check your bill dates or try a longer window under Advanced.";
+  }
+  return null;
 }
 
 export interface PlanSlice {
@@ -187,14 +207,20 @@ export interface PositionCopy {
   technicalName: string;
 }
 
+/** Format the signed estimate without presenting a gap or a shortfall as spendable cash. */
+export function formatCautiousSpend(cents: number, reserveCents: number): string {
+  if (cents >= 0) return formatMoney(cents);
+  const gap = formatMoney(-cents);
+  return reserveCents > 0 ? `None (${gap} below reserve)` : `None (${gap} modeled cash shortfall)`;
+}
+
 export function describePosition(input: {
   recordedBalanceCents: number;
   scheduledIncomeCents: number;
   scheduledBillCents: number;
   plannedEndingCents: number;
   windowDays: number;
-  safeSpendCents: number;
-  difficultLowCents: number;
+  safeSpendCents: number | null;
   reserveCents: number;
   quantileNum: number;
   quantileDen: number;
@@ -218,11 +244,15 @@ export function describePosition(input: {
     ? `If that schedule happens exactly as entered, the balance would be ${formatMoney(input.plannedEndingCents)}.`
     : `With nothing scheduled, this plan leaves the recorded balance unchanged.`;
   const spend =
-    input.safeSpendCents >= 0
-      ? `The cautious amount you could spend is ${formatMoney(input.safeSpendCents)}.`
-      : `In the ${rank} of modeled outcomes, the low point is ${formatMoney(input.safeSpendCents)}, so there is no cautious amount left to spend.`;
+    input.safeSpendCents === null
+      ? ""
+      : input.safeSpendCents >= 0
+        ? ` The cautious amount you could spend is ${formatMoney(input.safeSpendCents)}.`
+        : input.reserveCents > 0
+          ? ` In the ${rank} of modeled outcomes, you are short of your reserve by ${formatMoney(-input.safeSpendCents)}, so there is no cautious amount left to spend.`
+          : ` In the ${rank} of modeled outcomes, the low point is ${formatMoney(input.safeSpendCents)} (below zero), so there is no cautious amount left to spend.`;
   let caution = `The cautious amount is the ${rank} of the lowest balances in ${input.runs} modeled futures, minus a reserve of ${formatMoney(input.reserveCents)}. It is an estimate from the assumptions in Advanced, not a guarantee and not your bank balance.`;
-  if (input.reserveCents === 0 && input.safeSpendCents === input.difficultLowCents) {
+  if (input.reserveCents === 0 && input.safeSpendCents !== null) {
     caution += ` With no reserve set, it matches that modeled low point.`;
   }
   const technicalName =
@@ -230,7 +260,7 @@ export function describePosition(input: {
       ? "Safe to Spend (P10)"
       : `Safe to spend (nearest-rank ${input.quantileNum}/${input.quantileDen})`;
   return {
-    lead: `${who} ${bills} ${income} ${plan} ${spend}`,
+    lead: `${who} ${bills} ${income} ${plan}${spend}`,
     caution,
     technicalName,
   };
@@ -256,7 +286,8 @@ export function buildInsights(input: {
   nextBill: TimelineLike | null;
   spendingNote: string | null;
   overage: CategoryOverage | null;
-  safeSpendCents: number;
+  safeSpendCents: number | null;
+  reserveCents: number;
   overdraftPpm: number;
   runs: number;
   ledgerMatches: boolean;
@@ -276,7 +307,7 @@ export function buildInsights(input: {
       id: "overdue",
       tone: "attention",
       title: `${input.overdueCount} unpaid ${input.overdueCount === 1 ? "bill is" : "bills are"} past the due date`,
-      detail: `They total ${formatMoney(input.overdueCents)}, earliest ${relativeDay(input.asOf, input.overdueEarliest)}. The forward plan does not include them.`,
+      detail: `They total ${formatMoney(input.overdueCents)}, earliest ${relativeDay(input.asOf, input.overdueEarliest)}. The forecast counts them today while they are unpaid.`,
       action: { label: "Review bills", section: "bills" },
     });
   }
@@ -289,12 +320,14 @@ export function buildInsights(input: {
       action: { label: "See the plan", section: "future" },
     });
   }
-  if (input.safeSpendCents < 0) {
+  if (input.safeSpendCents !== null && input.safeSpendCents < 0) {
     insights.push({
       id: "no-cautious-spend",
       tone: "attention",
       title: "There is no cautious amount left to spend",
-      detail: `The more difficult modeled low point is ${formatMoney(input.safeSpendCents)}. That is an estimate, not a guarantee you will overdraw.`,
+      detail: input.reserveCents > 0
+        ? `The modeled gap to your reserve is ${formatMoney(-input.safeSpendCents)}. Falling below a reserve does not necessarily mean going below zero.`
+        : `The selected modeled low point is ${formatMoney(input.safeSpendCents)}, below zero even without extra spending.`,
       action: { label: "Look at decisions", section: "plan" },
     });
   }
@@ -343,15 +376,15 @@ export function buildInsights(input: {
       action: { label: "Add a bill", section: "bills" },
     });
   }
-  if (input.overdraftPpm > 0) {
+  if (input.safeSpendCents !== null && input.overdraftPpm > 0) {
     insights.push({
       id: "model-shortfall",
       tone: "attention",
       title: "Some modeled futures go negative",
-      detail: `${input.overdraftPpm.toLocaleString("en-US")} of 1,000,000 is the modeled chance of a negative balance in this window. It is not a promise that it will or will not happen.`,
+      detail: "Some simulations ran out of cash under these assumptions. That is not a measured real-world probability.",
       action: { label: "See possible futures", section: "future" },
     });
-  } else if (input.runs > 0 && input.safeSpendCents >= 0 && !input.firstNegativeDate) {
+  } else if (input.safeSpendCents !== null && input.runs > 0 && input.safeSpendCents >= 0 && !input.firstNegativeDate) {
     insights.push({
       id: "model-clear",
       tone: "ok",

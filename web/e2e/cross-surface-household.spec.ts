@@ -11,24 +11,17 @@ const fixturePath = path.join(
   "cross-surface-household.json"
 );
 const doc = JSON.parse(fs.readFileSync(fixturePath, "utf8"));
-const evidenceDir = path.join(
-  __dirname,
-  "..",
-  "..",
-  "..",
-  "evidence",
-  "screenshots"
-);
-
 test.describe("cross-surface household rendered views", () => {
   test.use({ viewport: { width: 1280, height: 900 } });
 
   test("Home Money Budget Bills Plan Future show shared P10 and seed-bound figures", async ({
     page,
+    browser,
   }, testInfo) => {
     // Only run the desktop project for screenshots.
     test.skip(testInfo.project.name !== "desktop", "desktop screenshots only");
 
+    const evidenceDir = testInfo.outputPath("screenshots");
     fs.mkdirSync(evidenceDir, { recursive: true });
     await page.clock.install({ time: new Date(`${doc.as_of}T12:00:00.000Z`) });
     await page.addInitScript((ledger) => {
@@ -53,17 +46,24 @@ test.describe("cross-surface household rendered views", () => {
 
     const debtFreeLedger = JSON.parse(JSON.stringify(doc.ledger));
     delete debtFreeLedger.liabilities;
-    const debtFreePage = await page.context().newPage();
-    await debtFreePage.clock.install({ time: new Date(`${doc.as_of}T12:00:00.000Z`) });
-    await debtFreePage.addInitScript((ledger) => {
-      window.localStorage.setItem("montecarlo_ledger_state_v2", JSON.stringify(ledger));
-    }, debtFreeLedger);
-    await debtFreePage.goto("/");
-    await expect(debtFreePage.getByText("Safe to Spend (P10)")).toBeVisible();
-    await expect(debtFreePage.getByText("Calculation Failed")).toHaveCount(0);
-    const withoutDebt = await readCautiousAmount(debtFreePage);
-    expect(withoutDebt).toBeGreaterThan(withDebt);
-    await debtFreePage.close();
+    const debtFreeContext = await browser.newContext({
+      baseURL: testInfo.project.use.baseURL,
+      timezoneId: "UTC",
+    });
+    try {
+      const debtFreePage = await debtFreeContext.newPage();
+      await debtFreePage.clock.install({ time: new Date(`${doc.as_of}T12:00:00.000Z`) });
+      await debtFreePage.addInitScript((ledger) => {
+        window.localStorage.setItem("montecarlo_ledger_state_v2", JSON.stringify(ledger));
+      }, debtFreeLedger);
+      await debtFreePage.goto("/");
+      await expect(debtFreePage.getByText("Safe to Spend (P10)")).toBeVisible();
+      await expect(debtFreePage.getByText("Calculation Failed")).toHaveCount(0);
+      const withoutDebt = await readCautiousAmount(debtFreePage);
+      expect(withoutDebt).toBeGreaterThan(withDebt);
+    } finally {
+      await debtFreeContext.close();
+    }
     await page.screenshot({
       path: path.join(evidenceDir, "home.png"),
       fullPage: true,

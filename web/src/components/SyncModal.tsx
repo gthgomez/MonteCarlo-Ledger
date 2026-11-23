@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { X, Cloud, Lock, Terminal, Upload, Download, Check, AlertCircle, RefreshCw } from "lucide-react";
 import {
   pushVault,
@@ -37,6 +37,7 @@ export function SyncModal({
   onApplyState,
   currentVaultId,
 }: SyncModalProps) {
+  const dialogRef = useRef<HTMLDialogElement>(null);
   const [tab, setTab] = useState<"cloud" | "file" | "cli">("cloud");
 
   // Cloud Sync form. The default id is random so vaults are not enumerable.
@@ -49,12 +50,15 @@ export function SyncModal({
 
   useEffect(() => {
     if (!isOpen) return;
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
+    const dialog = dialogRef.current;
+    if (!dialog) return;
+    const opener = document.activeElement;
+    dialog.showModal();
+    return () => {
+      dialog.close();
+      if (opener instanceof HTMLElement && opener.isConnected) opener.focus();
     };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [isOpen, onClose]);
+  }, [isOpen]);
 
   if (!isOpen) return null;
 
@@ -151,13 +155,15 @@ export function SyncModal({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-ink/50 p-4">
-      <div
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="sync-title"
-        className="max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-2xl border border-line bg-surface p-5 text-ink shadow-card"
-      >
+    <dialog
+      ref={dialogRef}
+      aria-labelledby="sync-title"
+      onCancel={(event) => {
+        event.preventDefault();
+        onClose();
+      }}
+      className="m-auto max-h-[90vh] w-[calc(100%_-_2rem)] max-w-lg overflow-y-auto rounded-2xl border border-line bg-surface p-5 text-ink shadow-card backdrop:bg-ink/50"
+    >
         <div className="mb-4 flex items-center justify-between border-b border-line pb-3">
           <div className="flex items-center gap-2">
             <Cloud className="h-4 w-4 text-accent" />
@@ -209,15 +215,17 @@ export function SyncModal({
           </button>
         </div>
 
-        {statusMessage && (
-          <div className="mb-4 flex items-center gap-2 rounded-xl border border-positive bg-positive-soft p-3 text-sm text-ink">
-            <Check className="h-4 w-4 shrink-0 text-positive" />
-            <span>{statusMessage}</span>
-          </div>
-        )}
+        <div role="status">
+          {statusMessage && (
+            <div className="mb-4 flex items-center gap-2 rounded-xl border border-positive bg-positive-soft p-3 text-sm text-ink">
+              <Check className="h-4 w-4 shrink-0 text-positive" />
+              <span>{statusMessage}</span>
+            </div>
+          )}
+        </div>
 
         {errorMessage && (
-          <div className="mb-4 flex items-center gap-2 rounded-xl border border-danger bg-danger-soft p-3 text-sm text-ink">
+          <div role="alert" className="mb-4 flex items-center gap-2 rounded-xl border border-danger bg-danger-soft p-3 text-sm text-ink">
             <AlertCircle className="h-4 w-4 shrink-0 text-danger" />
             <span>{errorMessage}</span>
           </div>
@@ -227,13 +235,19 @@ export function SyncModal({
         {tab === "cloud" && (
           <div className="space-y-4 text-xs">
             <p className="text-muted">
-              Synchronize your ledger with zero-knowledge end-to-end encryption. The cloud database
-              (Turso) only receives ciphertext. Your encryption key is derived locally and never sent over the network.
+              Sync is optional. Your browser encrypts the ledger before sending it. The vault service handles the
+              encrypted snapshot, vault ID, and sync metadata. It does not receive your passphrase or encryption key.
+            </p>
+            <p className="text-ink">
+              A pull replaces the ledger in this browser. Export first if there is anything you want to keep.
+              Budget targets and forecast settings, including your reserve, stay in this browser and are not
+              recovered from the vault. Android-only data needs a separate native backup.
             </p>
 
             <div>
-              <label className="block text-ink font-medium mb-1">Vault Identifier</label>
+              <label htmlFor="sync-vault-id" className="block text-ink font-medium mb-1">Vault Identifier</label>
               <input
+                id="sync-vault-id"
                 type="text"
                 placeholder="e.g. personal-budget-vault"
                 value={vaultId}
@@ -243,10 +257,11 @@ export function SyncModal({
             </div>
 
             <div>
-              <label className="block text-ink font-medium mb-1">
+              <label htmlFor="sync-passphrase" className="block text-ink font-medium mb-1">
                 Vault Secret Passphrase
               </label>
               <input
+                id="sync-passphrase"
                 type="password"
                 placeholder="Enter secret passphrase"
                 value={passphrase}
@@ -321,18 +336,18 @@ export function SyncModal({
         {tab === "file" && (
           <div className="space-y-4 text-xs">
             <p className="text-muted">
-              Import or export an unencrypted JSON backup directly to disk without using any network connection:
+              Export from the header to save an unencrypted ledger file. Keep it private. Importing a valid file
+              here replaces this ledger. Budget targets and forecast settings are not in the file.
             </p>
 
-            <label className="flex flex-col items-center justify-center border-2 border-dashed border-line hover:border-accent rounded-xl p-6 cursor-pointer bg-inset hover:bg-inset transition">
+            <label className="flex flex-col items-center justify-center border-2 border-dashed border-line hover:border-accent focus-within:outline focus-within:outline-accent rounded-xl p-6 cursor-pointer bg-inset hover:bg-inset transition">
               <Upload className="w-6 h-6 text-muted mb-2" />
               <span className="font-semibold text-ink">Click to select backup JSON file</span>
               <span className="text-[11px] text-muted mt-1">Accepts canonical .json snapshot</span>
-              <input type="file" accept=".json" onChange={handleImportFile} className="hidden" />
+              <input type="file" accept=".json" onChange={handleImportFile} className="sr-only" />
             </label>
           </div>
         )}
-      </div>
-    </div>
+    </dialog>
   );
 }

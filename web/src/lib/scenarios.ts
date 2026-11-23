@@ -104,15 +104,38 @@ export function evaluatePurchase(
   amountCents: number,
   date: string
 ): EvalResult {
+  return evaluateDatedOutflow(state, asOf, assumptions, amountCents, date, "Simulated Purchase");
+}
+
+/** Adds just the proposed cash outflow. It does not rewrite a liability or its future minimums. */
+export function evaluateExtraDebtPayment(
+  state: LedgerState,
+  asOf: string,
+  assumptions: Assumptions,
+  amountCents: number,
+  date: string
+): EvalResult {
+  return evaluateDatedOutflow(state, asOf, assumptions, amountCents, date, "Extra debt payment");
+}
+
+function evaluateDatedOutflow(
+  state: LedgerState,
+  asOf: string,
+  assumptions: Assumptions,
+  amountCents: number,
+  date: string,
+  name: string
+): EvalResult {
   const problem = assumptionError(assumptions);
   if (problem) return fail("INVALID_ASSUMPTIONS", problem);
   if (!Number.isInteger(amountCents) || amountCents <= 0) {
-    return fail("INVALID_AMOUNT", "Purchase amount must be positive integer cents.");
+    return fail("INVALID_AMOUNT", "The amount must be positive integer cents.");
   }
+  if (!isIsoDate(asOf)) return fail("INVALID_DATE", asOf);
   if (!isIsoDate(date)) return fail("INVALID_DATE", date);
   const windowEnd = addDaysIso(asOf, assumptions.horizonDays);
   if (date < asOf || date >= windowEnd) {
-    return fail("EVENT_OUT_OF_HORIZON", "Purchase date is outside the horizon.");
+    return fail("EVENT_OUT_OF_HORIZON", "The date is outside the plan window.");
   }
   try {
     const scenario = buildScenarioFromLedger(
@@ -121,14 +144,13 @@ export function evaluatePurchase(
       assumptions.horizonDays,
       toSimulationConfig(assumptions)
     );
-    const cloned = JSON.parse(JSON.stringify(scenario));
-    cloned.events.push({
+    scenario.events.push({
       date,
       amount_cents: -amountCents,
       type: "expense",
-      name: "Simulated Purchase",
+      name,
     });
-    return runBuilt(cloned, assumptions);
+    return runBuilt(scenario, assumptions);
   } catch (err) {
     return fromThrown(err);
   }
