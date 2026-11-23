@@ -39,7 +39,7 @@ export function AdvancedView({
   onApply,
 }: {
   assumptions: Assumptions;
-  outcome: ModelOutcome;
+  outcome: ModelOutcome | null;
   asOf: string;
   showGuidance: boolean;
   onApply: (next: Assumptions) => string | null;
@@ -180,7 +180,7 @@ export function AdvancedView({
         </p>
       </Panel>
 
-      {showGuidance ? <Panel title="Technical result" lede="These fields are the engine output for the assumptions currently applied. They are estimates.">
+      {outcome && (showGuidance ? <Panel title="Technical result" lede="These fields are the engine output for the assumptions currently applied. They are estimates.">
         <dl className="grid gap-3 text-sm sm:grid-cols-2">
           <div>
             <dt className="text-muted">As of</dt>
@@ -247,7 +247,7 @@ export function AdvancedView({
         )}
       </Panel> : (
         <Notice tone="info">Modeled spending and risk results need a bill or other upcoming payment. You can still change the assumptions above.</Notice>
-      )}
+      ))}
     </div>
   );
 }

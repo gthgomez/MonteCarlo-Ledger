@@ -418,6 +418,190 @@ test.describe("ordinary ledger edit draft safety", () => {
     await sibling.close();
   });
 
+  test("a failed forecast keeps recorded-debt editing and the failed balance draft", async ({ page }) => {
+    await page.clock.install({ time: new Date("2026-11-15T12:00:00.000Z") });
+    const ledger = syntheticLedger([
+      {
+        id: "debt-a",
+        name: "Card A",
+        balance_cents: 120_000,
+        apr_basis_points: 1_999,
+        min_payment_cents: 5_000,
+        due_day_of_month: 5,
+      },
+      {
+        id: "debt-b",
+        name: "Card B",
+        balance_cents: 0,
+        apr_basis_points: 10_000,
+        min_payment_cents: 0,
+        due_day_of_month: 12,
+      },
+    ]);
+    await seedSyntheticLedger(page, ledger);
+    const originalRaw = await storedRaw(page);
+    expect(originalRaw).not.toBeNull();
+
+    await page.getByRole("button", { name: "Plan", exact: true }).click();
+    await page.getByRole("tab", { name: "How do I pay off debt?" }).click();
+    // The seeded ledger initially evaluates: the real payoff comparison exists.
+    await expect(page.getByText("Payoff Strategy")).toBeVisible();
+
+    // Keep an unrelated add-debt draft in the same pane so the test can prove a
+    // failed forecast does not reset the rest of the Plan form state.
+    await page.getByLabel("Debt name").fill("Draft not saved");
+    await page.getByLabel("Amount still owed ($)").fill("250");
+
+    const rowA = page.locator("li").filter({ hasText: "Card A" });
+    const rowB = page.locator("li").filter({ hasText: "Card B" });
+    const balanceA = page.getByLabel("Lender balance for Card A ($)");
+    const balanceB = page.getByLabel("Lender balance for Card B ($)");
+
+    // A typed balance fails a real durable write. Its value and failure marker
+    // must stay with Card A through everything below.
+    await page.getByRole("button", { name: "Update balance for Card A" }).click();
+    await balanceA.fill("4321.09");
+    await holdLedgerLock(page);
+    try {
+      await rowA.getByRole("button", { name: "Save balance" }).click();
+      await expect(page.getByText("Saving your ledger change", { exact: true })).toBeVisible();
+      await expect.poll(() => queuedWrites(page)).toBe(1);
+      await failNextLedgerWrite(page);
+    } finally {
+      await releaseLedgerLock(page);
+    }
+    await expect(page.getByText("Saving your ledger change", { exact: true })).toHaveCount(0);
+    await expect(page.getByText("Not saved", { exact: true })).toBeVisible();
+    await expect(balanceA).toHaveValue("4321.09");
+    await expect(rowA.getByRole("alert")).toContainText(/ledger change failed/i);
+    expect(await storedRaw(page)).toBe(originalRaw);
+
+    // A successful, unrelated durable debt edit makes the real engine reject the
+    // ledger. The page must keep this same Plan pane mounted and show its error.
+    await page.getByRole("button", { name: "Update balance for Card B" }).click();
+    await balanceB.fill("1000");
+    await rowB.getByRole("button", { name: "Save balance" }).click();
+    await expect(page.getByRole("heading", { name: "Calculation Failed", exact: true })).toBeVisible();
+    await expect(page.getByText("MONEY_OVERFLOW").first()).toBeVisible();
+
+    // No decision tab, comparison, payoff, amortization, or risk output may be
+    // shown while the ledger cannot be evaluated.
+    await expect(page.getByRole("tablist", { name: "Decisions" })).toHaveCount(0);
+    for (const unavailable of [
+      "Payoff Strategy",
+      "Months to Payoff",
+      "Total Interest Paid",
+      "Total paid",
+      "Chance of running short",
+      "How this changes the plan",
+      "Lowest point if the schedule is exact",
+      "Ending balance if the schedule is exact",
+      "Cautious amount to spend",
+      "If that amount leaves the account monthly",
+    ]) {
+      await expect(page.getByText(unavailable, { exact: true })).toHaveCount(0);
+    }
+
+    // Recorded-debt editing remains the accessible surface, and the add-debt
+    // draft survived the forecast failure.
+    await expect(page.getByRole("button", { name: "Update balance for Card A" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Update balance for Card B" })).toBeVisible();
+    await expect(page.getByText("Plan comparisons unavailable")).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Recorded debts", exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Add debt" })).toBeVisible();
+    await expect(page.getByLabel("Debt name")).toHaveValue("Draft not saved");
+    await expect(page.getByLabel("Amount still owed ($)")).toHaveValue("250");
+
+    // Only Card B's exact recorded balance changed; cash and Card A did not.
+    const failedRaw = await storedRaw(page);
+    expect(failedRaw).not.toBe(originalRaw);
+    const failed = JSON.parse(failedRaw ?? "null");
+    expect(failed.current_balance_cents).toBe(100_000);
+    expect(failed.transactions).toEqual(ledger.transactions);
+    expect(failed.liabilities).toMatchObject([
+      {
+        id: "debt-a",
+        balance_cents: 120_000,
+        apr_basis_points: 1_999,
+        min_payment_cents: 5_000,
+        due_day_of_month: 5,
+      },
+      {
+        id: "debt-b",
+        balance_cents: 100_000,
+        apr_basis_points: 10_000,
+        min_payment_cents: 0,
+        due_day_of_month: 12,
+      },
+    ]);
+
+    // Card A's failed draft and message are still exactly what the person typed.
+    await page.getByRole("button", { name: "Update balance for Card A" }).click();
+    await expect(balanceA).toHaveValue("4321.09");
+    await expect(rowA.getByRole("alert")).toContainText(/ledger change failed/i);
+
+    // Ordinary navigation still protects the failed draft in this mode.
+    const [declined] = await Promise.all([
+      page.waitForEvent("dialog").then(async (dialog) => {
+        const result = { type: dialog.type(), message: dialog.message() };
+        await dialog.dismiss();
+        return result;
+      }),
+      page.getByRole("button", { name: "Home", exact: true }).click(),
+    ]);
+    expect(declined.type).toBe("confirm");
+    expect(declined.message).toMatch(/not saved.*discard/i);
+    await expect(page.getByRole("button", { name: "Plan", exact: true })).toHaveAttribute("aria-current", "page");
+    await expect(page.getByRole("heading", { name: "Calculation Failed", exact: true })).toBeVisible();
+    await expect(balanceA).toHaveValue("4321.09");
+
+    // Repair Card B through the same pane. The forecast and its payoff results
+    // return, while Card A's draft and marker are untouched.
+    await page.getByRole("button", { name: "Update balance for Card B" }).click();
+    await balanceB.fill("0");
+    await rowB.getByRole("button", { name: "Save balance" }).click();
+    await expect(page.getByRole("heading", { name: "Calculation Failed", exact: true })).toHaveCount(0);
+    await expect(page.getByRole("tablist", { name: "Decisions" })).toBeVisible();
+    await expect(page.getByText("Payoff Strategy")).toBeVisible();
+    await expect(page.getByText("Months to Payoff")).toBeVisible();
+    await expect(page.getByText("Total Interest Paid")).toBeVisible();
+    await expect(page.getByLabel("Debt name")).toHaveValue("Draft not saved");
+
+    await page.getByRole("button", { name: "Update balance for Card A" }).click();
+    await expect(balanceA).toHaveValue("4321.09");
+    await expect(rowA.getByRole("alert")).toContainText(/ledger change failed/i);
+
+    // Cancel is still row-scoped: it discards Card A's draft and marker but not
+    // the add-debt draft or Card B's successfully repaired balance.
+    await rowA.getByRole("button", { name: "Cancel", exact: true }).click();
+    await expect(balanceA).toHaveCount(0);
+    await expect(page.getByLabel("Debt name")).toHaveValue("Draft not saved");
+
+    const repairedRaw = await storedRaw(page);
+    const repaired = JSON.parse(repairedRaw ?? "null");
+    expect(repaired.current_balance_cents).toBe(100_000);
+    expect(repaired.transactions).toEqual(ledger.transactions);
+    expect(repaired.liabilities).toMatchObject([
+      { id: "debt-a", balance_cents: 120_000 },
+      { id: "debt-b", balance_cents: 0 },
+    ]);
+
+    let navigationPrompt: string | null = null;
+    const onDialog = async (dialog: Dialog) => {
+      navigationPrompt = dialog.message();
+      await dialog.dismiss();
+    };
+    page.on("dialog", onDialog);
+    try {
+      await page.getByRole("button", { name: "Home", exact: true }).click();
+      await expect(page.getByRole("button", { name: "Home", exact: true })).toHaveAttribute("aria-current", "page");
+    } finally {
+      page.off("dialog", onDialog);
+    }
+    expect(navigationPrompt).toBeNull();
+    expect(await storedRaw(page)).toBe(repairedRaw);
+  });
+
   test("a move submitted near midnight keeps its pinned date while pending and after failure", async ({ page }) => {
     await page.clock.install({ time: new Date("2026-11-23T23:59:00.000Z") });
     await page.clock.pauseAt(new Date("2026-11-23T23:59:30.000Z"));

@@ -25,7 +25,7 @@ export function MoneyView({
 }: {
   state: LedgerState;
   asOf: string;
-  startingBalanceCents: number;
+  startingBalanceCents: number | null;
   onEdit: (result: EditResult, draftKey?: string) => Promise<PersistenceResult>;
   saving: boolean;
 }) {
@@ -48,7 +48,9 @@ export function MoneyView({
   const payday = paydayInput ?? pinnedPayday ?? asOf;
   const [incomeError, setIncomeError] = useState<string | null>(null);
 
-  const [reconcile, setReconcile] = useState((startingBalanceCents / 100).toFixed(2));
+  const [reconcile, setReconcile] = useState(() =>
+    startingBalanceCents === null ? "" : (startingBalanceCents / 100).toFixed(2)
+  );
   const [pinnedReconcileDate, setPinnedReconcileDate] = useState<string | null>(null);
   const reconcileDate = pinnedReconcileDate ?? asOf;
   const [reconcileError, setReconcileError] = useState<string | null>(null);
@@ -56,9 +58,9 @@ export function MoneyView({
   const sum = transactionSumCents(state.transactions);
   const matches = sum === state.current_balance_cents;
   const debt = enteredDebtCents(state.liabilities);
-  const net = cashMinusEnteredDebt(startingBalanceCents, state.liabilities);
+  const net = startingBalanceCents === null ? null : cashMinusEnteredDebt(startingBalanceCents, state.liabilities);
   const futureCount = state.transactions.filter((tx) => tx.date > asOf).length;
-  const reconcileCents = dollarsToCents(Number(reconcile));
+  const reconcileCents = reconcile.trim() === "" ? null : dollarsToCents(Number(reconcile));
   // A pending/failed reconcile must preview the date it actually submitted. Use
   // the same eligible-row rule as reconcileBalance instead of a second formula.
   const reconcileBaseCents =
@@ -168,9 +170,13 @@ export function MoneyView({
     <fieldset disabled={saving} className="m-0 min-w-0 w-full space-y-6 border-0 p-0">
       <Panel
         title="What you have"
-        lede="This balance uses transactions dated today or earlier. Expected paychecks appear on their scheduled dates."
+        lede={startingBalanceCents === null
+          ? "The current cash summary is unavailable. Your recorded activity and open drafts are still available below."
+          : "This balance uses transactions dated today or earlier. Expected paychecks appear on their scheduled dates."}
       >
-        <p className="text-3xl font-semibold tabular-nums">{formatMoney(startingBalanceCents)}</p>
+        {startingBalanceCents !== null && (
+          <p className="text-3xl font-semibold tabular-nums">{formatMoney(startingBalanceCents)}</p>
+        )}
         {matches ? (
           <p className="mt-2 text-sm text-muted">
             The ledger total of {formatMoney(state.current_balance_cents)} matches {state.transactions.length} recorded {state.transactions.length === 1 ? "transaction" : "transactions"}.
@@ -183,7 +189,7 @@ export function MoneyView({
             </Notice>
           </div>
         )}
-        {futureCount > 0 && (
+        {futureCount > 0 && startingBalanceCents !== null && (
           <p className="mt-3 text-sm text-muted">
             {futureCount} transaction{futureCount === 1 ? "" : "s"} dated after today {futureCount === 1 ? "is" : "are"} not
             treated as money already in hand. The plan starts from {formatMoney(startingBalanceCents)} and applies{" "}

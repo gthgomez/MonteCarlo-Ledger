@@ -62,6 +62,9 @@ cannot explain, or data they can lose without a warning, is a release defect.
    events with the model's probability ranges (including sample counts and uncertainty), and
    report a probability score such as Brier loss against a prior-observed-frequency baseline.
    No empirical probability claim without that evidence; keep synthetic histories separate.
+5. Finish the initial setup with cash only, record an expense and an independent debt, then add
+   a schedule from Home. Verify the original rows and cash through reload. Repeat after importing
+   a ledger without schedules. Adding a bill or income must not start a new ledger.
 
 ### Recovery rehearsal and release handling
 
@@ -94,6 +97,10 @@ cannot explain, or data they can lose without a warning, is a release defect.
 - When a validated backup replaces the ledger, existing form drafts must not carry across to the
   new ledger, even when payment or debt IDs match. Declining to discard a failed draft or failing
   to save the replacement must leave the draft and the old saved ledger intact.
+- With a failed draft open, trigger a real calculation error with a different valid ledger edit
+  or a settings error in another tab. No forecast or cached substitute should be shown. Verify
+  the edit that did save, the other draft's recoverable values, and recovery from the error
+  without replacing either.
 - If hosted staging is authorized later, record the exact preview build, isolated database and
   synthetic-only fixture scope (no secrets in the record). Repeat Web ↔ Python, including restart
   and conflict handling. Stop if staging identity or isolation cannot be established. Separately

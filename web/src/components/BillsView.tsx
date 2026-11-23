@@ -76,7 +76,7 @@ export function BillsView({
 }: {
   state: LedgerState;
   asOf: string;
-  slice: PlanSlice;
+  slice: PlanSlice | null;
   horizonDays: number;
   assumptions: Assumptions;
   overdue: OverdueAssessment;
@@ -125,7 +125,7 @@ export function BillsView({
     ),
     [state, asOf]
   );
-  const upcoming = slice.events.filter((event) => event.amount_cents < 0);
+  const upcoming = slice?.events.filter((event) => event.amount_cents < 0);
   // The fallback list is only for drafts whose slot is no longer projected. It
   // deliberately does not add cash events, expose Mark paid, or widen a window.
   const projectedRowKeys = new Set(
@@ -308,10 +308,12 @@ export function BillsView({
           {overdue.earliest_date ? `, earliest ${formatDateLabel(overdue.earliest_date)}` : ""}.{" "}
           {(overdue.unresolved_one_time_count ?? 0) > 0
             ? "A one-time bill with no linked bill record is not in the plan until you resolve it below: link a recorded expense, mark it paid if the payment is already reflected in your current cash, record it if it is not, or move it. A missing link does not prove no payment was made; nothing was added automatically."
-            : "The forecast counts them today while they are unpaid."}
+            : upcoming
+              ? "The forecast counts them today while they are unpaid."
+              : "These unpaid occurrences are saved, but no forecast is available."}
         </Notice>
       )}
-      <Panel
+      {upcoming && <Panel
         title="Payments coming up"
         lede={`These are bills already on the schedule for the next ${horizonDays} days. An amount is the figure you entered. Nothing here has been marked paid.`}
       >
@@ -346,7 +348,7 @@ export function BillsView({
             ))}
           </ul>
         )}
-      </Panel>
+      </Panel>}
 
       <Panel title="Recurring bills" lede="Add a payment you make regularly. Deleting it removes it from the plan. It does not cancel a payment at a bank.">
         <form onSubmit={submit} className="grid gap-3 sm:grid-cols-2">

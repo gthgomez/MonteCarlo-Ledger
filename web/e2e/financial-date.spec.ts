@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { ASSUMPTIONS_STORAGE_KEY } from "../src/lib/assumptions-persistence";
 import { LEDGER_STORAGE_KEY } from "../src/lib/persistence";
 import type { LedgerState } from "../src/lib/types";
 import {
@@ -478,6 +479,67 @@ test("invalid starter data does not pin an opening date before there is a write"
   const saved = await storedLedger(page);
   expect(saved.transactions).toMatchObject([{ amount_cents: 75_000, type: "Adjustment", date: "2026-11-01" }]);
   expect(saved.incomes).toMatchObject([{ name: "Synthetic job", next_payday: "2026-11-15" }]);
+});
+
+test("financial settings failure and recovery keep a failed Money draft without showing cash estimates", async ({ page, context }) => {
+  await installDuskClock(page);
+  await seedSyntheticLedger(page);
+  await openMoney(page);
+  const amount = page.getByRole("textbox", { name: "Amount ($)", exact: true });
+  const note = page.getByLabel("Note", { exact: true });
+  const record = page.getByRole("button", { name: "Record this", exact: true });
+  const before = await storedRaw(page);
+  await amount.fill("87.65");
+  await note.fill("Synthetic settings recovery draft");
+  await failNextLedgerWrite(page);
+  await record.click();
+  await expect(page.getByText("Not saved", { exact: true })).toBeVisible();
+  expect(await storedRaw(page)).toBe(before);
+
+  // An independent tab delivers a real storage event with unreadable settings;
+  // it does not write ledger data. No cached/default forecast takes its place.
+  const otherTab = await context.newPage();
+  try {
+    await otherTab.goto("/");
+    await otherTab.evaluate((key) => localStorage.setItem(key, '{"schemaVersion":99,"values":{}}'), ASSUMPTIONS_STORAGE_KEY);
+    const settingsError = page.getByRole("heading", { name: "Financial Settings Not Loaded" });
+    await expect(settingsError).toBeVisible();
+    await expect(amount).toHaveValue("87.65");
+    await expect(note).toHaveValue("Synthetic settings recovery draft");
+    const cashSummary = page.getByRole("heading", { name: "What you have", exact: true }).locator("..");
+    await expect(cashSummary.getByText("The current cash summary is unavailable.", { exact: false })).toBeVisible();
+    await expect(cashSummary.getByText("$1,000.00", { exact: true })).toHaveCount(0);
+    const recorded = page.getByRole("heading", { name: "Recorded activity", exact: true }).locator("..");
+    await expect(recorded.getByText("$1,000.00", { exact: true })).toBeVisible();
+    expect(await storedRaw(page)).toBe(before);
+
+    const [reloadPrompt] = await Promise.all([
+      page.waitForEvent("dialog", { timeout: 5_000 }).then(async (dialog) => {
+        const message = dialog.message();
+        await dialog.dismiss();
+        return message;
+      }),
+      page.getByRole("link", { name: "Retry", exact: true }).click(),
+    ]);
+    expect(reloadPrompt).toMatch(/reload.*discards.*draft/i);
+    await expect(amount).toHaveValue("87.65");
+    await page.getByRole("button", { name: "Use default financial assumptions" }).click();
+    await expect(settingsError).toHaveCount(0);
+    await expect(amount).toHaveValue("87.65");
+    await expect(note).toHaveValue("Synthetic settings recovery draft");
+    expect(await storedRaw(page)).toBe(before);
+  } finally {
+    await otherTab.close();
+  }
+
+  await record.click();
+  await expect(note).toHaveValue("");
+  const saved = await storedLedger(page);
+  expect(saved.current_balance_cents).toBe(91_235);
+  expect(saved.transactions).toHaveLength(2);
+  expect(saved.transactions[1]).toMatchObject({
+    date: "2026-10-31", amount_cents: -8_765, description: "Synthetic settings recovery draft",
+  });
 });
 
 test("an explicit transaction date survives successful saves and later days", async ({ page }) => {

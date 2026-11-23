@@ -6,7 +6,7 @@ import { BillsView } from "@/components/BillsView";
 import { BudgetView } from "@/components/BudgetView";
 import { FutureView } from "@/components/FutureView";
 import { Header } from "@/components/Header";
-import { HomeView } from "@/components/HomeView";
+import { HomeView, type HomeForecast } from "@/components/HomeView";
 import { MoneyView } from "@/components/MoneyView";
 import { PlanView } from "@/components/PlanView";
 import { SyncModal } from "@/components/SyncModal";
@@ -60,6 +60,9 @@ const HOME_ONBOARDING_DRAFT_KEY = "home:onboarding";
  */
 const UNSAVED_DRAFT_LEAVE_MESSAGE =
   "A ledger change here was not saved. If you leave this section now, the unsaved draft and any values you typed will be discarded. Choose Cancel to stay and keep the draft. Reloading also discards it.";
+
+const UNSAVED_DRAFT_RELOAD_MESSAGE =
+  "Reloading discards your unsaved ledger draft. Choose Cancel to stay and keep it.";
 
 /**
  * A replacement is authorized against a durable snapshot, not against the
@@ -216,7 +219,10 @@ export default function Home() {
 
   const asOf = useFinancialDate();
 
-  const evaluation = useMemo(() => evaluateLedger(state, asOf, assumptions), [state, asOf, assumptions]);
+  const evaluation = useMemo(
+    () => assumptionsError ? null : evaluateLedger(state, asOf, assumptions),
+    [state, asOf, assumptions, assumptionsError]
+  );
 
   function recordDraftOutcome(draftKey: string | undefined, failed: boolean) {
     if (!draftKey) return;
@@ -259,6 +265,15 @@ export default function Home() {
     setSection(next);
     const url = `${window.location.pathname}${window.location.search}#${next}`;
     window.history.replaceState(null, "", url);
+  }
+
+  function retryPage(event: React.MouseEvent<HTMLAnchorElement>) {
+    if (
+      writeInFlightRef.current ||
+      (failedDraftKeysRef.current.size > 0 && !window.confirm(UNSAVED_DRAFT_RELOAD_MESSAGE))
+    ) {
+      event.preventDefault();
+    }
   }
 
   function toggleTheme() {
@@ -456,141 +471,151 @@ export default function Home() {
     );
   }
 
-  if (assumptionsError) {
-    return (
-      <div className="flex min-h-screen items-center justify-center bg-canvas p-6 text-ink">
-        <div className="w-full max-w-xl space-y-4 rounded-2xl border border-warning bg-warning-soft p-6">
-          <h1 className="text-lg font-semibold">Financial Settings Not Loaded</h1>
-          <p className="text-sm">{assumptionsError}</p>
-          <p className="text-sm text-muted">
-            Your ledger is still saved on this device. No forecast is shown until the settings are repaired or you
-            choose the defaults. Choosing defaults will not replace your ledger.
-          </p>
-          {savingNotice}
-          {assumptionsRaw && (
-            <a
-              href={"data:text/json;charset=utf-8," + encodeURIComponent(assumptionsRaw)}
-              download="montecarlo-financial-settings-recovery.json"
-              className="inline-flex min-h-11 items-center rounded-lg border border-line bg-surface px-3 text-sm font-semibold"
-            >
-              Download saved settings
-            </a>
-          )}
-          <div className="flex flex-wrap gap-3">
-            <button
-              type="button"
-              onClick={() => {
-                const problem = handleApplyAssumptions(DEFAULT_ASSUMPTIONS);
-                if (problem) setAssumptionsError(problem);
-              }}
-              className="inline-flex min-h-11 items-center rounded-lg bg-accent px-3 text-sm font-semibold text-on-accent"
-            >
-              Use default financial assumptions
-            </button>
-            <a href="/" className="inline-flex min-h-11 items-center rounded-lg border border-line bg-surface px-3 text-sm font-semibold">
-              Retry
-            </a>
-          </div>
-        </div>
+  // A model or settings problem does not make the validated ledger or its
+  // open editors unusable. Keep those panes mounted; only forecast output
+  // depends on a successful evaluation.
+  const forecastProblem = assumptionsError ? (
+    <section className="space-y-4 rounded-2xl border border-warning bg-warning-soft p-6">
+      <h1 className="text-lg font-semibold">Financial Settings Not Loaded</h1>
+      <p className="text-sm" role="alert">{assumptionsError}</p>
+      <p className="text-sm text-muted">
+        Your ledger is still saved on this device. No forecast is shown until the settings are repaired or you
+        choose the defaults. Choosing defaults keeps your ledger and open drafts.
+      </p>
+      {assumptionsRaw && (
+        <a
+          href={"data:text/json;charset=utf-8," + encodeURIComponent(assumptionsRaw)}
+          download="montecarlo-financial-settings-recovery.json"
+          className="inline-flex min-h-11 items-center rounded-lg border border-line bg-surface px-3 text-sm font-semibold"
+        >
+          Download saved settings
+        </a>
+      )}
+      <div className="flex flex-wrap gap-3">
+        <button
+          type="button"
+          disabled={isSaving}
+          onClick={() => {
+            const problem = handleApplyAssumptions(DEFAULT_ASSUMPTIONS);
+            if (problem) setAssumptionsError(problem);
+          }}
+          className="inline-flex min-h-11 items-center rounded-lg bg-accent px-3 text-sm font-semibold text-on-accent"
+        >
+          Use default financial assumptions
+        </button>
+        <a href="/" onClick={retryPage} className="inline-flex min-h-11 items-center rounded-lg border border-line bg-surface px-3 text-sm font-semibold">
+          Retry
+        </a>
       </div>
-    );
-  }
-
-  if (evaluation.status === "error") {
-    return (
-      <div className="flex min-h-screen items-center justify-center bg-canvas p-6 text-ink">
-        <div className="w-full max-w-xl space-y-4 rounded-2xl border border-danger bg-danger-soft p-6">
-          <h1 className="text-lg font-semibold">Calculation Failed</h1>
-          <p className="text-sm">
-            The financial engine could not evaluate this ledger, so no forecast, risk estimate, or safe-to-spend
-            number is shown. Nothing was invented to fill its place.
-          </p>
-          <div className="rounded-lg border border-line bg-surface p-3 text-sm">
-            <p>
-              <span className="text-muted">Error code: </span>
-              <code>{evaluation.code}</code>
-            </p>
-            <p className="mt-1 break-words">
-              <span className="text-muted">Detail: </span>
-              {evaluation.message}
-            </p>
-          </div>
-          <p className="text-sm text-muted">
-            This is usually caused by an edited ledger entry or an amount outside the supported range.
-          </p>
-          {savingNotice}
-          {saveWarning && <Notice tone="warning" title="Not saved">{saveWarning}</Notice>}
-          <div className="flex flex-wrap gap-3">
-            <button
-              type="button"
-              onClick={handleResetDemo}
-              className="inline-flex min-h-11 items-center rounded-lg bg-accent px-3 text-sm font-semibold text-on-accent"
-            >
-              Reset to sample data
-            </button>
-            <a href="/" className="inline-flex min-h-11 items-center rounded-lg border border-line bg-surface px-3 text-sm font-semibold">
-              Retry
-            </a>
-          </div>
-        </div>
+    </section>
+  ) : evaluation?.status === "error" ? (
+    <section className="space-y-4 rounded-2xl border border-danger bg-danger-soft p-6">
+      <h1 className="text-lg font-semibold">Calculation Failed</h1>
+      <p className="text-sm" role="alert">
+        The financial engine could not evaluate this ledger, so no forecast, risk estimate, or safe-to-spend
+        number is shown. You can still review saved entries and keep or correct open drafts.
+      </p>
+      <div className="rounded-lg border border-line bg-surface p-3 text-sm">
+        <p>
+          <span className="text-muted">Error code: </span>
+          <code>{evaluation.code}</code>
+        </p>
+        <p className="mt-1 break-words">
+          <span className="text-muted">Detail: </span>
+          {evaluation.message}
+        </p>
       </div>
-    );
-  }
+      <p className="text-sm text-muted">
+        This is usually caused by an edited ledger entry or an amount outside the supported range.
+      </p>
+      <div className="flex flex-wrap gap-3">
+        <button
+          type="button"
+          disabled={isSaving}
+          onClick={handleResetDemo}
+          className="inline-flex min-h-11 items-center rounded-lg bg-accent px-3 text-sm font-semibold text-on-accent"
+        >
+          Reset to sample data
+        </button>
+        <a href="/" onClick={retryPage} className="inline-flex min-h-11 items-center rounded-lg border border-line bg-surface px-3 text-sm font-semibold">
+          Retry
+        </a>
+      </div>
+    </section>
+  ) : null;
 
-  const outcome = evaluation.outcome;
-  const rows = evaluation.rows;
-  const previewDays = Math.min(30, assumptions.horizonDays);
-  const slice = slicePlan(rows, asOf, previewDays, outcome.startingBalanceCents);
-  const guidanceIssue = spendingGuidanceIssue(state, rows, asOf);
-  const windowNotice = beyondWindowBillNotice(state, asOf, assumptions.horizonDays);
+  const forecast = evaluation?.status === "ok" ? evaluation : null;
+  const guidanceIssue = forecast && spendingGuidanceIssue(state, forecast.rows, asOf);
+  const windowNotice = forecast && beyondWindowBillNotice(state, asOf, assumptions.horizonDays);
   const isForecastSection = section === "plan" || section === "future" || section === "advanced";
-  const showGuidance = guidanceIssue === null;
-  const safeSpendCents = showGuidance ? outcome.safeSpendCents : null;
-  const sum = transactionSumCents(state.transactions);
+  const showGuidance = forecast !== null && guidanceIssue === null;
   const currentSpend = spendingThisMonth(state.transactions, asOf);
   const previousSpend = spendingLastMonth(state.transactions, asOf);
   const overdue = computeOverdueObligations(state, asOf);
-  const nextBill = rows.find((row) => row.amount_cents < 0) ?? null;
-  const copy = describePosition({
-    recordedBalanceCents: outcome.startingBalanceCents,
-    scheduledIncomeCents: slice.scheduledIncomeCents,
-    scheduledBillCents: slice.scheduledOutflowCents,
-    plannedEndingCents: slice.plannedEndingCents,
-    windowDays: previewDays,
-    safeSpendCents,
-    reserveCents: outcome.reserveCents,
-    quantileNum: outcome.quantileNum,
-    quantileDen: outcome.quantileDen,
-    runs: outcome.runs,
-    isDemo: usingDemo,
-    hasSchedule: slice.events.length > 0,
-  });
-  const spendingNote =
-    currentSpend.totalCents === 0 && previousSpend.totalCents === 0
-      ? state.transactions.some((tx) => tx.type === "Expense")
-        ? null
-        : "No spending is recorded, so the budget cannot show where money went."
-      : spendingDeltaNote(currentSpend.totalCents, previousSpend.totalCents);
-  const insights = buildInsights({
-    asOf,
-    isDemo: usingDemo,
-    incomeCount: state.incomes.length,
-    paymentCount: state.payments.length,
-    overdueCount: overdue.count,
-    overdueCents: overdue.total_cents,
-    overdueEarliest: overdue.earliest_date,
-    firstNegativeDate: outcome.firstNegativeDate,
-    nextBill,
-    spendingNote,
-    overage: categoryOverages(currentSpend.byCategory, targets.categories)[0] ?? null,
-    safeSpendCents,
-    reserveCents: outcome.reserveCents,
-    overdraftPpm: outcome.overdraftPpm,
-    runs: outcome.runs,
-    ledgerMatches: sum === state.current_balance_cents,
-  });
   const assumptionsChanged = JSON.stringify(assumptions) !== JSON.stringify(DEFAULT_ASSUMPTIONS);
-  const needsSetup = state.incomes.length === 0 && state.payments.length === 0;
+  const needsSchedule = state.incomes.length === 0 && state.payments.length === 0;
+  let homeForecast: HomeForecast | null = null;
+  if (section === "home" && forecast) {
+    const { outcome, rows } = forecast;
+    const previewDays = Math.min(30, assumptions.horizonDays);
+    const slice = slicePlan(rows, asOf, previewDays, outcome.startingBalanceCents);
+    const safeSpendCents = showGuidance ? outcome.safeSpendCents : null;
+    const copy = describePosition({
+      recordedBalanceCents: outcome.startingBalanceCents,
+      scheduledIncomeCents: slice.scheduledIncomeCents,
+      scheduledBillCents: slice.scheduledOutflowCents,
+      plannedEndingCents: slice.plannedEndingCents,
+      windowDays: previewDays,
+      safeSpendCents,
+      reserveCents: outcome.reserveCents,
+      quantileNum: outcome.quantileNum,
+      quantileDen: outcome.quantileDen,
+      runs: outcome.runs,
+      isDemo: usingDemo,
+      hasSchedule: slice.events.length > 0,
+    });
+    const spendingNote =
+      currentSpend.totalCents === 0 && previousSpend.totalCents === 0
+        ? state.transactions.some((tx) => tx.type === "Expense")
+          ? null
+          : "No spending is recorded, so the budget cannot show where money went."
+        : spendingDeltaNote(currentSpend.totalCents, previousSpend.totalCents);
+    const insights = buildInsights({
+      asOf,
+      isDemo: usingDemo,
+      incomeCount: state.incomes.length,
+      paymentCount: state.payments.length,
+      overdueCount: overdue.count,
+      overdueCents: overdue.total_cents,
+      overdueEarliest: overdue.earliest_date,
+      firstNegativeDate: outcome.firstNegativeDate,
+      nextBill: rows.find((row) => row.amount_cents < 0) ?? null,
+      spendingNote,
+      overage: categoryOverages(currentSpend.byCategory, targets.categories)[0] ?? null,
+      safeSpendCents,
+      reserveCents: outcome.reserveCents,
+      overdraftPpm: outcome.overdraftPpm,
+      runs: outcome.runs,
+      ledgerMatches: transactionSumCents(state.transactions) === state.current_balance_cents,
+    });
+    homeForecast = {
+      copy,
+      startingBalanceCents: outcome.startingBalanceCents,
+      safeSpendCents,
+      guidanceIssue,
+      plannedLowCents: outcome.projectedLowCents,
+      plannedLowDate: outcome.projectedLowDate,
+      slice,
+      // The schedule notice already offers both non-destructive add actions.
+      insights: !usingDemo && needsSchedule
+        ? insights.filter(({ id }) => id !== "no-income" && id !== "no-bills")
+        : insights,
+      assumptionsChanged,
+      horizonDays: assumptions.horizonDays,
+      reserveCents: assumptions.reserveCents,
+      runs: outcome.runs,
+    };
+  }
 
   return (
     <div className="flex min-h-screen min-w-0 flex-col bg-canvas text-ink">
@@ -613,7 +638,8 @@ export default function Home() {
         <p className="text-sm text-muted">{SECTION_QUESTION[section]}</p>
         {savingNotice}
         {saveWarning && <Notice tone="warning" title="Not saved">{saveWarning}</Notice>}
-        {assumptionsWarning && <Notice tone="warning" title="Financial settings">{assumptionsWarning}</Notice>}
+        {!assumptionsError && assumptionsWarning && <Notice tone="warning" title="Financial settings">{assumptionsWarning}</Notice>}
+        {forecastProblem}
         {isForecastSection && guidanceIssue && (
           <Notice tone="warning" title="Not enough information to suggest spending">{guidanceIssue}</Notice>
         )}
@@ -625,22 +651,14 @@ export default function Home() {
             <HomeView
               asOf={asOf}
               usingDemo={usingDemo}
-              needsSetup={needsSetup}
-              copy={copy}
-              startingBalanceCents={outcome.startingBalanceCents}
-              safeSpendCents={safeSpendCents}
-              guidanceIssue={guidanceIssue}
-              plannedLowCents={outcome.projectedLowCents}
-              plannedLowDate={outcome.projectedLowDate}
-              slice={slice}
-              insights={insights}
-              assumptionsChanged={assumptionsChanged}
-              horizonDays={assumptions.horizonDays}
-              reserveCents={assumptions.reserveCents}
-              runs={outcome.runs}
+              needsSchedule={needsSchedule}
+              forecast={homeForecast}
               onNavigate={navigate}
               saving={isSaving}
               createOwn={async (nextState) => {
+                if (!usingDemo) {
+                  return { ok: false, error: "A ledger already exists here. Add new entries in Money or Bills without replacing it." };
+                }
                 const saved = await handleUpdateState(nextState);
                 recordDraftOutcome(HOME_ONBOARDING_DRAFT_KEY, !saved.ok);
                 return saved;
@@ -651,7 +669,7 @@ export default function Home() {
             <MoneyView
               state={state}
               asOf={asOf}
-              startingBalanceCents={outcome.startingBalanceCents}
+              startingBalanceCents={forecast?.outcome.startingBalanceCents ?? null}
               onEdit={onEdit}
               saving={isSaving}
             />
@@ -671,7 +689,7 @@ export default function Home() {
               <BillsView
                 state={state}
                 asOf={asOf}
-                slice={slicePlan(rows, asOf, assumptions.horizonDays, outcome.startingBalanceCents)}
+                slice={forecast && slicePlan(forecast.rows, asOf, assumptions.horizonDays, forecast.outcome.startingBalanceCents)}
                 horizonDays={assumptions.horizonDays}
                 assumptions={assumptions}
                 overdue={overdue}
@@ -685,18 +703,18 @@ export default function Home() {
               state={state}
               asOf={asOf}
               assumptions={assumptions}
-              base={outcome}
+              base={forecast?.outcome ?? null}
               showGuidance={showGuidance}
               onEdit={onEdit}
               onDiscardDraft={discardFailedDraft}
               saving={isSaving}
             />
           )}
-          {section === "future" && (
-            <FutureView asOf={asOf} outcome={outcome} rows={rows} showGuidance={showGuidance} assumptionsChanged={assumptionsChanged} />
+          {section === "future" && forecast && (
+            <FutureView asOf={asOf} outcome={forecast.outcome} rows={forecast.rows} showGuidance={showGuidance} assumptionsChanged={assumptionsChanged} />
           )}
           {section === "advanced" && (
-            <AdvancedView assumptions={assumptions} outcome={outcome} asOf={asOf} showGuidance={showGuidance} onApply={handleApplyAssumptions} />
+            <AdvancedView assumptions={assumptions} outcome={forecast?.outcome ?? null} asOf={asOf} showGuidance={showGuidance} onApply={handleApplyAssumptions} />
           )}
         </React.Fragment>
       </main>

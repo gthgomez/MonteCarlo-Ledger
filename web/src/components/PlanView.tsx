@@ -135,7 +135,12 @@ export function PlanView({
   state: LedgerState;
   asOf: string;
   assumptions: Assumptions;
-  base: ModelOutcome;
+  /**
+   * The evaluated ledger baseline. Null means the engine could not evaluate the
+   * current ledger (or its assumptions), so comparisons are unavailable. The
+   * recorded-debt editor must stay mounted and usable in that state.
+   */
+  base: ModelOutcome | null;
   showGuidance: boolean;
   onEdit: (result: EditResult, draftKey?: string) => Promise<PersistenceResult>;
   onDiscardDraft: (draftKey: string) => void;
@@ -173,34 +178,43 @@ export function PlanView({
   const [balanceErrors, setBalanceErrors] = useState<Map<string, string>>(() => new Map());
   const [openBalanceId, setOpenBalanceId] = useState<string | null>(null);
 
+  // No scenario is evaluated while the ledger cannot be forecast. This is not
+  // only a display guard: it keeps a failed ledger from producing any estimate
+  // behind the recorded-debt editor.
   const purchase = useMemo(
     () =>
-      question === "purchase"
-        ? evaluatePurchase(state, asOf, assumptions, Math.round(purchaseAmount * 100), purchaseDate)
-        : null,
-    [question, state, asOf, assumptions, purchaseAmount, purchaseDate]
+      base === null || question !== "purchase"
+        ? null
+        : evaluatePurchase(state, asOf, assumptions, Math.round(purchaseAmount * 100), purchaseDate),
+    [base, question, state, asOf, assumptions, purchaseAmount, purchaseDate]
   );
   const delay = useMemo(
-    () => (question === "delay" ? evaluateIncomeDelay(state, asOf, assumptions, delayDays) : null),
-    [question, state, asOf, assumptions, delayDays]
+    () =>
+      base === null || question !== "delay"
+        ? null
+        : evaluateIncomeDelay(state, asOf, assumptions, delayDays),
+    [base, question, state, asOf, assumptions, delayDays]
   );
   const bill = useMemo(
     () =>
-      question === "bill" && billId
+      base !== null && question === "bill" && billId
         ? evaluateBillAmount(state, asOf, assumptions, billId, Math.round(billAmount * 100))
         : null,
-    [question, state, asOf, assumptions, billId, billAmount]
+    [base, question, state, asOf, assumptions, billId, billAmount]
   );
   const asideResult = useMemo(
-    () => (question === "aside" ? evaluateMonthlySetAside(state, asOf, assumptions, Math.round(aside * 100)) : null),
-    [question, state, asOf, assumptions, aside]
+    () =>
+      base === null || question !== "aside"
+        ? null
+        : evaluateMonthlySetAside(state, asOf, assumptions, Math.round(aside * 100)),
+    [base, question, state, asOf, assumptions, aside]
   );
   const hasOutstandingDebt = state.liabilities.some((debt) => debt.is_active !== false && debt.balance_cents > 0);
   const extraPayment = useMemo(
-    () => question === "debt" && hasOutstandingDebt && paymentPreview
+    () => base !== null && question === "debt" && hasOutstandingDebt && paymentPreview
       ? evaluateExtraDebtPayment(state, asOf, assumptions, paymentPreview.amountCents, paymentPreview.date)
       : null,
-    [question, hasOutstandingDebt, paymentPreview, state, asOf, assumptions]
+    [base, question, hasOutstandingDebt, paymentPreview, state, asOf, assumptions]
   );
 
   const goalCents = dollarsToCents(Number(goal));
@@ -212,7 +226,7 @@ export function PlanView({
   let debtResult: { months_to_payoff: number; payoff_date: string; total_interest_cents: number; total_paid_cents: number; did_not_converge?: boolean } | null = null;
   let debtCalcError: string | null = null;
   const activeDebts = state.liabilities.filter((debt) => debt.is_active !== false);
-  if (question === "debt" && activeDebts.length > 0) {
+  if (base !== null && question === "debt" && activeDebts.length > 0) {
     try {
       debtResult = amortize(asOf, activeDebts, strategy, Math.round(extra * 100));
     } catch (err: unknown) {
@@ -338,6 +352,134 @@ export function PlanView({
     setOpenBalanceId((current) => (current === debt.id ? null : current));
     // Only a successful removal discards this row's draft and its marker.
     onDiscardDraft(balanceDraftKey(debt.id));
+  }
+
+  // Recorded-debt editing is deliberately independent of the selected decision
+  // tab. It is the only Plan surface that stays usable when the engine cannot
+  // evaluate the ledger. The form values stay in this Plan instance across
+  // both the normal and recovery layouts.
+  const debtManagement = (base === null || question === "debt") && (
+    <fieldset disabled={saving} className="m-0 min-w-0 space-y-3 border-0 p-0">
+      <ul className="divide-y divide-line">
+        {state.liabilities.map((debt) => (
+          <li key={debt.id} className="flex flex-wrap items-center justify-between gap-2 py-2 text-sm">
+            <span>
+              {debt.name} · owe {formatMoney(debt.balance_cents)} · {(debt.apr_basis_points / 100).toFixed(2)}%
+              {debt.is_active === false ? " · Archived" : base === null ? null : ` · ${debtMinimumLabel(debt)}`}
+            </span>
+            <div className="flex flex-wrap gap-2">
+              <Button type="button" variant="quiet" onClick={() => openBalanceEditor(debt)}>
+                Update balance for {debt.name}
+              </Button>
+              <Button type="button" variant="quiet" onClick={() => void removeDebt(debt)}>
+                Remove {debt.name}
+              </Button>
+            </div>
+            {openBalanceId === debt.id && (
+              <form
+                className="flex w-full flex-wrap items-end gap-2"
+                onSubmit={(event) => void saveBalance(debt, event)}
+              >
+                <label className="text-sm font-medium">
+                  Lender balance for {debt.name} ($)
+                  <input
+                    type="number" min={0} step="0.01" required
+                    className={`${fieldClass} mt-1`}
+                    value={balanceDrafts.get(debt.id) ?? ""}
+                    onChange={(event) => {
+                      const dollars = event.target.value;
+                      setBalanceDrafts((current) => withKey(current, debt.id, dollars));
+                      setBalanceErrors((current) => withoutKey(current, debt.id));
+                    }}
+                  />
+                </label>
+                <Button type="submit" variant="quiet">Save balance</Button>
+                <Button type="button" variant="quiet" onClick={() => cancelBalance(debt)}>Cancel</Button>
+                {balanceErrors.get(debt.id) && (
+                  <p className="w-full text-sm text-danger" role="alert">
+                    {balanceErrors.get(debt.id)}
+                  </p>
+                )}
+              </form>
+            )}
+          </li>
+        ))}
+      </ul>
+      <form onSubmit={submitDebt} className="grid gap-3 sm:grid-cols-2">
+        <label className="text-sm font-medium">
+          Debt name
+          <input className={`${fieldClass} mt-1`} value={debtName} onChange={(e) => setDebtName(e.target.value)} />
+        </label>
+        <label className="text-sm font-medium">
+          Amount still owed ($)
+          <input className={`${fieldClass} mt-1`} inputMode="decimal" value={debtBalance} onChange={(e) => setDebtBalance(e.target.value)} />
+        </label>
+        <label className="text-sm font-medium">
+          Interest rate (%)
+          <input className={`${fieldClass} mt-1`} inputMode="decimal" value={debtApr} onChange={(e) => setDebtApr(e.target.value)} placeholder="21.99" />
+        </label>
+        <label className="text-sm font-medium">
+          Minimum payment ($)
+          <input className={`${fieldClass} mt-1`} inputMode="decimal" value={debtMin} onChange={(e) => setDebtMin(e.target.value)} />
+        </label>
+        <label className="text-sm font-medium">
+          Bill for this debt (optional)
+          <select className={`${fieldClass} mt-1`} value={linkedPaymentId} onChange={(e) => setLinkedPaymentId(e.target.value)}>
+            <option value="">No matching bill</option>
+            {state.payments
+              .filter((payment) => payment.recurrence === "Monthly" && payment.due_day)
+              .filter((payment) => !(state.liabilities ?? []).some(
+                (debt) => debt.linked_payment_id != null && String(debt.linked_payment_id) === String(payment.id)
+              ))
+              .map((payment) => (
+                <option key={String(payment.id)} value={String(payment.id)}>
+                  {payment.name} · {formatMoney(payment.amount_cents)} · day {payment.due_day}
+                </option>
+              ))}
+          </select>
+        </label>
+        {!selectedPayment && (
+          <label className="text-sm font-medium">
+            Usual payment day (1–31)
+            <input
+              className={`${fieldClass} mt-1`}
+              type="number"
+              min={1}
+              max={31}
+              value={debtDueDay}
+              onChange={(e) => setDebtDueDay(e.target.value)}
+            />
+          </label>
+        )}
+        {debtError && (
+          <p className="text-sm text-danger sm:col-span-2" role="alert">
+            {debtError}
+          </p>
+        )}
+        <div>
+          <Button type="submit" variant="quiet">
+            Add debt
+          </Button>
+        </div>
+      </form>
+    </fieldset>
+  );
+
+  if (base === null) {
+    // The selected decision tab is intentionally not rendered here, but its
+    // retained state is untouched. Debt management is shown regardless of which
+    // tab was open, and no scenario, payoff, or risk value is computed.
+    return (
+      <div className="space-y-4">
+        <Panel title="Recorded debts">
+          <Notice tone="warning" title="Plan comparisons unavailable">
+            Cash, payoff, and risk comparisons are unavailable. Your saved debts and open drafts are still available
+            below.
+          </Notice>
+          <div className="mt-4">{debtManagement}</div>
+        </Panel>
+      </div>
+    );
   }
 
   return (
@@ -643,110 +785,7 @@ export function PlanView({
                 </div>
               </section>
             )}
-            <fieldset disabled={saving} className="m-0 min-w-0 space-y-3 border-0 p-0">
-            <ul className="divide-y divide-line">
-              {state.liabilities.map((debt) => (
-                <li key={debt.id} className="flex flex-wrap items-center justify-between gap-2 py-2 text-sm">
-                  <span>
-                    {debt.name} · owe {formatMoney(debt.balance_cents)} · {(debt.apr_basis_points / 100).toFixed(2)}% ·{" "}
-                    {debt.is_active === false ? "Archived" : debtMinimumLabel(debt)}
-                  </span>
-                  <div className="flex flex-wrap gap-2">
-                    <Button type="button" variant="quiet" onClick={() => openBalanceEditor(debt)}>
-                      Update balance for {debt.name}
-                    </Button>
-                    <Button type="button" variant="quiet" onClick={() => void removeDebt(debt)}>
-                      Remove {debt.name}
-                    </Button>
-                  </div>
-                  {openBalanceId === debt.id && (
-                    <form
-                      className="flex w-full flex-wrap items-end gap-2"
-                      onSubmit={(event) => void saveBalance(debt, event)}
-                    >
-                      <label className="text-sm font-medium">
-                        Lender balance for {debt.name} ($)
-                        <input
-                          type="number" min={0} step="0.01" required
-                          className={`${fieldClass} mt-1`}
-                          value={balanceDrafts.get(debt.id) ?? ""}
-                          onChange={(event) => {
-                            const dollars = event.target.value;
-                            setBalanceDrafts((current) => withKey(current, debt.id, dollars));
-                            setBalanceErrors((current) => withoutKey(current, debt.id));
-                          }}
-                        />
-                      </label>
-                      <Button type="submit" variant="quiet">Save balance</Button>
-                      <Button type="button" variant="quiet" onClick={() => cancelBalance(debt)}>Cancel</Button>
-                      {balanceErrors.get(debt.id) && (
-                        <p className="w-full text-sm text-danger" role="alert">
-                          {balanceErrors.get(debt.id)}
-                        </p>
-                      )}
-                    </form>
-                  )}
-                </li>
-              ))}
-            </ul>
-            <form onSubmit={submitDebt} className="grid gap-3 sm:grid-cols-2">
-              <label className="text-sm font-medium">
-                Debt name
-                <input className={`${fieldClass} mt-1`} value={debtName} onChange={(e) => setDebtName(e.target.value)} />
-              </label>
-              <label className="text-sm font-medium">
-                Amount still owed ($)
-                <input className={`${fieldClass} mt-1`} inputMode="decimal" value={debtBalance} onChange={(e) => setDebtBalance(e.target.value)} />
-              </label>
-              <label className="text-sm font-medium">
-                Interest rate (%)
-                <input className={`${fieldClass} mt-1`} inputMode="decimal" value={debtApr} onChange={(e) => setDebtApr(e.target.value)} placeholder="21.99" />
-              </label>
-              <label className="text-sm font-medium">
-                Minimum payment ($)
-                <input className={`${fieldClass} mt-1`} inputMode="decimal" value={debtMin} onChange={(e) => setDebtMin(e.target.value)} />
-              </label>
-              <label className="text-sm font-medium">
-                Bill for this debt (optional)
-                <select className={`${fieldClass} mt-1`} value={linkedPaymentId} onChange={(e) => setLinkedPaymentId(e.target.value)}>
-                  <option value="">No matching bill</option>
-                  {state.payments
-                    .filter((payment) => payment.recurrence === "Monthly" && payment.due_day)
-                    .filter((payment) => !(state.liabilities ?? []).some(
-                      (debt) => debt.linked_payment_id != null && String(debt.linked_payment_id) === String(payment.id)
-                    ))
-                    .map((payment) => (
-                      <option key={String(payment.id)} value={String(payment.id)}>
-                        {payment.name} · {formatMoney(payment.amount_cents)} · day {payment.due_day}
-                      </option>
-                    ))}
-                </select>
-              </label>
-              {!selectedPayment && (
-                <label className="text-sm font-medium">
-                  Usual payment day (1–31)
-                  <input
-                    className={`${fieldClass} mt-1`}
-                    type="number"
-                    min={1}
-                    max={31}
-                    value={debtDueDay}
-                    onChange={(e) => setDebtDueDay(e.target.value)}
-                  />
-                </label>
-              )}
-              {debtError && (
-                <p className="text-sm text-danger sm:col-span-2" role="alert">
-                  {debtError}
-                </p>
-              )}
-              <div>
-                <Button type="submit" variant="quiet">
-                  Add debt
-                </Button>
-              </div>
-            </form>
-            </fieldset>
+            {debtManagement}
             <Explain term="interest">
               The interest rate helps estimate what you will owe in future months. If you already track the same
               payment as a bill, choose it above so that payment is counted once.
