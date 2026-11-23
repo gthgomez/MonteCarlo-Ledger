@@ -26,6 +26,13 @@ import type { PersistenceResult } from "@/lib/sync-state";
 import { type LedgerState, type PaymentItem } from "@/lib/types";
 import { Button, fieldClass, Notice, Panel } from "./ui";
 
+function withoutDraft<T>(drafts: Record<string, T>, key: string): Record<string, T> {
+  if (!(key in drafts)) return drafts;
+  const next = { ...drafts };
+  delete next[key];
+  return next;
+}
+
 export function BillsView({
   state,
   asOf,
@@ -34,6 +41,7 @@ export function BillsView({
   assumptions,
   overdue,
   onEdit,
+  onDiscardDraft,
 }: {
   state: LedgerState;
   asOf: string;
@@ -42,6 +50,7 @@ export function BillsView({
   assumptions: Assumptions;
   overdue: OverdueAssessment;
   onEdit: (result: EditResult, draftKey?: string) => Promise<PersistenceResult>;
+  onDiscardDraft: (draftKey: string) => void;
 }) {
   const [name, setName] = useState("");
   const [amount, setAmount] = useState("100");
@@ -80,50 +89,38 @@ export function BillsView({
   function chooseResolution(key: string, choice: "link" | "reflected" | "new") {
     setResolutionChoices((current) => ({ ...current, [key]: choice }));
     if (choice !== "new") {
-      setConfirmNewExpense((current) => {
-        if (!(key in current)) return current;
-        const next = { ...current };
-        delete next[key];
-        return next;
-      });
+      // A new cash debit must be confirmed again after changing treatments.
+      setConfirmNewExpense((current) => withoutDraft(current, key));
     }
-    if (choice !== "link") {
-      setLinkChoices((current) => {
-        if (!(key in current)) return current;
-        const next = { ...current };
-        delete next[key];
-        return next;
-      });
-    }
+  }
+
+  function clearSlotDraft(key: string) {
+    setLinkChoices((current) => withoutDraft(current, key));
+    setConfirmNewExpense((current) => withoutDraft(current, key));
+    setResolutionChoices((current) => withoutDraft(current, key));
+    setMoveDates((current) => withoutDraft(current, key));
   }
 
   async function settleRow(key: string, result: EditResult) {
     if (!(await onEdit(result, `bills:slot:${key}`)).ok) return;
-    setLinkChoices((current) => {
-      const next = { ...current };
-      delete next[key];
-      return next;
-    });
-    setConfirmNewExpense((current) => {
-      const next = { ...current };
-      delete next[key];
-      return next;
-    });
-    setResolutionChoices((current) => {
-      const next = { ...current };
-      delete next[key];
-      return next;
-    });
+    clearSlotDraft(key);
   }
 
   async function moveRow(key: string, result: EditResult) {
-    const saved = await onEdit(result, `bills:slot:${key}`);
-    if (!saved.ok) return;
-    setMoveDates((current) => {
-      const next = { ...current };
-      delete next[key];
-      return next;
-    });
+    const hasDraft = key in moveDates || key in resolutionChoices;
+    if ((await onEdit(result, hasDraft ? `bills:slot:${key}` : undefined)).ok) clearSlotDraft(key);
+  }
+
+  async function removeBill(paymentId: number | string) {
+    // The last separator belongs to the slot date; imported payment IDs are opaque.
+    const draftKeys = [...new Set([...Object.keys(moveDates), ...Object.keys(resolutionChoices)])]
+      .filter((key) => key.slice(0, key.lastIndexOf("::")) === String(paymentId));
+    if (draftKeys.length && !window.confirm("Removing this bill also discards its unsaved drafts. Remove it?")) return;
+    if (!(await onEdit(removePayment(state, paymentId))).ok) return;
+    for (const key of draftKeys) {
+      clearSlotDraft(key);
+      onDiscardDraft(`bills:slot:${key}`);
+    }
   }
 
   async function submit(event: React.FormEvent) {
@@ -267,7 +264,7 @@ export function BillsView({
                 <Button
                   type="button"
                   variant="quiet"
-                  onClick={() => void onEdit(removePayment(state, payment.id ?? ""))}
+                  onClick={() => void removeBill(payment.id ?? "")}
                 >
                   Remove {payment.name}
                 </Button>

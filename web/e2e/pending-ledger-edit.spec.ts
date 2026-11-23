@@ -1,4 +1,4 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Dialog, type Page } from "@playwright/test";
 
 import { LEDGER_LOCK_NAME, LEDGER_STORAGE_KEY } from "../src/lib/persistence";
 import type { LedgerState } from "../src/lib/types";
@@ -15,7 +15,7 @@ interface PendingLedgerHarness {
   releasePendingLedgerLock?: () => void;
 }
 
-function syntheticLedger(): LedgerState {
+function syntheticLedger(liabilities: LedgerState["liabilities"] = []): LedgerState {
   return {
     version: "2.0",
     updated_at: "2026-11-01T00:00:00.000Z",
@@ -33,15 +33,15 @@ function syntheticLedger(): LedgerState {
       },
     ],
     bill_occurrences: [],
-    liabilities: [],
+    liabilities,
   };
 }
 
-async function seedSyntheticLedger(page: Page): Promise<void> {
+async function seedSyntheticLedger(page: Page, state: LedgerState = syntheticLedger()): Promise<void> {
   await page.goto("/");
   await page.evaluate(
-    ({ key, state }) => localStorage.setItem(key, JSON.stringify(state)),
-    { key: LEDGER_STORAGE_KEY, state: syntheticLedger() }
+    ({ key, ledger }) => localStorage.setItem(key, JSON.stringify(ledger)),
+    { key: LEDGER_STORAGE_KEY, ledger: state }
   );
   await page.reload();
 }
@@ -304,7 +304,146 @@ test.describe("ordinary ledger edit draft safety", () => {
     }
   await expect(page.getByText("Saving your ledger change", { exact: true })).toHaveCount(0);
   await expect(page.getByRole("tab", { name: "Can I afford a purchase?" })).toBeEnabled();
-  const saved = JSON.parse((await storedRaw(page)) ?? "null");
-  expect(saved.liabilities).toMatchObject([{ name: "Pending card", balance_cents: 50_000, min_payment_cents: 2_500 }]);
+    const saved = JSON.parse((await storedRaw(page)) ?? "null");
+    expect(saved.liabilities).toMatchObject([{ name: "Pending card", balance_cents: 50_000, min_payment_cents: 2_500 }]);
+  });
+
+  test("a failed balance draft survives editor switches and its Cancel clears only its marker", async ({ page, context }) => {
+    await seedSyntheticLedger(
+      page,
+      syntheticLedger([
+        {
+          id: "debt-a",
+          name: "Card A",
+          balance_cents: 120_000,
+          apr_basis_points: 1_999,
+          min_payment_cents: 5_000,
+          due_day_of_month: 5,
+        },
+        {
+          id: "debt-b",
+          name: "Card B",
+          balance_cents: 80_000,
+          apr_basis_points: 1_499,
+          min_payment_cents: 3_000,
+          due_day_of_month: 12,
+        },
+      ])
+    );
+    const originalRaw = await storedRaw(page);
+    await page.getByRole("button", { name: "Plan", exact: true }).click();
+    await page.getByRole("tab", { name: "How do I pay off debt?" }).click();
+    await expect(page.getByRole("button", { name: "Update balance for Card A" })).toBeVisible();
+
+    // The sibling tab only advances the durable ledger. Neither debt changes,
+    // so this tab's snapshot becomes stale without touching either draft.
+    const sibling = await context.newPage();
+    await sibling.goto("/");
+    await openMoney(sibling);
+    await sibling.getByRole("textbox", { name: "Amount ($)", exact: true }).fill("12.34");
+    await sibling.getByLabel("Note", { exact: true }).fill("Sibling advance");
+    await sibling.getByRole("button", { name: "Record this" }).click();
+    await expect(sibling.getByText("Sibling advance", { exact: true })).toBeVisible();
+    const siblingRaw = await storedRaw(sibling);
+    expect(siblingRaw).not.toBe(originalRaw);
+
+    // Saving a balance now is a real stale conflict: the durable raw moved after
+    // this tab read it, so the submitted draft must survive the failure.
+    const balanceA = page.getByLabel("Lender balance for Card A ($)");
+    await page.getByRole("button", { name: "Update balance for Card A" }).click();
+    await balanceA.fill("4321.09");
+    await page.getByRole("button", { name: "Save balance" }).click();
+    await expect(page.getByText("Not saved", { exact: true })).toBeVisible();
+    await expect(page.getByText(/stored ledger changed in another tab/i).first()).toBeVisible();
+    await expect(balanceA).toHaveValue("4321.09");
+    expect(await storedRaw(page)).toBe(siblingRaw);
+
+    // The failed draft still blocks ordinary section navigation.
+    const [declined] = await Promise.all([
+      page.waitForEvent("dialog").then(async (dialog) => {
+        const result = { type: dialog.type(), message: dialog.message() };
+        await dialog.dismiss();
+        return result;
+      }),
+      page.getByRole("button", { name: "Home", exact: true }).click(),
+    ]);
+    expect(declined.type).toBe("confirm");
+    expect(declined.message).toMatch(/not saved.*discard/i);
+    await expect(page.getByRole("button", { name: "Plan", exact: true })).toHaveAttribute("aria-current", "page");
+
+    // Reopening/switching is not a discard. Keep two independent failed
+    // drafts, so the test can distinguish clearing one marker from clearing all.
+    const balanceB = page.getByLabel("Lender balance for Card B ($)");
+    const rowA = page.locator("li").filter({ hasText: "Card A" });
+    const rowB = page.locator("li").filter({ hasText: "Card B" });
+    const switchDialogs: string[] = [];
+    const onSwitchDialog = async (dialog: Dialog) => {
+      switchDialogs.push(dialog.message());
+      await dialog.dismiss();
+    };
+    page.on("dialog", onSwitchDialog);
+    try {
+      await page.getByRole("button", { name: "Update balance for Card A" }).click();
+      await expect(balanceA).toHaveValue("4321.09");
+      await page.getByRole("button", { name: "Update balance for Card B" }).click();
+      await balanceB.fill("77.77");
+      await rowB.getByRole("button", { name: "Save balance" }).click();
+      await expect(rowB.getByRole("alert")).toContainText(/changed in another tab/i);
+      await page.getByRole("button", { name: "Update balance for Card A" }).click();
+      await expect(balanceA).toHaveValue("4321.09");
+      await expect(rowA.getByRole("alert")).toContainText(/changed in another tab/i);
+      await page.getByRole("button", { name: "Update balance for Card B" }).click();
+      await expect(balanceB).toHaveValue("77.77");
+    } finally {
+      page.off("dialog", onSwitchDialog);
+    }
+    expect(switchDialogs).toEqual([]);
+    expect(await storedRaw(page)).toBe(siblingRaw);
+
+    // Cancel A without clearing B's independent failed draft or its guard.
+    await page.getByRole("button", { name: "Update balance for Card A" }).click();
+    await rowA.getByRole("button", { name: "Cancel", exact: true }).click();
+    await expect(balanceA).toHaveCount(0);
+    await page.getByRole("button", { name: "Update balance for Card B" }).click();
+    await expect(balanceB).toHaveValue("77.77");
+    const [remainingGuard] = await Promise.all([
+      page.waitForEvent("dialog").then(async (dialog) => {
+        const type = dialog.type();
+        await dialog.dismiss();
+        return type;
+      }),
+      page.getByRole("button", { name: "Home", exact: true }).click(),
+    ]);
+    expect(remainingGuard).toBe("confirm");
+    await expect(balanceB).toHaveValue("77.77");
+    await rowB.getByRole("button", { name: "Cancel", exact: true }).click();
+    await expect(balanceB).toHaveCount(0);
+
+    // With both failures explicitly discarded, there is no phantom warning.
+    let navigationPrompt: string | null = null;
+    const onDialog = async (dialog: Dialog) => {
+      navigationPrompt = dialog.message();
+      await dialog.dismiss();
+    };
+    page.on("dialog", onDialog);
+    try {
+      await page.getByRole("button", { name: "Home", exact: true }).click();
+      await expect(page.getByRole("button", { name: "Home", exact: true })).toHaveAttribute("aria-current", "page");
+    } finally {
+      page.off("dialog", onDialog);
+    }
+    expect(navigationPrompt).toBeNull();
+
+    // Discarding the failed draft did not touch the sibling's durable update or
+    // either debt balance.
+    expect(await storedRaw(page)).toBe(siblingRaw);
+    const durable = JSON.parse(siblingRaw ?? "null");
+    expect(durable.current_balance_cents).toBe(98_766);
+    expect(durable.transactions.some((tx: { description?: string }) => tx.description === "Sibling advance")).toBe(true);
+    expect(durable.liabilities).toMatchObject([
+      { id: "debt-a", balance_cents: 120_000 },
+      { id: "debt-b", balance_cents: 80_000 },
+    ]);
+    await sibling.close();
   });
 });

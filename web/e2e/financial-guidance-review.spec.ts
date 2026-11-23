@@ -120,7 +120,21 @@ test("a past one-time bill can link an already-posted expense without a second d
   await confirm.uncheck();
 
   await row.getByRole("radio", { name: /already recorded in Money/ }).check();
-  await row.getByLabel("Recorded expense for Car repair due Nov 9, 2026").selectOption("tx-repair");
+  const expense = row.getByLabel("Recorded expense for Car repair due Nov 9, 2026");
+  await expense.selectOption("tx-repair");
+  await row.getByRole("radio", { name: /already reflected in the cash I have now/ }).check();
+  await row.getByRole("radio", { name: /already recorded in Money/ }).check();
+  await expect(expense).toHaveValue("tx-repair");
+  const [removePrompt] = await Promise.all([
+    page.waitForEvent("dialog").then(async (dialog) => {
+      const message = dialog.message();
+      await dialog.dismiss();
+      return message;
+    }),
+    page.getByRole("button", { name: "Remove Car repair", exact: true }).click(),
+  ]);
+  expect(removePrompt).toMatch(/discards its unsaved drafts/i);
+  await expect(expense).toHaveValue("tx-repair");
   await row.getByRole("button", { name: "Link recorded expense" }).click();
   await expect(row).toHaveCount(0);
 

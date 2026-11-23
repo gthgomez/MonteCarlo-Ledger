@@ -39,6 +39,24 @@ function debtMinimumLabel(debt: LiabilityItem): string {
 
 type Question = "purchase" | "delay" | "bill" | "aside" | "debt";
 
+/** Stable per-debt key for the balance draft and its failed-save marker. */
+function balanceDraftKey(id: string): string {
+  return `plan:debt-balance:${id}`;
+}
+
+function withoutKey<V>(map: Map<string, V>, key: string): Map<string, V> {
+  if (!map.has(key)) return map;
+  const next = new Map(map);
+  next.delete(key);
+  return next;
+}
+
+function withKey<V>(map: Map<string, V>, key: string, value: V): Map<string, V> {
+  const next = new Map(map);
+  next.set(key, value);
+  return next;
+}
+
 function Compare({
   title,
   base,
@@ -111,6 +129,7 @@ export function PlanView({
   base,
   showGuidance,
   onEdit,
+  onDiscardDraft,
   saving,
 }: {
   state: LedgerState;
@@ -119,6 +138,7 @@ export function PlanView({
   base: ModelOutcome;
   showGuidance: boolean;
   onEdit: (result: EditResult, draftKey?: string) => Promise<PersistenceResult>;
+  onDiscardDraft: (draftKey: string) => void;
   saving: boolean;
 }) {
   const [question, setQuestion] = useState<Question>("purchase");
@@ -146,7 +166,12 @@ export function PlanView({
   const [linkedPaymentId, setLinkedPaymentId] = useState("");
   const selectedPayment = state.payments.find((payment) => String(payment.id) === linkedPaymentId);
   const [debtError, setDebtError] = useState<string | null>(null);
-  const [balanceEdit, setBalanceEdit] = useState<{ id: string; dollars: string } | null>(null);
+  // Balance drafts are keyed by debt id and live for the whole Plan pane. Only
+  // this row's successful save or an explicit row discard may remove one, so
+  // switching editors never turns a failed draft into silent state loss.
+  const [balanceDrafts, setBalanceDrafts] = useState<Map<string, string>>(() => new Map());
+  const [balanceErrors, setBalanceErrors] = useState<Map<string, string>>(() => new Map());
+  const [openBalanceId, setOpenBalanceId] = useState<string | null>(null);
 
   const purchase = useMemo(
     () =>
@@ -259,6 +284,60 @@ export function PlanView({
     }
     setPaymentError(null);
     setPaymentPreview({ amountCents, date: paymentDate });
+  }
+
+  function openBalanceEditor(debt: LiabilityItem) {
+    // Reopening is not a discard: the typed value and any failure stay with the
+    // row until its own save succeeds or its own Cancel removes them.
+    setOpenBalanceId(debt.id);
+  }
+
+  async function saveBalance(debt: LiabilityItem, event: React.FormEvent) {
+    event.preventDefault();
+    const submitted = balanceDrafts.get(debt.id) ?? "";
+    const balance = dollarsToCents(Number(submitted));
+    const result = updateLiabilityBalance(state, debt.id, balance ?? NaN);
+    if (!result.ok) {
+      setBalanceErrors((current) => withKey(current, debt.id, result.error));
+      return;
+    }
+    setBalanceErrors((current) => withoutKey(current, debt.id));
+    const saved = await onEdit(result, balanceDraftKey(debt.id));
+    if (!saved.ok) {
+      // The failure marker and this row's typed value stay together for a retry
+      // or an explicit Cancel, even if another debt's editor is opened.
+      setBalanceErrors((current) => withKey(current, debt.id, saved.error));
+      return;
+    }
+    // Leave a value the user changed while the write was pending. Only the
+    // exact submitted draft is settled by this success.
+    setBalanceDrafts((current) =>
+      current.get(debt.id) === submitted ? withoutKey(current, debt.id) : current
+    );
+    setBalanceErrors((current) => withoutKey(current, debt.id));
+    setOpenBalanceId((current) => (current === debt.id ? null : current));
+  }
+
+  function cancelBalance(debt: LiabilityItem) {
+    setBalanceDrafts((current) => withoutKey(current, debt.id));
+    setBalanceErrors((current) => withoutKey(current, debt.id));
+    setOpenBalanceId((current) => (current === debt.id ? null : current));
+    // Explicit discard may clear this row's failed-draft marker, never a sibling's.
+    onDiscardDraft(balanceDraftKey(debt.id));
+  }
+
+  async function removeDebt(debt: LiabilityItem) {
+    const draft = balanceDrafts.get(debt.id);
+    const hasEnteredDraft = draft !== undefined && draft.trim() !== "";
+    if (hasEnteredDraft && !window.confirm(`Remove ${debt.name}? The balance draft you entered will be discarded.`)) {
+      return;
+    }
+    if (!(await onEdit(removeLiability(state, debt.id))).ok) return;
+    setBalanceDrafts((current) => withoutKey(current, debt.id));
+    setBalanceErrors((current) => withoutKey(current, debt.id));
+    setOpenBalanceId((current) => (current === debt.id ? null : current));
+    // Only a successful removal discards this row's draft and its marker.
+    onDiscardDraft(balanceDraftKey(debt.id));
   }
 
   return (
@@ -573,50 +652,38 @@ export function PlanView({
                     {debt.is_active === false ? "Archived" : debtMinimumLabel(debt)}
                   </span>
                   <div className="flex flex-wrap gap-2">
-                    <Button type="button" variant="quiet" onClick={() => setBalanceEdit({ id: debt.id, dollars: "" })}>
+                    <Button type="button" variant="quiet" onClick={() => openBalanceEditor(debt)}>
                       Update balance for {debt.name}
                     </Button>
-                    <Button type="button" variant="quiet" onClick={() => void onEdit(removeLiability(state, debt.id))}>
+                    <Button type="button" variant="quiet" onClick={() => void removeDebt(debt)}>
                       Remove {debt.name}
                     </Button>
                   </div>
-                  {balanceEdit?.id === debt.id && (
+                  {openBalanceId === debt.id && (
                     <form
                       className="flex w-full flex-wrap items-end gap-2"
-                      onSubmit={async (event) => {
-                        event.preventDefault();
-                        const submitted = { id: balanceEdit.id, dollars: balanceEdit.dollars };
-                        const balance = dollarsToCents(Number(balanceEdit.dollars));
-                        const result = updateLiabilityBalance(state, debt.id, balance ?? NaN);
-                        if (!result.ok) {
-                          setDebtError(result.error);
-                          return;
-                        }
-                        setDebtError(null);
-                        const saved = await onEdit(result, `plan:debt-balance:${debt.id}`);
-                        if (!saved.ok) {
-                          setDebtError(saved.error);
-                          return;
-                        }
-                        setDebtError(null);
-                        setBalanceEdit((current) =>
-                          current && current.id === submitted.id && current.dollars === submitted.dollars
-                            ? null
-                            : current
-                        );
-                      }}
+                      onSubmit={(event) => void saveBalance(debt, event)}
                     >
                       <label className="text-sm font-medium">
                         Lender balance for {debt.name} ($)
                         <input
                           type="number" min={0} step="0.01" required
                           className={`${fieldClass} mt-1`}
-                          value={balanceEdit.dollars}
-                          onChange={(event) => setBalanceEdit({ id: debt.id, dollars: event.target.value })}
+                          value={balanceDrafts.get(debt.id) ?? ""}
+                          onChange={(event) => {
+                            const dollars = event.target.value;
+                            setBalanceDrafts((current) => withKey(current, debt.id, dollars));
+                            setBalanceErrors((current) => withoutKey(current, debt.id));
+                          }}
                         />
                       </label>
                       <Button type="submit" variant="quiet">Save balance</Button>
-                      <Button type="button" variant="quiet" onClick={() => setBalanceEdit(null)}>Cancel</Button>
+                      <Button type="button" variant="quiet" onClick={() => cancelBalance(debt)}>Cancel</Button>
+                      {balanceErrors.get(debt.id) && (
+                        <p className="w-full text-sm text-danger" role="alert">
+                          {balanceErrors.get(debt.id)}
+                        </p>
+                      )}
                     </form>
                   )}
                 </li>

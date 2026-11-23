@@ -84,8 +84,9 @@ cannot explain, or data they can lose without a warning, is a release defect.
   change. Hold a ledger save and verify the page warns before leaving, prevents a second
   submission, and keeps the entered draft if the write fails. A failed draft stays in the
   open form, not in the saved ledger. Verify that cancelling a section switch preserves the
-  values; keep a copy before deliberately discarding them or reloading. Do not claim first-ever
-  offline load for a hosted browser app.
+  values and switching debt editors preserves each debt's own draft. Keep a copy before
+  deliberately discarding drafts or reloading. Do not claim first-ever offline load for a hosted
+  browser app.
 - If hosted staging is authorized later, record the exact preview build, isolated database and
   synthetic-only fixture scope (no secrets in the record). Repeat Web ↔ Python, including restart
   and conflict handling. Stop if staging identity or isolation cannot be established. Separately

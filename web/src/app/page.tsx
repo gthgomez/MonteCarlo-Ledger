@@ -206,6 +206,15 @@ export default function Home() {
     else failedDraftKeysRef.current.delete(draftKey);
   }
 
+  /**
+   * A row-level Cancel is an explicit decision to discard that one draft.
+   * Remove only its marker so leaving the section no longer prompts, without
+   * dropping markers for other forms or other rows that still hold a draft.
+   */
+  function discardFailedDraft(draftKey: string) {
+    failedDraftKeysRef.current.delete(draftKey);
+  }
+
   function navigate(next: Section) {
     // Navigation is held until the durable result is known so a pending save
     // cannot be mistaken for an abandoned draft or hidden behind another section.
@@ -631,6 +640,7 @@ export default function Home() {
               assumptions={assumptions}
               overdue={overdue}
               onEdit={onEdit}
+              onDiscardDraft={discardFailedDraft}
             />
           </fieldset>
         )}
@@ -642,6 +652,7 @@ export default function Home() {
             base={outcome}
             showGuidance={showGuidance}
             onEdit={onEdit}
+            onDiscardDraft={discardFailedDraft}
             saving={isSaving}
           />
         )}
