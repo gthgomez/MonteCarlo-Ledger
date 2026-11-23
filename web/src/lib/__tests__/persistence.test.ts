@@ -8,6 +8,7 @@ import {
   commitSynchronizedState,
   fingerprintState,
   readSyncRecord,
+  PersistenceResult,
   SyncStorage,
 } from "../sync-state";
 import {
@@ -38,6 +39,15 @@ class FakeStorage implements SyncStorage {
 
 const STATE = { ...SAMPLE_LEDGER_STATE, updated_at: "2026-11-07T00:00:00Z" };
 
+/** Narrow a result that must have failed, without weakening the union. */
+function expectFailure(result: PersistenceResult): {
+  error: string;
+  indeterminate?: true;
+} {
+  if (result.ok) assert.fail("expected a failed persistence result");
+  return result;
+}
+
 test("a successful bundle writes ledger, vault and ancestry", () => {
   const storage = new FakeStorage();
   const result = applyLedgerBundle(STATE, "vault-1", 3, storage);
@@ -54,8 +64,9 @@ test("a ledger write failure changes nothing", () => {
   storage.data.set(LEDGER_STORAGE_KEY, "previous");
   storage.data.set(VAULT_ID_STORAGE_KEY, "old-vault");
   storage.failOnKey = LEDGER_STORAGE_KEY;
-  const result = applyLedgerBundle(STATE, "vault-1", 3, storage);
-  assert.equal(result.ok, false);
+  const failure = expectFailure(applyLedgerBundle(STATE, "vault-1", 3, storage));
+  assert.equal(failure.indeterminate, undefined);
+  assert.match(failure.error, /previous saved data is intact/i);
   assert.equal(storage.getItem(LEDGER_STORAGE_KEY), "previous");
   assert.equal(storage.getItem(VAULT_ID_STORAGE_KEY), "old-vault");
   assert.equal(storage.getItem(SYNC_STORAGE_KEY), null);
@@ -65,8 +76,9 @@ test("a vault-id write failure rolls the ledger back", () => {
   const storage = new FakeStorage();
   storage.data.set(LEDGER_STORAGE_KEY, "previous");
   storage.failOnKey = VAULT_ID_STORAGE_KEY;
-  const result = applyLedgerBundle(STATE, "vault-1", 3, storage);
-  assert.equal(result.ok, false);
+  const failure = expectFailure(applyLedgerBundle(STATE, "vault-1", 3, storage));
+  assert.equal(failure.indeterminate, undefined);
+  assert.match(failure.error, /previous saved data is intact/i);
   assert.equal(storage.getItem(LEDGER_STORAGE_KEY), "previous");
   assert.equal(storage.getItem(VAULT_ID_STORAGE_KEY), null);
   assert.equal(storage.getItem(SYNC_STORAGE_KEY), null);
@@ -78,15 +90,16 @@ test("an ancestry write failure rolls back ledger and vault id", () => {
   storage.data.set(VAULT_ID_STORAGE_KEY, "old-vault");
   storage.data.set(SYNC_STORAGE_KEY, "old-sync");
   storage.failOnKey = SYNC_STORAGE_KEY;
-  const result = applyLedgerBundle(STATE, "vault-1", 3, storage);
-  assert.equal(result.ok, false);
+  const failure = expectFailure(applyLedgerBundle(STATE, "vault-1", 3, storage));
+  assert.equal(failure.indeterminate, undefined);
+  assert.match(failure.error, /previous saved data is intact/i);
   assert.equal(storage.getItem(LEDGER_STORAGE_KEY), "previous");
   assert.equal(storage.getItem(VAULT_ID_STORAGE_KEY), "old-vault");
   assert.equal(storage.getItem(SYNC_STORAGE_KEY), "old-sync");
   assert.equal(readSyncRecord("vault-1", storage), null);
 });
 
-test("a storage failure during rollback is reported without claiming the prior data is intact", () => {
+test("an unverified rollback is flagged indeterminate and the incoming ledger may stay durable", () => {
   const storage = new FakeStorage();
   storage.data.set(LEDGER_STORAGE_KEY, "previous");
   const write = storage.setItem.bind(storage);
@@ -96,9 +109,17 @@ test("a storage failure during rollback is reported without claiming the prior d
     }
     write(key, value);
   };
-  const result = applyLedgerBundle(STATE, "vault-1", 3, storage);
-  assert.equal(result.ok, false);
-  assert.match(result.ok ? "" : result.error, /previous saved data could not be verified/i);
+  const failure = expectFailure(applyLedgerBundle(STATE, "vault-1", 3, storage));
+
+  assert.equal(failure.indeterminate, true);
+  assert.match(failure.error, /some or all of the change may have persisted/i);
+  assert.match(failure.error, /previous saved data could not be verified/i);
+  assert.doesNotMatch(failure.error, /previous saved data is intact/i);
+  // The page owns recovery instructions; never send the user to reload here.
+  assert.doesNotMatch(failure.error, /reload/i);
+
+  // The incoming snapshot really did persist; only the rollback is unknown.
+  assert.equal(storage.getItem(LEDGER_STORAGE_KEY), JSON.stringify(STATE));
   assert.equal(storage.getItem(VAULT_ID_STORAGE_KEY), null);
 });
 
@@ -246,9 +267,9 @@ test("a signal aborted while queued prevents the replacement", async () => {
   assert.equal(locks.pending.length, 1);
   controller.abort();
   await locks.release();
-  const result = await saving;
+  const failure = expectFailure(await saving);
 
-  assert.equal(result.ok, false);
+  assert.equal(failure.indeterminate, undefined);
   assert.equal(storage.getItem(LEDGER_STORAGE_KEY), null);
 });
 
@@ -334,10 +355,46 @@ test("a failed bundle inside the lock rolls back every key", async () => {
     immediateLocks
   );
 
-  assert.equal(result.ok, false);
+  const failure = expectFailure(result);
+  assert.equal(failure.indeterminate, undefined);
   assert.equal(storage.getItem(LEDGER_STORAGE_KEY), "previous");
   assert.equal(storage.getItem(VAULT_ID_STORAGE_KEY), "old-vault");
   assert.equal(storage.getItem(SYNC_STORAGE_KEY), "old-sync");
+});
+
+test("the lock path preserves an indeterminate rollback instead of collapsing it to an ordinary failure", async () => {
+  const storage = new FakeStorage();
+  storage.data.set(LEDGER_STORAGE_KEY, JSON.stringify(STATE));
+  const write = storage.setItem.bind(storage);
+  storage.setItem = (key, value) => {
+    if (
+      key === VAULT_ID_STORAGE_KEY ||
+      (key === LEDGER_STORAGE_KEY && value === JSON.stringify(STATE))
+    ) {
+      throw new Error("storage blocked");
+    }
+    write(key, value);
+  };
+
+  const result = await saveLedgerChange(
+    { ...STATE, updated_at: "2026-11-12T00:00:00Z" },
+    { expectedRaw: JSON.stringify(STATE), vaultId: "vault-1", syncRevision: 4, requireLock: true },
+    storage,
+    LEDGER_STORAGE_KEY,
+    immediateLocks
+  );
+  const failure = expectFailure(result);
+
+  assert.equal(failure.indeterminate, true);
+  assert.match(failure.error, /some or all of the change may have persisted/i);
+  // The authorized raw comparison passed before the partial bundle; the incoming
+  // ledger is now durable and only the rollback is unknown.
+  assert.equal(
+    storage.getItem(LEDGER_STORAGE_KEY),
+    JSON.stringify({ ...STATE, updated_at: "2026-11-12T00:00:00Z" })
+  );
+  assert.equal(storage.getItem(VAULT_ID_STORAGE_KEY), null);
+  assert.equal(storage.getItem(SYNC_STORAGE_KEY), null);
 });
 
 test("a lock failure prevents both replacement and ordinary saves from writing without it", async () => {

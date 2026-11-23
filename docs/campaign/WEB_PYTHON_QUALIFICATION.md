@@ -75,9 +75,13 @@ cannot explain, or data they can lose without a warning, is a release defect.
   references, make a known edit, and push a new revision. From a second clean browser session
   restore it, compare opening/forecast results and reference/occurrence counts, then reload and
   re-pull. Check wrong passphrase, invalid/unsupported snapshot or write failure, and a revision
-  conflict. A failed pull must leave the prior local state unchanged; a conflict must not silently
-  overwrite another client's update. Preserve good local data before resolving a conflict. Also hold
-  a Web pull while another tab saves an edit, and verify that the older pull cannot commit over it.
+  conflict. A validation or conflict failure must not change durable local data; a write failure
+  must either verify rollback or identify the saved state as uncertain. Preserve good local data
+  before resolving a conflict. Hold a Web pull while another tab saves an edit, and verify that
+  the older pull cannot commit over it.
+  Exercise a metadata failure followed by an unverified rollback separately. The page must identify
+  that some of the replacement may have been saved, retain an export of the previous ledger, and
+  withhold forecasts after Sync is closed until the user inspects the saved state.
   In a fresh Web profile, confirm a successful push keeps the selected vault ID after reload
   and tell users to keep the ID and passphrase independently of the browser.
 - Test local persistence independently of sync: current tab with network off, online reload without
@@ -95,12 +99,18 @@ cannot explain, or data they can lose without a warning, is a release defect.
   Keep a copy before deliberately discarding drafts or reloading. Do not claim first-ever offline
   load for a hosted browser app.
 - When a validated backup replaces the ledger, existing form drafts must not carry across to the
-  new ledger, even when payment or debt IDs match. Declining to discard a failed draft or failing
-  to save the replacement must leave the draft and the old saved ledger intact.
+  new ledger, even when payment or debt IDs match. Declining to discard a failed draft must leave
+  the draft and the old saved ledger intact. A replacement that cannot be verified must never
+  discard the open draft.
 - With a failed draft open, trigger a real calculation error with a different valid ledger edit
   or a settings error in another tab. No forecast or cached substitute should be shown. Verify
   the edit that did save, the other draft's recoverable values, and recovery from the error
   without replacing either.
+- Save a normal edit in a second tab without writing again from the first. The first tab must not
+  continue showing current cash or forecasts from the older ledger; a failed draft must remain until
+  the user explicitly resolves it. Check that an Advanced settings draft survives an external
+  settings update or defaults recovery. Do not allow a reconciliation adjustment while its checked
+  preview is unavailable.
 - If hosted staging is authorized later, record the exact preview build, isolated database and
   synthetic-only fixture scope (no secrets in the record). Repeat Web ↔ Python, including restart
   and conflict handling. Stop if staging identity or isolation cannot be established. Separately

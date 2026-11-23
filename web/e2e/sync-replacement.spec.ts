@@ -1,5 +1,6 @@
 import { expect, test, type Dialog, type Page } from "@playwright/test";
 import { randomBytes } from "node:crypto";
+import { readFile } from "node:fs/promises";
 
 import { LEDGER_LOCK_NAME } from "../src/lib/persistence";
 import { SAMPLE_LEDGER_STATE, type LedgerState } from "../src/lib/types";
@@ -389,6 +390,300 @@ test.describe("replacement safety", () => {
       }
     });
   }
+});
+
+test.describe("uncertain replacement recovery", () => {
+  test.use({ locale: "en-US", timezoneId: "UTC" });
+
+  test("an unverified rollback keeps the incoming vault bytes and prior export", async ({
+    page,
+    browser,
+  }) => {
+    test.setTimeout(90_000);
+    const SYNC_STORAGE_KEY = "montecarlo_vault_sync_v1";
+
+    await page.goto("/");
+
+    // A genuine previously saved local ledger, written through the ordinary
+    // starter form. It must stay distinct from the incoming vault snapshot.
+    await page.getByRole("button", { name: "Enter my own numbers" }).click();
+    await page.getByLabel("Money you have now ($)").fill("2500");
+    await page.getByRole("button", { name: "Save and show my plan" }).click();
+    await expect(page.getByText(/You have \$2,500\.00 recorded/)).toBeVisible();
+    const priorRaw = await storedRaw(page);
+    expect(priorRaw).not.toBeNull();
+
+    // Keep one real submitted-but-failed draft: the write really reaches storage
+    // once while the lock is held, then fails.
+    await page.getByRole("button", { name: "Money", exact: true }).click();
+    await holdLedgerLock(page);
+    try {
+      await page.getByLabel("Amount ($)", { exact: true }).fill("12.34");
+      await page.getByLabel("Note").fill("Draft to keep");
+      await failNextLedgerWrite(page);
+      await page.getByRole("button", { name: "Record this" }).click();
+      await expect(page.getByText("Saving your ledger change", { exact: true })).toBeVisible();
+      await expect.poll(() => queuedWrites(page)).toBe(1);
+      expect(await storedRaw(page)).toBe(priorRaw);
+    } finally {
+      await releaseLedgerLock(page);
+    }
+    await expect(page.getByText("Saving your ledger change", { exact: true })).toHaveCount(0);
+    await expect(page.getByText("Not saved", { exact: true })).toBeVisible();
+    await expect(page.getByLabel("Amount ($)", { exact: true })).toHaveValue("12.34");
+    await expect(page.getByLabel("Note")).toHaveValue("Draft to keep");
+
+    // The incoming snapshot comes from the real loopback memory vault and WebCrypto,
+    // created by ordinary controls in an isolated profile with its own storage.
+    const origin = new URL(page.url()).origin;
+    const vaultId = uniqueVaultId();
+    const source = await browser.newContext({ baseURL: origin });
+    let incomingExpected: string;
+    try {
+      const sourcePage = await source.newPage();
+      await sourcePage.goto("/");
+      await sourcePage.getByRole("button", { name: "Enter my own numbers" }).click();
+      await sourcePage.getByLabel("Money you have now ($)").fill("7777");
+      await sourcePage.getByRole("button", { name: "Save and show my plan" }).click();
+      await expect(sourcePage.getByText(/You have \$7,777\.00 recorded/)).toBeVisible();
+      await openSync(sourcePage);
+      await fillVaultForm(sourcePage, vaultId);
+      await sourcePage.getByRole("button", { name: "Push (Upload)" }).click();
+      await expect(
+        sourcePage.getByText(
+          /Successfully pushed encrypted snapshot to Cloud Vault \(rev 1\)!/
+        )
+      ).toBeVisible();
+      await closeSync(sourcePage);
+      const sourceRaw = await storedRaw(sourcePage);
+      expect(sourceRaw).not.toBeNull();
+      incomingExpected = sourceRaw as string;
+    } finally {
+      await source.close();
+    }
+
+    // Fail the actual post-ledger vault-id write, then refuse exactly the rollback
+    // to the previous ledger bytes. Storage therefore really keeps the incoming raw.
+    await page.evaluate(
+      ({ ledgerKey, vaultKey, previousRaw }) => {
+        const original = Storage.prototype.setItem;
+        const local = window.localStorage;
+        const harness = window as unknown as {
+          __syncReplacementWrites?: Array<{ key: string; value: string; blocked: boolean }>;
+        };
+        harness.__syncReplacementWrites = [];
+        Storage.prototype.setItem = function (key: string, value: string) {
+          let blocked = false;
+          if (this === local) {
+            if (key === vaultKey) blocked = true;
+            else if (key === ledgerKey && value === previousRaw) blocked = true;
+            harness.__syncReplacementWrites!.push({ key, value, blocked });
+          }
+          if (blocked) {
+            throw new DOMException("Synthetic uncertain rollback", "QuotaExceededError");
+          }
+          return original.call(this, key, value);
+        };
+      },
+      {
+        ledgerKey: LEDGER_STORAGE_KEY,
+        vaultKey: VAULT_ID_STORAGE_KEY,
+        previousRaw: priorRaw,
+      }
+    );
+
+    await openSync(page);
+    await fillVaultForm(page, vaultId);
+    await page.getByRole("button", { name: "Pull (Download)" }).click();
+    // This profile has never synchronized, so the pull must be explicitly confirmed
+    // and discarding the failed draft authorized only if replacement succeeds.
+    await expect(
+      page.getByText(/This device has ledger edits that were never synchronized/)
+    ).toBeVisible();
+    const discard = page.waitForEvent("dialog");
+    await page.getByRole("button", { name: "Replace local ledger with the vault" }).click();
+    await (await discard).accept();
+
+    const uncertain = page
+      .getByRole("dialog")
+      .getByRole("alert")
+      .filter({ hasText: "Vault decrypted, but the saved ledger could not be verified" });
+    await expect(uncertain).toBeVisible();
+    await expect(uncertain).toContainText(/some or all of the change may have persisted/i);
+    await expect(uncertain).toContainText(/close sync to keep a copy/i);
+    await expect(uncertain).not.toContainText(/restore was not persisted/i);
+    await expect(page.getByText(/Successfully pulled/)).toHaveCount(0);
+
+    // New destructive starts are disabled, but the uncertain result stays visible.
+    await expect(page.getByRole("button", { name: "Push (Upload)" })).toBeDisabled();
+    await expect(page.getByRole("button", { name: "Pull (Download)" })).toBeDisabled();
+    await page.getByRole("button", { name: "Local JSON Backup" }).click();
+    await expect(page.locator('input[type="file"]')).toBeDisabled();
+    await page.getByRole("button", { name: "Encrypted vault" }).click();
+    await expect(uncertain).toBeVisible();
+
+    // The incoming raw really is durable; only the rollback was refused.
+    const incomingRaw = await storedRaw(page);
+    expect(incomingRaw).toBe(incomingExpected);
+    expect(incomingRaw).not.toBe(priorRaw);
+    expect(await page.evaluate((key) => localStorage.getItem(key), VAULT_ID_STORAGE_KEY)).toBeNull();
+    expect(await page.evaluate((key) => localStorage.getItem(key), SYNC_STORAGE_KEY)).toBeNull();
+
+    type InjectedWrite = { key: string; value: string; blocked: boolean };
+    const writes = (): Promise<InjectedWrite[]> =>
+      page.evaluate(() => {
+        const harness = window as unknown as {
+          __syncReplacementWrites?: InjectedWrite[];
+        };
+        return harness.__syncReplacementWrites ?? [];
+      });
+    expect(await writes()).toEqual([
+      { key: LEDGER_STORAGE_KEY, value: incomingExpected, blocked: false },
+      { key: VAULT_ID_STORAGE_KEY, value: vaultId, blocked: true },
+      { key: LEDGER_STORAGE_KEY, value: priorRaw, blocked: true },
+    ]);
+
+    await closeSync(page);
+
+    // The parent keeps the uncertain state after closing; the old view is not
+    // presented as a current estimate and the failed draft is retained.
+    await expect(
+      page.getByRole("heading", { name: "Saved ledger could not be verified" })
+    ).toBeVisible();
+    await expect(
+      page.getByRole("alert").filter({ hasText: "Some or all of the last change may have persisted" })
+    ).toBeVisible();
+    const cash = page.getByRole("heading", { name: "What you have", exact: true }).locator("..");
+    await expect(cash.getByText(/The current cash summary is unavailable/)).toBeVisible();
+    await expect(cash.getByText(/\$2,500\.00/)).toHaveCount(0);
+    await expect(cash.getByText(/\$7,777\.00/)).toHaveCount(0);
+    await expect(page.getByText(/Safe to spend/)).toHaveCount(0);
+    await expect(page.getByText(/Successfully pulled/)).toHaveCount(0);
+    await expect(page.getByLabel("Amount ($)", { exact: true })).toHaveValue("12.34");
+    await expect(page.getByLabel("Note")).toHaveValue("Draft to keep");
+    await expect(page.getByText("Not saved", { exact: true })).toBeVisible();
+
+    // The offered export is the exact previous non-null raw bytes, not the bytes
+    // this failed replacement left behind.
+    const downloadPromise = page.waitForEvent("download");
+    await page.getByRole("button", { name: "Export previous ledger" }).click();
+    const download = await downloadPromise;
+    const downloadedPath = await download.path();
+    expect(downloadedPath).not.toBeNull();
+    const exported = await readFile(downloadedPath as string, "utf8");
+    expect(exported).toBe(priorRaw);
+    expect(exported).not.toBe(incomingRaw);
+    expect(download.suggestedFilename()).toMatch(/previous/);
+    // Reading/exporting the previous bytes itself must not touch storage.
+    expect((await writes()).length).toBe(3);
+
+    // Sticky uncertainty: a focus/storage freshness check must not retract the
+    // banner or write anything while the tab still holds the older view.
+    const writeCount = (await writes()).length;
+    await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+    await expect(
+      page.getByRole("heading", { name: "Saved ledger could not be verified" })
+    ).toBeVisible();
+    await expect(
+      page.getByRole("alert").filter({ hasText: "Some or all of the last change may have persisted" })
+    ).toBeVisible();
+    expect(await storedRaw(page)).toBe(incomingRaw);
+    expect((await writes()).length).toBe(writeCount);
+
+    // Retrying an ordinary edit cannot touch this uncertain store. A native
+    // close/reload is guarded as well, while this tab retains the previous copy.
+    await page.getByRole("button", { name: "Record this" }).click();
+    await expect(page.getByLabel("Note")).toHaveValue("Draft to keep");
+    expect((await writes()).length).toBe(writeCount);
+    expect(await page.evaluate(() => {
+      const event = new Event("beforeunload", { cancelable: true });
+      window.dispatchEvent(event);
+      return event.defaultPrevented;
+    })).toBe(true);
+
+    const reload = page.getByRole("button", { name: "Reload saved ledger" });
+    const [declined] = await Promise.all([
+      page.waitForEvent("dialog", { timeout: 5_000 }).then(async (dialog) => {
+        const message = dialog.message();
+        await dialog.dismiss();
+        return message;
+      }),
+      reload.click(),
+    ]);
+    expect(declined).toMatch(/export the previous ledger.*copy any drafts/i);
+    await expect(page.getByLabel("Note")).toHaveValue("Draft to keep");
+
+    await Promise.all([
+      page.waitForEvent("dialog", { timeout: 5_000 }).then((dialog) => dialog.accept()),
+      reload.click(),
+    ]);
+    await expect(page.getByRole("heading", { name: "Saved ledger could not be verified" })).toHaveCount(0);
+    await expect(cash.getByText("$7,777.00", { exact: true })).toBeVisible();
+    await expect(page.getByLabel("Note")).toHaveValue("");
+    expect(await storedRaw(page)).toBe(incomingRaw);
+  });
+
+  test("an uncertain import is not reported as an unchanged ledger", async ({ page }) => {
+    await page.goto("/");
+    await page.getByRole("button", { name: "Enter my own numbers" }).click();
+    await page.getByLabel("Money you have now ($)").fill("2500");
+    await page.getByRole("button", { name: "Save and show my plan" }).click();
+    await expect(page.getByText(/You have \$2,500\.00 recorded/)).toBeVisible();
+    const priorRaw = await storedRaw(page);
+    expect(priorRaw).not.toBeNull();
+
+    const incoming = validImportState();
+    // A real import writes the ledger, then fails verification. The rollback to the
+    // exact previous bytes is refused, so the incoming value stays durable.
+    await page.evaluate(
+      ({ ledgerKey, previousRaw }) => {
+        const originalSet = Storage.prototype.setItem;
+        const originalGet = Storage.prototype.getItem;
+        const local = window.localStorage;
+        let mismatchNextRead = false;
+        Storage.prototype.setItem = function (key: string, value: string) {
+          if (this === local && key === ledgerKey) {
+            if (value === previousRaw) {
+              throw new DOMException("Synthetic rollback refusal", "QuotaExceededError");
+            }
+            originalSet.call(this, key, value);
+            mismatchNextRead = true;
+            return;
+          }
+          originalSet.call(this, key, value);
+        };
+        Storage.prototype.getItem = function (key: string) {
+          if (this === local && key === ledgerKey && mismatchNextRead) {
+            mismatchNextRead = false;
+            return "synthetic verification mismatch";
+          }
+          return originalGet.call(this, key);
+        };
+      },
+      { ledgerKey: LEDGER_STORAGE_KEY, previousRaw: priorRaw }
+    );
+
+    await openImportTab(page);
+    await page.locator('input[type="file"]').setInputFiles({
+      name: "uncertain-import.json",
+      mimeType: "application/json",
+      buffer: Buffer.from(JSON.stringify(incoming)),
+    });
+
+    const uncertain = page
+      .getByRole("dialog")
+      .getByRole("alert")
+      .filter({ hasText: "Import result is uncertain." });
+    await expect(uncertain).toBeVisible();
+    await expect(uncertain).toContainText(/some or all of the change may have persisted/i);
+    await expect(uncertain).not.toContainText(/current ledger is unchanged/i);
+    await expect(uncertain).not.toContainText(/Import could not be saved/i);
+    await expect(page.getByText(/Successfully imported/)).toHaveCount(0);
+    const stored = await storedRaw(page);
+    expect(stored).not.toBe(priorRaw);
+    expect(JSON.parse(stored ?? "null").updated_at).toBe(incoming.updated_at);
+    await expect(page.locator('input[type="file"]')).toBeDisabled();
+  });
 });
 
 test.describe("snapshot-local identity reuse", () => {

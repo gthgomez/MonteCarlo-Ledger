@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AdvancedView } from "@/components/AdvancedView";
 import { BillsView } from "@/components/BillsView";
 import { BudgetView } from "@/components/BudgetView";
@@ -53,16 +53,17 @@ const BUSY_SAVE_MESSAGE =
   "Another ledger change is still being saved. Wait for it to finish before trying again. Nothing was saved by this attempt.";
 
 const HOME_ONBOARDING_DRAFT_KEY = "home:onboarding";
+const ADVANCED_SETTINGS_DRAFT_KEY = "advanced:assumptions";
 
 /**
  * A failed save leaves its submitted values in the form's component state.
  * Section navigation unmounts that state, so leaving must be an explicit choice.
  */
 const UNSAVED_DRAFT_LEAVE_MESSAGE =
-  "A ledger change here was not saved. If you leave this section now, the unsaved draft and any values you typed will be discarded. Choose Cancel to stay and keep the draft. Reloading also discards it.";
+  "A change here was not saved. If you leave this section now, the unsaved draft and any values you typed will be discarded. Choose Cancel to stay and keep the draft. Reloading also discards it.";
 
 const UNSAVED_DRAFT_RELOAD_MESSAGE =
-  "Reloading discards your unsaved ledger draft. Choose Cancel to stay and keep it.";
+  "Reloading discards any open drafts. Choose Cancel to stay and copy your draft first.";
 
 /**
  * A replacement is authorized against a durable snapshot, not against the
@@ -70,7 +71,7 @@ const UNSAVED_DRAFT_RELOAD_MESSAGE =
  * so replacing the ledger must be an explicit decision to drop it.
  */
 const REPLACEMENT_DISCARD_DRAFT_MESSAGE =
-  "A ledger change here was not saved. A successful replacement will discard the unsaved draft. Choose OK to continue with replacement, or Cancel to keep the draft and stop.";
+  "A change here was not saved. A successful replacement will discard the unsaved draft. Choose OK to continue with replacement, or Cancel to keep the draft and stop.";
 
 const REPLACEMENT_CANCELLED_MESSAGE =
   "Replacement cancelled to keep an unsaved form draft. Nothing was saved. Close Sync to keep or copy the draft before trying again.";
@@ -78,7 +79,12 @@ const REPLACEMENT_CANCELLED_MESSAGE =
 const DEMO_RESET_MESSAGE =
   "Replace this ledger with the sample demo data? Your local changes and any unsaved values typed into a form will be discarded.";
 
-function warnBeforeLeavingWithLedgerSave(event: BeforeUnloadEvent) {
+const LEDGER_RECOVERY_REQUIRED =
+  "The last write could not be verified. Keep a copy of the previous ledger and inspect what is saved before retrying.";
+
+type LedgerFreshness = "current" | "changed" | "unreadable" | "indeterminate";
+
+function warnBeforeLeavingWithUnverifiedLedger(event: BeforeUnloadEvent) {
   event.preventDefault();
   event.returnValue = "";
 }
@@ -100,6 +106,11 @@ export default function Home() {
   const [assumptionsWarning, setAssumptionsWarning] = useState<string | null>(null);
   const [assumptionsRaw, setAssumptionsRaw] = useState<string | null>(null);
   const [storedRaw, setStoredRaw] = useState<string | null>(null);
+  // Storage events and the write completion handler need the latest adopted
+  // snapshot even before React renders the corresponding state.
+  const displayedRawRef = useRef<string | null>(null);
+  const [ledgerFreshness, setLedgerFreshness] = useState<LedgerFreshness>("current");
+  const rollbackUnverifiedRef = useRef(false);
   const [isLoaded, setIsLoaded] = useState(false);
   const [isSyncModalOpen, setIsSyncModalOpen] = useState(false);
   const [currentVaultId, setCurrentVaultId] = useState<string | undefined>();
@@ -118,10 +129,10 @@ export default function Home() {
   // real persistence failure and removed by that same form's next success.
   const failedDraftKeysRef = useRef<Set<string>>(new Set());
 
-  // The listener lives only while a ledger write is actually outstanding. It is
-  // removed on success, conflict, cancellation, or storage failure.
+  // Guard native close/reload while a write is outstanding, or afterward if
+  // this tab may hold the only copy of the pre-write ledger.
   useEffect(() => {
-    return () => window.removeEventListener("beforeunload", warnBeforeLeavingWithLedgerSave);
+    return () => window.removeEventListener("beforeunload", warnBeforeLeavingWithUnverifiedLedger);
   }, []);
 
   useEffect(() => {
@@ -142,6 +153,7 @@ export default function Home() {
     try {
       const saved = localStorage.getItem(LEDGER_STORAGE_KEY);
       if (saved !== null) {
+        displayedRawRef.current = saved;
         setStoredRaw(saved);
         let parsed: unknown;
         try {
@@ -179,6 +191,42 @@ export default function Home() {
     if (fromHash) setSection(fromHash);
     setIsLoaded(true);
   }, []);
+
+  const refreshLedgerFreshness = useCallback(() => {
+    // Rereading matching ledger bytes alone cannot verify vault metadata or a
+    // failed rollback. Keep the prior snapshot available until explicit reload.
+    if (rollbackUnverifiedRef.current) return;
+    try {
+      const storage = browserStorage();
+      if (!storage) throw new Error("Browser storage unavailable");
+      const durable = storage.getItem(LEDGER_STORAGE_KEY);
+      setLedgerFreshness(durable === displayedRawRef.current ? "current" : "changed");
+    } catch {
+      setLedgerFreshness("unreadable");
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!isLoaded || loadError) return;
+    function receiveLedger(event: StorageEvent) {
+      if (event.key === LEDGER_STORAGE_KEY || event.key === null) refreshLedgerFreshness();
+    }
+    function onVisible() {
+      if (document.visibilityState === "visible") refreshLedgerFreshness();
+    }
+    // Check the actual durable bytes, not a possibly delayed event payload.
+    window.addEventListener("storage", receiveLedger);
+    window.addEventListener("focus", refreshLedgerFreshness);
+    window.addEventListener("pageshow", refreshLedgerFreshness);
+    document.addEventListener("visibilitychange", onVisible);
+    refreshLedgerFreshness();
+    return () => {
+      window.removeEventListener("storage", receiveLedger);
+      window.removeEventListener("focus", refreshLedgerFreshness);
+      window.removeEventListener("pageshow", refreshLedgerFreshness);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, [isLoaded, loadError, refreshLedgerFreshness]);
 
   useEffect(() => {
     function receiveAssumptions(event: StorageEvent) {
@@ -220,8 +268,8 @@ export default function Home() {
   const asOf = useFinancialDate();
 
   const evaluation = useMemo(
-    () => assumptionsError ? null : evaluateLedger(state, asOf, assumptions),
-    [state, asOf, assumptions, assumptionsError]
+    () => assumptionsError || ledgerFreshness !== "current" ? null : evaluateLedger(state, asOf, assumptions),
+    [state, asOf, assumptions, assumptionsError, ledgerFreshness]
   );
 
   function recordDraftOutcome(draftKey: string | undefined, failed: boolean) {
@@ -267,13 +315,22 @@ export default function Home() {
     window.history.replaceState(null, "", url);
   }
 
+  function reloadLedger() {
+    if (writeInFlightRef.current) return;
+    const warning = rollbackUnverifiedRef.current
+      ? "Reloading discards the previous ledger and open drafts held by this tab. Export the previous ledger and copy any drafts first. Reload and inspect the saved ledger anyway?"
+      : ledgerFreshness !== "current" || failedDraftKeysRef.current.size > 0
+        ? UNSAVED_DRAFT_RELOAD_MESSAGE
+        : null;
+    if (warning && !window.confirm(warning)) return;
+    // The explicit recovery confirmation already covers the loss of this copy.
+    window.removeEventListener("beforeunload", warnBeforeLeavingWithUnverifiedLedger);
+    window.location.reload();
+  }
+
   function retryPage(event: React.MouseEvent<HTMLAnchorElement>) {
-    if (
-      writeInFlightRef.current ||
-      (failedDraftKeysRef.current.size > 0 && !window.confirm(UNSAVED_DRAFT_RELOAD_MESSAGE))
-    ) {
-      event.preventDefault();
-    }
+    event.preventDefault();
+    reloadLedger();
   }
 
   function toggleTheme() {
@@ -288,7 +345,9 @@ export default function Home() {
   }
 
   function showSavedLedger(nextState: LedgerState, demo = false) {
-    setStoredRaw(JSON.stringify(nextState));
+    const raw = JSON.stringify(nextState);
+    displayedRawRef.current = raw;
+    setStoredRaw(raw);
     setState(nextState);
     setUsingDemo(demo);
     setSaveWarning(null);
@@ -305,16 +364,26 @@ export default function Home() {
   async function runLedgerWrite(
     operation: () => Promise<PersistenceResult>
   ): Promise<PersistenceResult> {
+    if (rollbackUnverifiedRef.current) return { ok: false, error: LEDGER_RECOVERY_REQUIRED };
     if (writeInFlightRef.current) {
       return { ok: false, error: BUSY_SAVE_MESSAGE };
     }
     writeInFlightRef.current = true;
     setIsSaving(true);
-    window.addEventListener("beforeunload", warnBeforeLeavingWithLedgerSave);
+    window.addEventListener("beforeunload", warnBeforeLeavingWithUnverifiedLedger);
     try {
-      return await operation();
+      const result = await operation();
+      if (!result.ok && result.indeterminate) {
+        rollbackUnverifiedRef.current = true;
+        setLedgerFreshness("indeterminate");
+      } else {
+        refreshLedgerFreshness();
+      }
+      return result;
     } finally {
-      window.removeEventListener("beforeunload", warnBeforeLeavingWithLedgerSave);
+      if (!rollbackUnverifiedRef.current) {
+        window.removeEventListener("beforeunload", warnBeforeLeavingWithUnverifiedLedger);
+      }
       writeInFlightRef.current = false;
       setIsSaving(false);
     }
@@ -327,13 +396,16 @@ export default function Home() {
       if (result.ok) showSavedLedger(nextState);
       return result;
     });
-    if (!saved.ok) setSaveWarning(`${saved.error} Keep a copy of any unsaved details before reloading.`);
+    if (!saved.ok && !saved.indeterminate) {
+      setSaveWarning(`${saved.error} Keep a copy of any unsaved details before reloading.`);
+    }
     return saved;
   }
 
   async function handleApplyState(nextState: LedgerState, options: LedgerChangeOptions): Promise<PersistenceResult> {
     // Refuse before taking the lock: a declined discard must not queue a write
     // that could replace the ledger the person chose to keep their draft for.
+    if (rollbackUnverifiedRef.current) return { ok: false, error: LEDGER_RECOVERY_REQUIRED };
     if (writeInFlightRef.current) return { ok: false, error: BUSY_SAVE_MESSAGE };
     if (failedDraftKeysRef.current.size > 0 && !window.confirm(REPLACEMENT_DISCARD_DRAFT_MESSAGE)) {
       return { ok: false, error: REPLACEMENT_CANCELLED_MESSAGE };
@@ -362,6 +434,10 @@ export default function Home() {
   }
 
   async function handleResetDemo() {
+    if (rollbackUnverifiedRef.current) {
+      setSaveWarning(LEDGER_RECOVERY_REQUIRED);
+      return;
+    }
     if (writeInFlightRef.current) {
       setSaveWarning(BUSY_SAVE_MESSAGE);
       return;
@@ -372,7 +448,7 @@ export default function Home() {
       if (result.ok) {
         showReplacedLedger(SAMPLE_LEDGER_STATE, true);
         setLoadError(null);
-      } else {
+      } else if (!result.indeterminate) {
         setSaveWarning(result.error);
       }
       return result;
@@ -380,10 +456,13 @@ export default function Home() {
   }
 
   function handleExportJson() {
-    const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(state, null, 2));
+    const previous = ledgerFreshness !== "current";
+    const serialized = previous ? displayedRawRef.current : JSON.stringify(state, null, 2);
+    if (serialized === null) return;
+    const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(serialized);
     const downloadAnchor = document.createElement("a");
     downloadAnchor.setAttribute("href", dataStr);
-    downloadAnchor.setAttribute("download", `montecarlo-ledger-${asOf}.json`);
+    downloadAnchor.setAttribute("download", `montecarlo-ledger${previous ? "-previous" : ""}-${asOf}.json`);
     document.body.appendChild(downloadAnchor);
     downloadAnchor.click();
     downloadAnchor.remove();
@@ -433,54 +512,89 @@ export default function Home() {
     );
   }
 
+  // Keep form and export access without treating this tab's previous copy as
+  // current. Only a verified matching ledger is evaluated for forecasts.
+  const ledgerProblem = ledgerFreshness === "current" ? null : (
+    <section className="space-y-3 rounded-2xl border border-warning bg-warning-soft p-4">
+      <h1 className="text-lg font-semibold">
+        {ledgerFreshness === "indeterminate"
+          ? "Saved ledger could not be verified"
+          : ledgerFreshness === "changed"
+            ? "Saved ledger changed"
+            : "Saved ledger could not be read"}
+      </h1>
+      <p role="alert" className="text-sm">
+        {ledgerFreshness === "indeterminate"
+          ? "Some or all of the last change may have persisted. Forecasts, ledger writes, and Sync are paused in this tab."
+          : "This tab can no longer verify that its ledger is current. Forecasts are paused; edits based on the previous copy cannot overwrite newer saved data."}
+      </p>
+      <p className="text-sm text-muted">
+        {!loadError && "Entries shown below are from the previous view. "}
+        Copy any open drafts before reloading to inspect what is saved.
+        {storedRaw !== null ? " Export the previous ledger first and keep the unencrypted copy private." : " This tab has no previous saved ledger to export."}
+      </p>
+      <div className="flex flex-wrap gap-2">
+        {storedRaw !== null && (
+          <button type="button" onClick={handleExportJson} className="inline-flex min-h-11 items-center rounded-lg border border-line bg-surface px-3 text-sm font-semibold">
+            Export previous ledger
+          </button>
+        )}
+        <button type="button" disabled={isSaving} onClick={reloadLedger} className="inline-flex min-h-11 items-center rounded-lg border border-line bg-surface px-3 text-sm font-semibold">
+          Reload saved ledger
+        </button>
+      </div>
+    </section>
+  );
+
   if (loadError) {
     return (
       <div className="flex min-h-screen items-center justify-center bg-canvas p-6 text-ink">
         <div className="w-full max-w-xl space-y-4 rounded-2xl border border-warning bg-warning-soft p-6">
           <h1 className="text-lg font-semibold">Saved Ledger Not Loaded</h1>
           <p className="text-sm">{loadError}</p>
-          <p className="text-sm text-muted">
-            No forecast is shown because the stored financial data could not be validated. The raw data has not been
-            deleted or replaced.
-          </p>
           {savingNotice}
-          {saveWarning && <Notice tone="warning" title="Not saved">{saveWarning}</Notice>}
-          <div className="flex flex-wrap gap-3">
-            {storedRaw && (
-              <a
-                href={"data:text/json;charset=utf-8," + encodeURIComponent(storedRaw)}
-                download="montecarlo-ledger-recovery.json"
-                className="inline-flex min-h-11 items-center rounded-lg border border-line bg-surface px-3 text-sm font-semibold"
-              >
-                Download raw data
-              </a>
-            )}
-            <button
-              type="button"
-              onClick={handleResetDemo}
-              className="inline-flex min-h-11 items-center rounded-lg bg-accent px-3 text-sm font-semibold text-on-accent"
-            >
-              Replace with sample data (explicit)
-            </button>
-            <a href="/" className="inline-flex min-h-11 items-center rounded-lg border border-line bg-surface px-3 text-sm font-semibold">
-              Retry
-            </a>
-          </div>
+          {ledgerFreshness === "indeterminate" ? ledgerProblem : (
+            <>
+              <p className="text-sm text-muted">
+                No forecast is shown because the stored financial data could not be validated. The app did not replace the data while loading.
+              </p>
+              {saveWarning && <Notice tone="warning" title="Not saved">{saveWarning}</Notice>}
+              <div className="flex flex-wrap gap-3">
+                {storedRaw !== null && (
+                  <a
+                    href={"data:text/json;charset=utf-8," + encodeURIComponent(storedRaw)}
+                    download="montecarlo-ledger-recovery.json"
+                    className="inline-flex min-h-11 items-center rounded-lg border border-line bg-surface px-3 text-sm font-semibold"
+                  >
+                    Download raw data
+                  </a>
+                )}
+                <button
+                  type="button"
+                  disabled={isSaving}
+                  onClick={handleResetDemo}
+                  className="inline-flex min-h-11 items-center rounded-lg bg-accent px-3 text-sm font-semibold text-on-accent"
+                >
+                  Replace with sample data (explicit)
+                </button>
+                <a href="/" onClick={retryPage} className="inline-flex min-h-11 items-center rounded-lg border border-line bg-surface px-3 text-sm font-semibold">
+                  Retry
+                </a>
+              </div>
+            </>
+          )}
         </div>
       </div>
     );
   }
 
-  // A model or settings problem does not make the validated ledger or its
-  // open editors unusable. Keep those panes mounted; only forecast output
-  // depends on a successful evaluation.
   const forecastProblem = assumptionsError ? (
     <section className="space-y-4 rounded-2xl border border-warning bg-warning-soft p-6">
       <h1 className="text-lg font-semibold">Financial Settings Not Loaded</h1>
       <p className="text-sm" role="alert">{assumptionsError}</p>
       <p className="text-sm text-muted">
-        Your ledger is still saved on this device. No forecast is shown until the settings are repaired or you
-        choose the defaults. Choosing defaults keeps your ledger and open drafts.
+        Repair the settings or choose the defaults to make them available for forecasts again. Choosing defaults
+        does not change your ledger or discard open drafts.
       </p>
       {assumptionsRaw && (
         <a
@@ -629,7 +743,7 @@ export default function Home() {
         vaultId={currentVaultId}
         onOpenSync={openSync}
         onResetDemo={handleResetDemo}
-        onExportJson={handleExportJson}
+        onExportJson={ledgerFreshness === "current" ? handleExportJson : undefined}
         section={section}
         onNavigate={navigate}
         isSaving={isSaving}
@@ -639,6 +753,7 @@ export default function Home() {
         {savingNotice}
         {saveWarning && <Notice tone="warning" title="Not saved">{saveWarning}</Notice>}
         {!assumptionsError && assumptionsWarning && <Notice tone="warning" title="Financial settings">{assumptionsWarning}</Notice>}
+        {ledgerProblem}
         {forecastProblem}
         {isForecastSection && guidanceIssue && (
           <Notice tone="warning" title="Not enough information to suggest spending">{guidanceIssue}</Notice>
@@ -714,7 +829,14 @@ export default function Home() {
             <FutureView asOf={asOf} outcome={forecast.outcome} rows={forecast.rows} showGuidance={showGuidance} assumptionsChanged={assumptionsChanged} />
           )}
           {section === "advanced" && (
-            <AdvancedView assumptions={assumptions} outcome={forecast?.outcome ?? null} asOf={asOf} showGuidance={showGuidance} onApply={handleApplyAssumptions} />
+            <AdvancedView
+              assumptions={assumptions}
+              outcome={forecast?.outcome ?? null}
+              asOf={asOf}
+              showGuidance={showGuidance}
+              onApply={handleApplyAssumptions}
+              onDraftOutcome={(failed) => recordDraftOutcome(ADVANCED_SETTINGS_DRAFT_KEY, failed)}
+            />
           )}
         </React.Fragment>
       </main>
@@ -723,6 +845,7 @@ export default function Home() {
       </footer>
       <SyncModal
         isOpen={isSyncModalOpen}
+        recoveryRequired={ledgerFreshness === "indeterminate"}
         onClose={() => setIsSyncModalOpen(false)}
         currentState={state}
         currentStoredRaw={storedRaw}

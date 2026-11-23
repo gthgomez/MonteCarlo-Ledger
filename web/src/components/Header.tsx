@@ -10,7 +10,7 @@ interface HeaderProps {
   vaultId?: string;
   onOpenSync: () => void;
   onResetDemo: () => void;
-  onExportJson: () => void;
+  onExportJson?: () => void;
   section: Section;
   onNavigate: (section: Section) => void;
   /** A ledger write is pending; navigation and replacement stay disabled until it settles. */
@@ -48,13 +48,15 @@ export function Header({
           >
             Sync
           </button>
-          <button
-            type="button"
-            onClick={onExportJson}
-            className="inline-flex min-h-11 items-center rounded-lg border border-line bg-inset px-3 text-sm font-semibold text-ink"
-          >
-            Export
-          </button>
+          {onExportJson && (
+            <button
+              type="button"
+              onClick={onExportJson}
+              className="inline-flex min-h-11 items-center rounded-lg border border-line bg-inset px-3 text-sm font-semibold text-ink"
+            >
+              Export
+            </button>
+          )}
           <button
             type="button"
             onClick={onResetDemo}

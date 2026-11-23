@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { formatDateLabel } from "@/lib/dates";
 import {
   addIncomeSchedule,
@@ -15,6 +15,9 @@ import { cashMinusEnteredDebt, enteredDebtCents, transactionSumCents } from "@/l
 import { type PersistenceResult } from "@/lib/sync-state";
 import { type IncomeItem, type LedgerState } from "@/lib/types";
 import { Button, Explain, fieldClass, Notice, Panel } from "./ui";
+
+const RECONCILE_UNAVAILABLE_MESSAGE =
+  "Reconcile was not submitted because the current cash summary and adjustment preview are unavailable.";
 
 export function MoneyView({
   state,
@@ -61,16 +64,26 @@ export function MoneyView({
   const net = startingBalanceCents === null ? null : cashMinusEnteredDebt(startingBalanceCents, state.liabilities);
   const futureCount = state.transactions.filter((tx) => tx.date > asOf).length;
   const reconcileCents = reconcile.trim() === "" ? null : dollarsToCents(Number(reconcile));
-  // A pending/failed reconcile must preview the date it actually submitted. Use
-  // the same eligible-row rule as reconcileBalance instead of a second formula.
+  // A pending/failed reconcile keeps its original date, but a pin never makes
+  // an unavailable or stale cash summary a valid basis for a preview.
   const reconcileBaseCents =
-    pinnedReconcileDate === null
+    startingBalanceCents === null || pinnedReconcileDate === null
       ? startingBalanceCents
       : transactionSumCents(state.transactions.filter((tx) => tx.date <= pinnedReconcileDate));
   const reconcileDiff =
     reconcileCents === null || reconcileBaseCents === null
       ? null
       : reconcileCents - reconcileBaseCents;
+  // Reconciliation changes the ledger by the difference between the typed
+  // balance and the checked cash basis. Without a forecast/current balance there
+  // is no verified basis, so the adjustment preview and submission are withheld.
+  const reconcilePreviewUnavailable = reconcileBaseCents === null;
+
+  useEffect(() => {
+    if (!reconcilePreviewUnavailable) {
+      setReconcileError((current) => (current === RECONCILE_UNAVAILABLE_MESSAGE ? null : current));
+    }
+  }, [reconcilePreviewUnavailable]);
 
   async function submitRecord(event: React.FormEvent) {
     event.preventDefault();
@@ -143,6 +156,12 @@ export function MoneyView({
 
   async function submitReconcile(event: React.FormEvent) {
     event.preventDefault();
+    if (reconcilePreviewUnavailable) {
+      // A difference computed from an unavailable basis could silently restore
+      // a stale balance. Refuse before parsing or building any write.
+      setReconcileError(RECONCILE_UNAVAILABLE_MESSAGE);
+      return;
+    }
     if (reconcileCents === null) {
       setReconcileError("Enter the balance you see, in dollars.");
       return;
@@ -177,11 +196,12 @@ export function MoneyView({
         {startingBalanceCents !== null && (
           <p className="text-3xl font-semibold tabular-nums">{formatMoney(startingBalanceCents)}</p>
         )}
-        {matches ? (
+        {matches && startingBalanceCents !== null && (
           <p className="mt-2 text-sm text-muted">
             The ledger total of {formatMoney(state.current_balance_cents)} matches {state.transactions.length} recorded {state.transactions.length === 1 ? "transaction" : "transactions"}.
           </p>
-        ) : (
+        )}
+        {!matches && (
           <div className="mt-3">
             <Notice tone="danger" title="The balance and the transactions disagree">
               Recorded balance {formatMoney(state.current_balance_cents)}. Transaction sum{" "}
@@ -344,21 +364,37 @@ export function MoneyView({
         lede="If the cash you can actually use is different from this ledger, enter that balance. An adjustment is added so the transactions still add up. This does not contact a bank."
       >
         <form onSubmit={submitReconcile} className="max-w-md space-y-3">
+          {reconcilePreviewUnavailable && (
+            <Notice tone="warning" title="Balance match unavailable">
+              The current cash summary could not be checked, so no adjustment preview can be shown. Reconciliation is
+              disabled and your typed balance and date are kept. Nothing is submitted.
+            </Notice>
+          )}
           <label className="block text-sm font-medium">
             Balance you want recorded ($)
-            <input className={`${fieldClass} mt-1`} inputMode="decimal" value={reconcile} required onChange={(e) => setReconcile(e.target.value)} />
+            <input
+              className={`${fieldClass} mt-1`}
+              inputMode="decimal"
+              value={reconcile}
+              required
+              readOnly={reconcilePreviewUnavailable}
+              onChange={(e) => setReconcile(e.target.value)}
+            />
           </label>
-          {reconcileDiff !== null && reconcileDiff !== 0 && (
+          {reconcileDiff !== null && reconcileDiff !== 0 && Number.isSafeInteger(reconcileDiff) && (
             <p className="text-sm text-muted">
               This will add an adjustment of {formatMoney(reconcileDiff)} dated {formatDateLabel(reconcileDate)}.
             </p>
+          )}
+          {reconcileDiff === 0 && (
+            <p className="text-sm text-muted">This already matches the recorded balance. No adjustment will be added.</p>
           )}
           {reconcileError && (
             <p className="text-sm text-danger" role="alert">
               {reconcileError}
             </p>
           )}
-          <Button type="submit">Reconcile Ledger</Button>
+          <Button type="submit" disabled={reconcilePreviewUnavailable}>Reconcile Ledger</Button>
         </form>
       </Panel>
     </fieldset>

@@ -64,7 +64,9 @@ function restore(storage: SyncStorage, key: string, value: string | null): boole
  *
  * The ledger, vault id and synchronization ancestry are written in order. If any
  * write fails (quota, blocked storage), restore the previous values before reporting
- * failure. If the rollback cannot be verified, tell the user to check before retrying.
+ * failure. If the rollback cannot be verified, the result is marked indeterminate:
+ * some or all of the change may have persisted, so the caller must keep the prior
+ * view available until the user retains a copy and checks storage.
  *
  * This function performs no cross-tab check; callers that can replace a ledger
  * should use {@link saveLedgerChange}, which performs the check under a lock.
@@ -114,11 +116,18 @@ export function applyLedgerBundle(
       if (!restore(storage, key, value)) restored = false;
     }
     const detail = err instanceof Error ? err.message : "storage failure";
+    if (restored) {
+      return {
+        ok: false,
+        error: `The ledger change failed (${detail}). The previous saved data is intact.`,
+      };
+    }
     return {
       ok: false,
-      error: `The ledger change failed (${detail}). ${restored
-        ? "The previous saved data is intact."
-        : "The previous saved data could not be verified. Reload and inspect it before retrying."}`,
+      error:
+        `The ledger change failed (${detail}). The previous saved data could not be verified, ` +
+        "and some or all of the change may have persisted.",
+      indeterminate: true,
     };
   }
 }

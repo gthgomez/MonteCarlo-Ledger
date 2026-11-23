@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useEffect, useState } from "react";
+import React, { useState } from "react";
 import {
   assumptionError,
   DEFAULT_ASSUMPTIONS,
@@ -31,28 +31,41 @@ function draftFrom(assumptions: Assumptions) {
   };
 }
 
+type SettingsDraft = ReturnType<typeof draftFrom>;
+type SettingsDraftKey = keyof SettingsDraft;
+
 export function AdvancedView({
   assumptions,
   outcome,
   asOf,
   showGuidance,
   onApply,
+  onDraftOutcome,
 }: {
   assumptions: Assumptions;
   outcome: ModelOutcome | null;
   asOf: string;
   showGuidance: boolean;
   onApply: (next: Assumptions) => string | null;
+  onDraftOutcome: (failed: boolean) => void;
 }) {
-  const [draft, setDraft] = useState(() => draftFrom(assumptions));
+  // Only fields this tab has edited are kept locally. Every other field follows
+  // the applied assumptions, including a valid update from another tab or the
+  // global settings recovery button. This prevents an applied refresh from
+  // overwriting a typed or failed value without freezing the whole form.
+  const [overrides, setOverrides] = useState<Partial<SettingsDraft>>({});
   const [error, setError] = useState<string | null>(null);
+  const applied = draftFrom(assumptions);
+  const draft: SettingsDraft = { ...applied, ...overrides };
+  const hasDraft = Object.keys(overrides).length > 0;
 
-  useEffect(() => {
-    setDraft(draftFrom(assumptions));
-  }, [assumptions]);
-
-  function set<K extends keyof typeof draft>(key: K, value: string) {
-    setDraft((current) => ({ ...current, [key]: value }));
+  function set<K extends SettingsDraftKey>(key: K, value: string) {
+    setOverrides((current) => {
+      const next = { ...current };
+      if (value === applied[key]) delete next[key];
+      else next[key] = value;
+      return next;
+    });
   }
 
   function apply(event: React.FormEvent) {
@@ -88,7 +101,39 @@ export function AdvancedView({
       return;
     }
     const persistenceError = onApply(next);
-    setError(persistenceError);
+    if (persistenceError) {
+      setError(persistenceError);
+      onDraftOutcome(true);
+      return;
+    }
+    setError(null);
+    setOverrides({});
+    onDraftOutcome(false);
+  }
+
+  function useDefaults() {
+    if (hasDraft && !window.confirm(
+      "If the defaults are saved, this discards the unsaved settings values you changed here. Continue?"
+    )) {
+      return;
+    }
+    const persistenceError = onApply(DEFAULT_ASSUMPTIONS);
+    if (persistenceError) {
+      setError(persistenceError);
+      onDraftOutcome(true);
+      return;
+    }
+    setError(null);
+    setOverrides({});
+    onDraftOutcome(false);
+  }
+
+  function discardDraft() {
+    // Explicit discard returns the form to the applied settings. It does not
+    // write, and it releases this form's failed-draft marker.
+    setOverrides({});
+    setError(null);
+    onDraftOutcome(false);
   }
 
   return (
@@ -161,19 +206,23 @@ export function AdvancedView({
           )}
           <div className="flex flex-wrap gap-2 sm:col-span-2">
             <Button type="submit">Update results</Button>
-            <Button
-              type="button"
-              variant="quiet"
-              onClick={() => {
-                const persistenceError = onApply(DEFAULT_ASSUMPTIONS);
-                setError(persistenceError);
-                if (!persistenceError) setDraft(draftFrom(DEFAULT_ASSUMPTIONS));
-              }}
-            >
+            <Button type="button" variant="quiet" onClick={useDefaults}>
               Use the default assumptions
             </Button>
+            {(hasDraft || error) && (
+              <Button type="button" variant="quiet" onClick={discardDraft}>
+                Discard settings draft
+              </Button>
+            )}
           </div>
         </form>
+        <p className={`mt-3 text-sm ${hasDraft ? "font-medium text-ink" : "text-muted"}`} role="status">
+          {hasDraft
+            ? "Unsaved settings: the values you changed here are not applied yet."
+            : outcome
+              ? "These fields match the applied settings used by results."
+              : "No forecast is using these settings right now."}
+        </p>
         <p className="mt-3 text-sm text-muted">
           This screen limits modeled futures to {UI_MAX_RUNS} so the page stays responsive. The engine can run more,
           but those extra runs are not offered here. A higher rank makes the cautious amount less cautious.

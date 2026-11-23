@@ -30,10 +30,13 @@ can also remove the saved ID. To recover, open **Sync → Encrypted vault** and 
 **Sync → Local JSON Backup** to import an exported ledger. Closing Sync while a restore is pending
 discards that restore. Web Sync and ledger replacement require cross-tab locking; use a
 current browser on HTTPS or loopback. Close older versions of the app in other tabs before
-synchronizing. If the saved ledger changed after the tab loaded it, reload and review the newer
-ledger before trying again. If storage fails during restore, the app checks that previous saved
-data was preserved and reports if it could not verify that. In a browser without Web Locks,
-ordinary edits still work locally, but only one tab should edit the ledger.
+synchronizing. If another tab changes the saved ledger, the old tab withholds forecasts and
+keeps its open drafts. Copy any drafts before reloading to review the current saved ledger.
+If storage fails during restore and the previous data cannot be verified, some or all of the
+change may have persisted. The warning remains after closing Sync. Export the previous ledger
+and copy any drafts before explicitly reloading to inspect what is saved. Until then, forecasts,
+ledger writes, and Sync are paused in that tab. In a browser without Web Locks, ordinary edits
+still work locally, but only one tab should edit the ledger.
 
 Unsaved form drafts are not included in exports or vault snapshots. A successful replacement
 clears the open drafts in that tab; matching IDs do not transfer drafts to the new ledger.

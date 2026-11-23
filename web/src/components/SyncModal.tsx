@@ -25,6 +25,13 @@ interface SyncModalProps {
   currentVaultId?: string;
   /** Tells the page which vault id was durably remembered after a successful push. */
   onVaultSelected: (vaultId: string) => void;
+  /**
+   * True only after a replacement result was indeterminate: storage may now hold
+   * some or all of the attempted change. The parent owns the recovery surface and
+   * a deliberate reload. This dialog stops new destructive starts but stays open
+   * with the uncertain result so the person can close it and export first.
+   */
+  recoveryRequired: boolean;
 }
 
 type ActiveOperation = "push" | "pull" | "import";
@@ -55,6 +62,7 @@ export function SyncModal({
   onApplyState,
   currentVaultId,
   onVaultSelected,
+  recoveryRequired,
 }: SyncModalProps) {
   const dialogRef = useRef<HTMLDialogElement>(null);
   const operationSeq = useRef(0);
@@ -153,13 +161,16 @@ export function SyncModal({
 
   function changeVaultTarget(update: () => void) {
     update();
+    // An uncertain result must stay visible until the user retains a copy. Editing
+    // the target is not a resolution of it.
+    if (recoveryRequired) return;
     setPendingConflict(null);
     setErrorMessage(null);
     setStatusMessage(null);
   }
 
   const handlePushToCloud = async () => {
-    if (activeOperationRef.current) return;
+    if (recoveryRequired || activeOperationRef.current) return;
     if (!vaultId.trim() || !passphrase.trim()) {
       setStatusMessage(null);
       setErrorMessage("Please enter both Vault ID and Passphrase.");
@@ -210,7 +221,7 @@ export function SyncModal({
   };
 
   const runPull = async (target: PullTarget, allowOverwriteLocal: boolean) => {
-    if (activeOperationRef.current) return;
+    if (recoveryRequired || activeOperationRef.current) return;
     const { id, controller } = startOperation("pull", true);
     if (!controller) return;
     setErrorMessage(null);
@@ -237,8 +248,12 @@ export function SyncModal({
       });
       if (!isCurrent(id, controller)) return;
       if (!applied.ok) {
+        // An indeterminate rollback may have left all or part of the vault state
+        // stored, so do not call the restore "not persisted".
         setErrorMessage(
-          `Vault decrypted but the restore was not persisted: ${applied.error}`
+          applied.indeterminate
+            ? `Vault decrypted, but the saved ledger could not be verified. ${applied.error}`
+            : `Vault decrypted but the restore was not persisted: ${applied.error}`
         );
         return;
       }
@@ -259,7 +274,7 @@ export function SyncModal({
   };
 
   const handlePullFromCloud = () => {
-    if (activeOperationRef.current) return;
+    if (recoveryRequired || activeOperationRef.current) return;
     if (!vaultId.trim() || !passphrase.trim()) {
       setStatusMessage(null);
       setErrorMessage("Please enter both Vault ID and Passphrase.");
@@ -278,7 +293,7 @@ export function SyncModal({
   };
 
   const handleConfirmOverwrite = () => {
-    if (!pendingConflict || activeOperationRef.current) return;
+    if (recoveryRequired || !pendingConflict || activeOperationRef.current) return;
     // Reuse the captured target/authorization. Confirmation must not silently apply
     // to a different vault or to a ledger snapshot the user did not see.
     void runPull(pendingConflict, true);
@@ -289,7 +304,7 @@ export function SyncModal({
     const input = e.currentTarget;
     // Reset immediately so choosing the same file again still fires a change event.
     input.value = "";
-    if (!file || activeOperationRef.current) return;
+    if (!file || recoveryRequired || activeOperationRef.current) return;
 
     const { id, controller } = startOperation("import", true);
     if (!controller) return;
@@ -303,6 +318,7 @@ export function SyncModal({
     reader.onload = async (event) => {
       if (!isCurrent(id, controller)) return;
       let replacing = false;
+      let indeterminate = false;
       try {
         const parsed = JSON.parse(event.target?.result as string);
         const validated = parseLedgerState(parsed);
@@ -319,6 +335,7 @@ export function SyncModal({
         });
         if (!isCurrent(id, controller)) return;
         if (!applied.ok) {
+          indeterminate = applied.indeterminate === true;
           throw new Error(applied.error);
         }
         setErrorMessage(null);
@@ -326,9 +343,13 @@ export function SyncModal({
       } catch (err: unknown) {
         if (!isCurrent(id, controller)) return;
         setStatusMessage(null);
+        // Validation/cancellation failures never wrote; only an indeterminate
+        // persistence result may describe the replace as partly or fully stored.
         setErrorMessage(
-          (replacing ? "Import could not be saved: " : "Import rejected (your current ledger is unchanged): ") +
-          describeError(err)
+          indeterminate
+            ? `Import result is uncertain. ${describeError(err)}`
+            : (replacing ? "Import could not be saved: " : "Import rejected (your current ledger is unchanged): ") +
+                describeError(err)
         );
       } finally {
         finishOperation(id);
@@ -415,10 +436,23 @@ export function SyncModal({
           )}
         </div>
 
-        {errorMessage && (
-          <div role="alert" className="mb-4 flex items-center gap-2 rounded-xl border border-danger bg-danger-soft p-3 text-sm text-ink">
-            <AlertCircle className="h-4 w-4 shrink-0 text-danger" />
-            <span>{errorMessage}</span>
+        {(errorMessage || recoveryRequired) && (
+          <div
+            role="alert"
+            className={`mb-4 flex items-start gap-2 rounded-xl border p-3 text-sm text-ink ${
+              recoveryRequired ? "border-warning bg-warning-soft" : "border-danger bg-danger-soft"
+            }`}
+          >
+            <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+            <div>
+              <p>{errorMessage ?? "The saved ledger could not be verified. Some or all of the last change may have persisted."}</p>
+              {recoveryRequired && (
+                <p className="mt-2">
+                  Close Sync to keep a copy of the previous ledger and any drafts before reloading. Sync is
+                  paused in this tab until you reload to check the saved ledger.
+                </p>
+              )}
+            </div>
           </div>
         )}
 
@@ -473,7 +507,7 @@ export function SyncModal({
             <div className="grid grid-cols-2 gap-3 pt-2">
               <button
                 onClick={handlePushToCloud}
-                disabled={isLoading}
+                disabled={isLoading || recoveryRequired}
                 className="flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-accent hover:opacity-90 disabled:opacity-50 text-on-accent font-semibold transition"
               >
                 <Upload className="w-3.5 h-3.5" />
@@ -482,7 +516,7 @@ export function SyncModal({
 
               <button
                 onClick={handlePullFromCloud}
-                disabled={isLoading}
+                disabled={isLoading || recoveryRequired}
                 className="flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-inset hover:bg-surface disabled:opacity-50 text-ink font-semibold border border-line transition"
               >
                 <Download className="w-3.5 h-3.5" />
@@ -499,7 +533,7 @@ export function SyncModal({
                 </p>
                 <button
                   onClick={handleConfirmOverwrite}
-                  disabled={isLoading}
+                  disabled={isLoading || recoveryRequired}
                   className="min-h-11 rounded-lg bg-accent px-3 py-2 font-semibold text-on-accent disabled:opacity-50"
                 >
                   Replace local ledger with the vault
@@ -552,7 +586,7 @@ export function SyncModal({
                 type="file"
                 accept=".json"
                 onChange={handleImportFile}
-                disabled={isLoading}
+                disabled={isLoading || recoveryRequired}
                 className="sr-only"
               />
             </label>

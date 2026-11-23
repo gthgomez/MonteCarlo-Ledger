@@ -244,6 +244,71 @@ test.describe("ordinary ledger edit draft safety", () => {
     expect(await storedRaw(page)).toBe(siblingRaw);
   });
 
+  test("a sibling ledger edit withholds stale cash before another save and keeps the failed draft", async ({ page, context }) => {
+    await page.clock.setFixedTime(new Date("2026-11-23T12:00:00.000Z"));
+    await seedSyntheticLedger(page);
+    await openMoney(page);
+    const cash = page.getByRole("heading", { name: "What you have", exact: true }).locator("..");
+    const amount = page.getByRole("textbox", { name: "Amount ($)", exact: true });
+    const note = page.getByLabel("Note", { exact: true });
+    const originalRaw = await storedRaw(page);
+    await expect(cash.getByText("$1,000.00", { exact: true })).toBeVisible();
+    await amount.fill("12.34");
+    await note.fill("Draft that stays in this tab");
+    await failNextLedgerWrite(page);
+    await page.getByRole("button", { name: "Record this", exact: true }).click();
+    await expect(page.getByText("Not saved", { exact: true })).toBeVisible();
+    expect(await storedRaw(page)).toBe(originalRaw);
+
+    const sibling = await context.newPage();
+    try {
+      await sibling.clock.setFixedTime(new Date("2026-11-23T12:00:00.000Z"));
+      await sibling.goto("/");
+      await openMoney(sibling);
+      await sibling.getByRole("textbox", { name: "Amount ($)", exact: true }).fill("50");
+      await sibling.getByLabel("Note", { exact: true }).fill("Sibling's $50 expense");
+      await sibling.getByRole("button", { name: "Record this", exact: true }).click();
+      await expect(sibling.getByText("Sibling's $50 expense", { exact: true })).toBeVisible();
+      const siblingRaw = await storedRaw(sibling);
+      expect(JSON.parse(siblingRaw ?? "null").current_balance_cents).toBe(95_000);
+
+      // The old tab has not tried to write again or refreshed. A native storage
+      // event must invalidate the cash/forecast without unmounting the form.
+      const stale = page.getByRole("heading", { name: "Saved ledger changed", exact: true });
+      await expect(stale).toBeVisible();
+      await expect(cash.getByText("$1,000.00", { exact: true })).toHaveCount(0);
+      await expect(cash.getByText("$950.00", { exact: true })).toHaveCount(0);
+      await expect(amount).toHaveValue("12.34");
+      await expect(note).toHaveValue("Draft that stays in this tab");
+      expect(await storedRaw(page)).toBe(siblingRaw);
+
+      const reload = page.getByRole("button", { name: "Reload saved ledger", exact: true });
+      const [declined] = await Promise.all([
+        page.waitForEvent("dialog", { timeout: 5_000 }).then(async (dialog) => {
+          const message = dialog.message();
+          await dialog.dismiss();
+          return message;
+        }),
+        reload.click(),
+      ]);
+      expect(declined).toMatch(/reload.*discards.*draft/i);
+      await expect(note).toHaveValue("Draft that stays in this tab");
+
+      // Only an explicit reload adopts the other tab's ledger and discards
+      // the failed draft. The durable bytes themselves are not rewritten.
+      await Promise.all([
+        page.waitForEvent("dialog", { timeout: 5_000 }).then((dialog) => dialog.accept()),
+        reload.click(),
+      ]);
+      await expect(stale).toHaveCount(0);
+      await expect(cash.getByText("$950.00", { exact: true })).toBeVisible();
+      await expect(note).toHaveValue("");
+      expect(await storedRaw(page)).toBe(siblingRaw);
+    } finally {
+      await sibling.close();
+    }
+  });
+
   test("a pending debt save disables Plan's decision tabs", async ({ page }) => {
     await seedSyntheticLedger(page);
     await page.getByRole("button", { name: "Plan", exact: true }).click();
