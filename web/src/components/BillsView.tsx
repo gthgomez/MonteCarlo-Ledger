@@ -43,6 +43,27 @@ interface MoveDraft {
   destination: string;
 }
 
+/**
+ * The exact payment attempt, not a ledger snapshot. It keeps the stable slot,
+ * the person-facing amount, and the posting day submitted to the domain edit so
+ * midnight or a retry cannot silently move either date.
+ */
+interface SettlementDraft {
+  paymentId: number | string;
+  name: string;
+  amountCents: number;
+  slotDate: string;
+  /** An attempted new debit has a posting date; linking or no-debit alone does not. */
+  transactionDate: string | null;
+  treatment: "paid" | "new" | "link" | "reflected";
+}
+
+function settlementDescription(draft: SettlementDraft): string {
+  if (draft.treatment === "link") return "Linking an expense already in Money; no new debit.";
+  if (draft.treatment === "reflected") return "Marking it paid without a new debit.";
+  return `New ${formatMoney(draft.amountCents)} expense dated ${draft.transactionDate}.`;
+}
+
 export function BillsView({
   state,
   asOf,
@@ -77,6 +98,10 @@ export function BillsView({
   // Kept per stable slot, not per visible row: midnight, a horizon change, or a
   // failed move can remove the projected row without discarding the draft.
   const [moveDrafts, setMoveDrafts] = useState<Record<string, MoveDraft>>({});
+  // One unsaved settlement attempt per slot, including ordinary Mark paid with
+  // no typed values, so a failure still has a guard and a visible exact date.
+  const [settlementDrafts, setSettlementDrafts] = useState<Record<string, SettlementDraft>>({});
+  const [settlingKey, setSettlingKey] = useState<string | null>(null);
   const [linkChoices, setLinkChoices] = useState<Record<string, string>>({});
   const [confirmNewExpense, setConfirmNewExpense] = useState<Record<string, boolean>>({});
   // One unlinked treatment per unresolved slot: link, already reflected in cash,
@@ -109,6 +134,7 @@ export function BillsView({
     )
   );
   const retainedMoves = Object.entries(moveDrafts).filter(([key]) => !projectedRowKeys.has(key));
+  const retainedSettlements = Object.entries(settlementDrafts).filter(([key]) => !projectedRowKeys.has(key));
   const paymentIds = new Set(state.payments.map((payment) => String(payment.id)));
 
   function chooseResolution(key: string, choice: "link" | "reflected" | "new") {
@@ -131,15 +157,49 @@ export function BillsView({
     onDiscardDraft(`bills:move:${key}`);
   }
 
-  function clearSlotDrafts(key: string) {
-    cancelMove(key);
-    setLinkChoices((current) => withoutDraft(current, key));
+  function cancelSettlement(key: string) {
+    setSettlementDrafts((current) => withoutDraft(current, key));
+    // Cancelling an attempt cannot authorize a fresh debit with a different date.
     setConfirmNewExpense((current) => withoutDraft(current, key));
-    setResolutionChoices((current) => withoutDraft(current, key));
     onDiscardDraft(`bills:settlement:${key}`);
   }
 
-  async function settleRow(key: string, result: EditResult) {
+  function settlementDraft(
+    payment: PaymentItem,
+    slotDate: string,
+    key: string,
+    treatment: SettlementDraft["treatment"]
+  ): SettlementDraft {
+    return {
+      paymentId: payment.id as number | string,
+      name: payment.name,
+      amountCents: payment.amount_cents,
+      slotDate,
+      // A retry keeps the first attempt's posting day; only a new attempt uses today.
+      transactionDate: settlementDrafts[key]?.transactionDate
+        ?? (treatment === "paid" || treatment === "new" ? asOf : null),
+      treatment,
+    };
+  }
+
+  function clearSlotDrafts(key: string) {
+    cancelMove(key);
+    cancelSettlement(key);
+    setLinkChoices((current) => withoutDraft(current, key));
+    setResolutionChoices((current) => withoutDraft(current, key));
+  }
+
+  async function settleRow(
+    key: string,
+    draft: SettlementDraft,
+    build: (pinned: SettlementDraft) => EditResult
+  ) {
+    const result = build(draft);
+    if (!result.ok) {
+      // Rejected validation never became a draft, so it must not pin a date.
+      await onEdit(result);
+      return;
+    }
     const hasMoveDraft = key in moveDrafts;
     if (
       hasMoveDraft &&
@@ -149,27 +209,56 @@ export function BillsView({
     ) {
       return;
     }
-    const draftKey = key in resolutionChoices
-      ? `bills:settlement:${key}`
-      : hasMoveDraft ? `bills:move:${key}` : undefined;
-    if ((await onEdit(result, draftKey)).ok) clearSlotDrafts(key);
+    retainSettlement(draft);
+    setSettlingKey(key);
+    try {
+      if ((await onEdit(result, `bills:settlement:${key}`)).ok) clearSlotDrafts(key);
+    } finally {
+      setSettlingKey(null);
+    }
+  }
+
+  function retainSettlement(draft: SettlementDraft) {
+    setSettlementDrafts((current) => ({
+      ...current,
+      [paymentOccurrenceKey(draft.paymentId, draft.slotDate)]: draft,
+    }));
   }
 
   async function moveRow(draft: MoveDraft) {
     const key = paymentOccurrenceKey(draft.paymentId, draft.slotDate);
-    if (key in resolutionChoices && !window.confirm("Moving this bill discards its unsaved payment choice. Move it?")) {
+    const result = moveBillOccurrence(state, draft.paymentId, draft.slotDate, draft.destination);
+    if (!result.ok) {
+      // Typed move drafts are already retained; only a valid submission pins an
+      // untouched default so midnight cannot change the move while it is pending.
+      await onEdit(result);
       return;
     }
-    // Pin even an untouched default so midnight cannot change the submitted move.
+    if (
+      (key in resolutionChoices || key in settlementDrafts) &&
+      !window.confirm("Moving this bill discards its unsaved payment choice. Move it?")
+    ) {
+      return;
+    }
     retainMove(draft);
-    const result = moveBillOccurrence(state, draft.paymentId, draft.slotDate, draft.destination);
     if ((await onEdit(result, `bills:move:${key}`)).ok) clearSlotDrafts(key);
+  }
+
+  function buildBillExpense(draft: SettlementDraft): EditResult {
+    if (draft.transactionDate === null) return { ok: false, error: "No posting date was selected for this expense." };
+    return markBillOccurrencePaid(state, draft.paymentId, draft.slotDate, draft.transactionDate);
+  }
+
+  function retrySettlement(draft: SettlementDraft) {
+    const key = paymentOccurrenceKey(draft.paymentId, draft.slotDate);
+    void settleRow(key, draft, buildBillExpense);
   }
 
   async function removeBill(paymentId: number | string) {
     // The last separator belongs to the slot date; imported payment IDs are opaque.
-    const draftKeys = [...new Set([...Object.keys(moveDrafts), ...Object.keys(resolutionChoices)])]
-      .filter((key) => key.slice(0, key.lastIndexOf("::")) === String(paymentId));
+    const draftKeys = [
+      ...new Set([...Object.keys(moveDrafts), ...Object.keys(resolutionChoices), ...Object.keys(settlementDrafts)]),
+    ].filter((key) => key.slice(0, key.lastIndexOf("::")) === String(paymentId));
     if (draftKeys.length && !window.confirm("Removing this bill also discards its unsaved drafts. Remove it?")) return;
     if (!(await onEdit(removePayment(state, paymentId))).ok) return;
     for (const key of draftKeys) {
@@ -332,11 +421,12 @@ export function BillsView({
             </li>
           ))}
         </ul>
-        {(billSlots.length > 0 || retainedMoves.length > 0) && (
+        {(billSlots.length > 0 || retainedMoves.length > 0 || retainedSettlements.length > 0) && (
           <div className="mt-6 border-t border-line pt-4">
             <h3 className="font-semibold">Record or move a payment</h3>
             <p className="mt-1 text-sm text-muted">
-              Marking an ordinary bill paid records an expense dated the day you click Mark paid.
+              Marking an ordinary bill paid records an expense dated the day you submit Mark paid; a retry keeps
+              that same posting date.
               For a past one-time bill with no linked bill record, choose what happened: link the full posted
               expense if it is already in Money, mark it paid without a debit when the payment is already reflected
               in the cash you entered (for example, it is in “Money you have now”), or record a new expense only if
@@ -349,6 +439,7 @@ export function BillsView({
                 const paymentId = payment.id;
                 const key = paymentOccurrenceKey(paymentId, slotDate);
                 const moveDraft = moveDrafts[key];
+                const settlementAttempt = settlementDrafts[key];
                 const selectedDate = moveDraft?.destination ?? (dueDate < asOf ? asOf : dueDate);
                 const isUnresolved = unresolvedKeys.has(key);
                 const matches = isUnresolved
@@ -404,10 +495,11 @@ export function BillsView({
                               <Button
                                 type="button"
                                 variant="quiet"
-                                disabled={!choice}
+                                disabled={!choice || settlingKey !== null}
                                 onClick={() => void settleRow(
                                   key,
-                                  linkPostedExpenseToPastOneTimeBill(state, paymentId, slotDate, choice, asOf),
+                                  settlementDraft(payment, slotDate, key, "link"),
+                                  () => linkPostedExpenseToPastOneTimeBill(state, paymentId, slotDate, choice, asOf),
                                 )}
                               >
                                 Link recorded expense
@@ -437,9 +529,11 @@ export function BillsView({
                               <Button
                                 type="button"
                                 variant="quiet"
+                                disabled={settlingKey !== null}
                                 onClick={() => void settleRow(
                                   key,
-                                  markPastOneTimeBillPaidWithoutExpense(state, paymentId, slotDate, asOf),
+                                  settlementDraft(payment, slotDate, key, "reflected"),
+                                  () => markPastOneTimeBillPaidWithoutExpense(state, paymentId, slotDate, asOf),
                                 )}
                               >
                                 Mark paid without new expense
@@ -462,9 +556,11 @@ export function BillsView({
                         {resolution === "new" && (
                           <div className="grid gap-2 pl-6">
                             <p className="text-muted">
-                              Recording adds a {formatMoney(payment.amount_cents)} expense dated the day you click
-                              Record new expense. To record the original date instead, add the expense in Money
-                              and then link it. Do not do either if your current cash already reflects the payment.
+                              Recording adds a {formatMoney(payment.amount_cents)} expense dated{" "}
+                              {formatDateLabel(settlementAttempt?.transactionDate ?? asOf)}
+                              {settlementAttempt?.transactionDate ? "; a retry keeps that attempted posting date" : ""}. To record
+                              a different date instead, add the expense in Money and then link it. Do not do either
+                              if your current cash already reflects the payment.
                             </p>
                             <label className="flex items-start gap-2">
                               <input
@@ -480,10 +576,11 @@ export function BillsView({
                               <Button
                                 type="button"
                                 variant="quiet"
-                                disabled={!confirmNewExpense[key]}
+                                disabled={!confirmNewExpense[key] || settlingKey !== null}
                                 onClick={() => void settleRow(
                                   key,
-                                  markBillOccurrencePaid(state, paymentId, slotDate, asOf),
+                                  settlementDraft(payment, slotDate, key, "new"),
+                                  buildBillExpense,
                                 )}
                               >
                                 Record new expense
@@ -498,7 +595,12 @@ export function BillsView({
                         <Button
                           type="button"
                           variant="quiet"
-                          onClick={() => void settleRow(key, markBillOccurrencePaid(state, paymentId, slotDate, asOf))}
+                          disabled={settlingKey !== null}
+                          onClick={() => void settleRow(
+                            key,
+                            settlementDraft(payment, slotDate, key, "paid"),
+                            buildBillExpense,
+                          )}
                         >
                           Mark paid
                         </Button>
@@ -539,6 +641,30 @@ export function BillsView({
                         </Button>
                       )}
                     </div>
+                    {settlementAttempt && (
+                      <div className="rounded-lg border border-warning bg-warning-soft p-2">
+                        <p className="text-muted">
+                          {settlingKey === key ? "Saving the payment attempt." : "Payment attempt not saved."}{" "}
+                          {settlementDescription(settlementAttempt)}
+                        </p>
+                        {isUnresolved && settlementAttempt.transactionDate !== null && settlingKey !== key && (
+                          <p className="text-muted">
+                            This one-time bill is now past due. Choose one of the review treatments above; a new
+                            expense keeps the attempted posting date shown here.
+                          </p>
+                        )}
+                        <div>
+                          <Button
+                            type="button"
+                            variant="quiet"
+                            disabled={settlingKey !== null}
+                            onClick={() => cancelSettlement(key)}
+                          >
+                            Cancel payment attempt
+                          </Button>
+                        </div>
+                      </div>
+                    )}
                   </li>
                 );
               })}
@@ -583,6 +709,84 @@ export function BillsView({
                           </Button>
                           <Button type="button" variant="quiet" onClick={() => cancelMove(key)}>
                             Cancel move
+                          </Button>
+                        </div>
+                      </li>
+                    );
+                  })}
+                </ul>
+              </div>
+            )}
+            {retainedSettlements.length > 0 && (
+              <div className="mt-4 rounded-lg border border-warning bg-warning-soft p-3">
+                <h4 className="font-semibold">Kept payment attempts</h4>
+                <p className="mt-1 text-sm text-muted">
+                  These bills’ scheduled slots are no longer in the projected list. Your unsaved attempts are
+                  kept here. They do not change the saved ledger or forecast. Cancel discards only that attempt.
+                </p>
+                <ul className="mt-2 divide-y divide-line">
+                  {retainedSettlements.map(([key, draft]) => {
+                    const slotLabel = `${draft.name}, original slot ${formatDateLabel(draft.slotDate)}`;
+                    const missingPayment = !paymentIds.has(String(draft.paymentId));
+                    // A one-time slot that is now past due is resolved only through
+                    // its explicit review treatments, never a direct paid retry.
+                    const needsReview = unresolvedKeys.has(key);
+                    const retryable =
+                      !missingPayment &&
+                      !needsReview &&
+                      draft.treatment === "paid" &&
+                      draft.transactionDate !== null;
+                    return (
+                      <li key={key} aria-label={`Kept payment for ${slotLabel}`} className="grid gap-2 py-3 text-sm">
+                        <span>
+                          {draft.name} · original slot {formatDateLabel(draft.slotDate)} ({draft.slotDate}) ·{" "}
+                          {formatMoney(draft.amountCents)}
+                        </span>
+                        <p className="text-muted">
+                          {settlingKey === key
+                            ? "Saving this payment attempt; keep this tab open."
+                            : "Payment attempt not saved to the ledger yet."}{" "}
+                          {settlementDescription(draft)}
+                        </p>
+                        {needsReview && (
+                          <p className="text-muted">
+                            This one-time bill is now past due. Use the review treatments in its bill row; a new
+                            expense keeps the attempted posting date.
+                          </p>
+                        )}
+                        {missingPayment && (
+                          <p className="text-muted">This bill is no longer in the ledger. Copy the date or cancel the attempt.</p>
+                        )}
+                        <div className="flex flex-wrap items-center gap-2">
+                          {draft.transactionDate !== null && (
+                            <label className="flex items-center gap-2 text-muted">
+                              Attempted expense date
+                              <input
+                                className={`${fieldClass} w-auto`}
+                                type="date"
+                                value={draft.transactionDate}
+                                disabled
+                                aria-label={`Posting date for kept payment of ${slotLabel}`}
+                              />
+                            </label>
+                          )}
+                          {retryable && (
+                            <Button
+                              type="button"
+                              variant="quiet"
+                              disabled={settlingKey !== null}
+                              onClick={() => retrySettlement(draft)}
+                            >
+                              Retry Mark paid
+                            </Button>
+                          )}
+                          <Button
+                            type="button"
+                            variant="quiet"
+                            disabled={settlingKey !== null}
+                            onClick={() => cancelSettlement(key)}
+                          >
+                            Cancel payment attempt
                           </Button>
                         </div>
                       </li>

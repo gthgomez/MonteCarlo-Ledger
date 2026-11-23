@@ -680,4 +680,173 @@ test.describe("ordinary ledger edit draft safety", () => {
     expect(final.payments).toEqual(ledger.payments);
     expect(final.liabilities).toEqual(ledger.liabilities);
   });
+
+  test("an ordinary Mark paid attempt keeps its slot and posting date after midnight", async ({ page }) => {
+    await page.clock.install({ time: new Date("2026-11-23T23:59:00.000Z") });
+    await page.clock.pauseAt(new Date("2026-11-23T23:59:30.000Z"));
+    const ledger = syntheticLedger();
+    ledger.payments = [
+      { id: "rent", name: "Rent", amount_cents: 50_000, recurrence: "Monthly", due_day: 23 },
+      { id: "power", name: "Power", amount_cents: 10_000, recurrence: "Monthly", due_day: 24 },
+    ];
+    await seedSyntheticLedger(page, ledger);
+    const originalRaw = await storedRaw(page);
+    await page.getByRole("button", { name: "Bills", exact: true }).click();
+
+    const schedule = page.getByRole("heading", { name: "Payments coming up" }).locator("..");
+    const rentRow = page.getByRole("listitem", { name: "Rent due Nov 23, 2026", exact: true });
+    const keptPayment = page.getByRole("listitem", {
+      name: "Kept payment for Rent, original slot Nov 23, 2026",
+      exact: true,
+    });
+    const keptPostingDate = keptPayment.getByLabel(
+      "Posting date for kept payment of Rent, original slot Nov 23, 2026"
+    );
+    await expect(rentRow).toBeVisible();
+    await expect(schedule.getByText(/Nov 23, 2026/)).toBeVisible();
+
+    await holdLedgerLock(page);
+    try {
+      // No move or link draft: the attempt itself must carry the exact slot and
+      // posting date while its write is outstanding.
+      await rentRow.getByRole("button", { name: "Mark paid", exact: true }).click();
+      await expect(page.getByText("Saving your ledger change", { exact: true })).toBeVisible();
+      await expect.poll(() => queuedWrites(page)).toBe(1);
+      expect(await storedRaw(page)).toBe(originalRaw);
+
+      // Cross midnight while the write still waits. The recurring row leaves the
+      // projection, but the retained attempt keeps the original dates disabled.
+      await page.clock.runFor(60_000);
+      await expect(page.getByText("Saving your ledger change", { exact: true })).toBeVisible();
+      await expect(rentRow).toHaveCount(0);
+      await expect(keptPayment).toBeVisible();
+      await expect(keptPayment).toContainText("Saving this payment attempt");
+      await expect(keptPostingDate).toBeDisabled();
+      await expect(keptPostingDate).toHaveValue("2026-11-23");
+      await expect(keptPayment.getByRole("button", { name: "Retry Mark paid", exact: true })).toBeDisabled();
+      await expect(schedule.getByText(/Nov 23, 2026/)).toHaveCount(0);
+      expect(await storedRaw(page)).toBe(originalRaw);
+
+      await failNextLedgerWrite(page);
+    } finally {
+      await releaseLedgerLock(page);
+    }
+
+    // The one-shot failure keeps the exact attempt without adding an occurrence,
+    // expense, balance change, or forecast row.
+    await expect(page.getByText("Saving your ledger change", { exact: true })).toHaveCount(0);
+    await expect(page.getByText("Not saved", { exact: true })).toBeVisible();
+    await expect(keptPayment).toBeVisible();
+    await expect(keptPayment).toContainText("Payment attempt not saved");
+    await expect(keptPostingDate).toBeDisabled();
+    await expect(keptPostingDate).toHaveValue("2026-11-23");
+    await expect(page.getByRole("button", { name: "Retry Mark paid", exact: true })).toHaveCount(1);
+    await expect(page.getByRole("button", { name: "Retry Mark paid", exact: true })).toBeEnabled();
+    await expect(schedule.getByText(/Nov 23, 2026/)).toHaveCount(0);
+    await expect(schedule.getByText(/Dec 23, 2026/)).toBeVisible();
+    expect(await storedRaw(page)).toBe(originalRaw);
+    const failed = JSON.parse((await storedRaw(page)) ?? "null");
+    expect(failed.current_balance_cents).toBe(100_000);
+    expect(failed.transactions).toHaveLength(1);
+    expect(failed.bill_occurrences).toEqual([]);
+
+    // Declining the native section guard keeps the section and the attempt.
+    const [declined] = await Promise.all([
+      page.waitForEvent("dialog").then(async (dialog) => {
+        const result = { type: dialog.type(), message: dialog.message() };
+        await dialog.dismiss();
+        return result;
+      }),
+      page.getByRole("button", { name: "Home", exact: true }).click(),
+    ]);
+    expect(declined.type).toBe("confirm");
+    expect(declined.message).toMatch(/not saved.*discard/i);
+    await expect(page.getByRole("button", { name: "Bills", exact: true })).toHaveAttribute("aria-current", "page");
+    await expect(keptPayment).toBeVisible();
+
+    // A sibling attempt on Power fails too. Cancelling only Power's attempt must
+    // leave Rent's retained attempt and its guard untouched.
+    const powerRow = page.getByRole("listitem", { name: "Power due Nov 24, 2026", exact: true });
+    await expect(powerRow).toBeVisible();
+    await holdLedgerLock(page);
+    try {
+      await powerRow.getByRole("button", { name: "Mark paid", exact: true }).click();
+      await expect(page.getByText("Saving your ledger change", { exact: true })).toBeVisible();
+      await expect.poll(() => queuedWrites(page)).toBe(1);
+      await failNextLedgerWrite(page);
+    } finally {
+      await releaseLedgerLock(page);
+    }
+    await expect(page.getByText("Saving your ledger change", { exact: true })).toHaveCount(0);
+    await expect(powerRow.getByText(/Payment attempt not saved/)).toBeVisible();
+    await expect(powerRow).toContainText("2026-11-24");
+    await powerRow.getByRole("button", { name: "Cancel payment attempt", exact: true }).click();
+    await expect(powerRow.getByText(/Payment attempt not saved/)).toHaveCount(0);
+    await expect(powerRow.getByRole("button", { name: "Cancel payment attempt", exact: true })).toHaveCount(0);
+    await expect(keptPayment).toBeVisible();
+    await expect(page.getByRole("button", { name: "Retry Mark paid", exact: true })).toHaveCount(1);
+    expect(await storedRaw(page)).toBe(originalRaw);
+
+    // Rent's marker is independent of Power's cancelled one.
+    const [remainingGuard] = await Promise.all([
+      page.waitForEvent("dialog").then(async (dialog) => {
+        const type = dialog.type();
+        await dialog.dismiss();
+        return type;
+      }),
+      page.getByRole("button", { name: "Home", exact: true }).click(),
+    ]);
+    expect(remainingGuard).toBe("confirm");
+    await expect(page.getByRole("button", { name: "Bills", exact: true })).toHaveAttribute("aria-current", "page");
+
+    // Retry the exact original slot and posting date. Only now is one debit
+    // posted, dated the day the person originally submitted Mark paid.
+    await keptPayment.getByRole("button", { name: "Retry Mark paid", exact: true }).click();
+    await expect(keptPayment).toHaveCount(0);
+    await expect(page.getByText("Saving your ledger change", { exact: true })).toHaveCount(0);
+    await expect(page.getByText("Not saved", { exact: true })).toHaveCount(0);
+
+    const paidRaw = await storedRaw(page);
+    expect(paidRaw).not.toBe(originalRaw);
+    const paid = JSON.parse(paidRaw ?? "null");
+    expect(paid.current_balance_cents).toBe(50_000);
+    expect(paid.transactions).toHaveLength(2);
+    expect(paid.transactions[1]).toMatchObject({
+      id: "tx-2",
+      amount_cents: -50_000,
+      type: "Expense",
+      date: "2026-11-23",
+      description: "Rent",
+    });
+    expect(paid.transactions.filter((tx: { description?: string }) => tx.description === "Power")).toHaveLength(0);
+    expect(paid.bill_occurrences).toEqual([
+      {
+        id: "occ-1",
+        payment_id: "rent",
+        due_date: "2026-11-23",
+        paid: true,
+        transaction_id: "tx-2",
+        original_due_date: "2026-11-23",
+        is_user_modified: false,
+      },
+    ]);
+
+    // Success removes the native handler and leaves no phantom navigation guard.
+    const afterSuccessUnload = await dispatchBeforeUnload(page);
+    expect(afterSuccessUnload.defaultPrevented).toBe(false);
+    let navigationPrompt: string | null = null;
+    const onDialog = async (dialog: Dialog) => {
+      navigationPrompt = dialog.message();
+      await dialog.dismiss();
+    };
+    page.on("dialog", onDialog);
+    try {
+      await page.getByRole("button", { name: "Home", exact: true }).click();
+      await expect(page.getByRole("button", { name: "Home", exact: true })).toHaveAttribute("aria-current", "page");
+    } finally {
+      page.off("dialog", onDialog);
+    }
+    expect(navigationPrompt).toBeNull();
+    expect(await storedRaw(page)).toBe(paidRaw);
+  });
 });

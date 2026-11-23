@@ -431,8 +431,9 @@ export function SyncModal({
             </p>
             <p className="text-ink">
               A pull replaces the ledger in this browser. To keep a copy, close Sync and use Export in the header first.
-              Budget targets and forecast settings, including your reserve, stay in this browser and are not
-              recovered from the vault. Android-only data needs a separate native backup.
+              Applying a replacement also clears unsaved values in any open form draft in this tab. Budget targets and
+              forecast settings, including your reserve, stay in this browser and are not recovered from the vault.
+              Android-only data needs a separate native backup.
             </p>
             <p className="text-muted">
               After a successful push this browser remembers the Vault ID, but never the passphrase.
@@ -537,7 +538,8 @@ export function SyncModal({
           <div className="space-y-4 text-xs">
             <p className="text-muted">
               Close this dialog, then export from the header to save an unencrypted ledger file. Keep it private.
-              Importing a valid file here replaces this ledger. Budget targets and forecast settings are not in the file.
+              Importing a valid file here replaces this ledger and clears unsaved values in any open form draft.
+              Budget targets and forecast settings are not in the file.
             </p>
 
             <label className="flex flex-col items-center justify-center border-2 border-dashed border-line hover:border-accent focus-within:outline focus-within:outline-accent rounded-xl p-6 cursor-pointer bg-inset hover:bg-inset transition">

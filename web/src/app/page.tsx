@@ -19,7 +19,7 @@ import {
   saveAssumptions,
 } from "@/lib/assumptions-persistence";
 import { EMPTY_TARGETS, loadBudgetTargets, saveBudgetTargets, type BudgetTargets } from "@/lib/budget-targets";
-import { createStarterLedger, type EditResult } from "@/lib/ledger-edits";
+import { type EditResult } from "@/lib/ledger-edits";
 import { LEDGER_STORAGE_KEY, saveLedgerChange, type LedgerChangeOptions } from "@/lib/persistence";
 import {
   beyondWindowBillNotice,
@@ -59,7 +59,21 @@ const HOME_ONBOARDING_DRAFT_KEY = "home:onboarding";
  * Section navigation unmounts that state, so leaving must be an explicit choice.
  */
 const UNSAVED_DRAFT_LEAVE_MESSAGE =
-  "A ledger change here was not saved. If you leave this section now, the values you typed will be discarded. Choose Cancel to stay and keep them. Reloading the page also discards them.";
+  "A ledger change here was not saved. If you leave this section now, the unsaved draft and any values you typed will be discarded. Choose Cancel to stay and keep the draft. Reloading also discards it.";
+
+/**
+ * A replacement is authorized against a durable snapshot, not against the
+ * forms on screen. A submitted draft that failed is still only component state,
+ * so replacing the ledger must be an explicit decision to drop it.
+ */
+const REPLACEMENT_DISCARD_DRAFT_MESSAGE =
+  "A ledger change here was not saved. A successful replacement will discard the unsaved draft. Choose OK to continue with replacement, or Cancel to keep the draft and stop.";
+
+const REPLACEMENT_CANCELLED_MESSAGE =
+  "Replacement cancelled to keep an unsaved form draft. Nothing was saved. Close Sync to keep or copy the draft before trying again.";
+
+const DEMO_RESET_MESSAGE =
+  "Replace this ledger with the sample demo data? Your local changes and any unsaved values typed into a form will be discarded.";
 
 function warnBeforeLeavingWithLedgerSave(event: BeforeUnloadEvent) {
   event.preventDefault();
@@ -92,6 +106,10 @@ export default function Home() {
   const [targetWarning, setTargetWarning] = useState<string | null>(null);
   const [theme, setTheme] = useState<"light" | "dark" | null>(null);
   const [isSaving, setIsSaving] = useState(false);
+  // Remounts the section panes after a verified replacement. Form state can act
+  // on a replacement's payment IDs and recurrence slots, so a stale draft must
+  // never survive into a ledger it was not typed against.
+  const [ledgerViewGeneration, setLedgerViewGeneration] = useState(0);
   const writeInFlightRef = useRef(false);
   // Keys of forms whose last submitted save failed. A key is added only after a
   // real persistence failure and removed by that same form's next success.
@@ -215,6 +233,17 @@ export default function Home() {
     failedDraftKeysRef.current.delete(draftKey);
   }
 
+  /**
+   * Only a replacement that storage has verified may drop form drafts. The old
+   * pane is unmounted rather than reconciled, because a replacement can reuse a
+   * payment ID or slot that an old draft would otherwise still target.
+   */
+  function showReplacedLedger(nextState: LedgerState, demo = false) {
+    showSavedLedger(nextState, demo);
+    failedDraftKeysRef.current.clear();
+    setLedgerViewGeneration((current) => current + 1);
+  }
+
   function navigate(next: Section) {
     // Navigation is held until the durable result is known so a pending save
     // cannot be mistaken for an abandoned draft or hidden behind another section.
@@ -283,15 +312,21 @@ export default function Home() {
       if (result.ok) showSavedLedger(nextState);
       return result;
     });
-    if (!saved.ok) setSaveWarning(`${saved.error} If you entered values, keep a copy before reloading.`);
+    if (!saved.ok) setSaveWarning(`${saved.error} Keep a copy of any unsaved details before reloading.`);
     return saved;
   }
 
   async function handleApplyState(nextState: LedgerState, options: LedgerChangeOptions): Promise<PersistenceResult> {
+    // Refuse before taking the lock: a declined discard must not queue a write
+    // that could replace the ledger the person chose to keep their draft for.
+    if (writeInFlightRef.current) return { ok: false, error: BUSY_SAVE_MESSAGE };
+    if (failedDraftKeysRef.current.size > 0 && !window.confirm(REPLACEMENT_DISCARD_DRAFT_MESSAGE)) {
+      return { ok: false, error: REPLACEMENT_CANCELLED_MESSAGE };
+    }
     return runLedgerWrite(async () => {
       const saved = await saveLedgerChange(nextState, { ...options, requireLock: true });
       if (saved.ok) {
-        showSavedLedger(nextState);
+        showReplacedLedger(nextState);
         if (options.vaultId) setCurrentVaultId(options.vaultId);
       }
       return saved;
@@ -316,15 +351,17 @@ export default function Home() {
       setSaveWarning(BUSY_SAVE_MESSAGE);
       return;
     }
-    if (!confirm("Replace this ledger with the sample demo data? Your local changes will be replaced.")) return;
-    const saved = await runLedgerWrite(async () => {
+    if (!confirm(DEMO_RESET_MESSAGE)) return;
+    await runLedgerWrite(async () => {
       const result = await saveLedgerChange(SAMPLE_LEDGER_STATE, { expectedRaw: storedRaw, requireLock: true });
-      if (!result.ok) setSaveWarning(result.error);
+      if (result.ok) {
+        showReplacedLedger(SAMPLE_LEDGER_STATE, true);
+        setLoadError(null);
+      } else {
+        setSaveWarning(result.error);
+      }
       return result;
     });
-    if (!saved.ok) return;
-    showSavedLedger(SAMPLE_LEDGER_STATE, true);
-    setLoadError(null);
   }
 
   function handleExportJson() {
@@ -367,7 +404,7 @@ export default function Home() {
     <div role="status" aria-live="polite" className={isSaving ? undefined : "sr-only"}>
       {isSaving && (
         <Notice tone="info" title="Saving your ledger change">
-          Keep this tab open until the browser confirms the change is stored. Your draft stays in the form until then.
+          Keep this tab open until the browser confirms the change is stored. Your draft stays in this section until then.
         </Notice>
       )}
     </div>
@@ -583,85 +620,85 @@ export default function Home() {
         {(section === "home" || section === "bills" || isForecastSection) && windowNotice && (
           <Notice tone="info" title="A bill is outside the plan window">{windowNotice}</Notice>
         )}
-        {section === "home" && (
-          <HomeView
-            asOf={asOf}
-            usingDemo={usingDemo}
-            needsSetup={needsSetup}
-            copy={copy}
-            startingBalanceCents={outcome.startingBalanceCents}
-            safeSpendCents={safeSpendCents}
-            guidanceIssue={guidanceIssue}
-            plannedLowCents={outcome.projectedLowCents}
-            plannedLowDate={outcome.projectedLowDate}
-            slice={slice}
-            insights={insights}
-            assumptionsChanged={assumptionsChanged}
-            horizonDays={assumptions.horizonDays}
-            reserveCents={assumptions.reserveCents}
-            runs={outcome.runs}
-            onNavigate={navigate}
-            saving={isSaving}
-            createOwn={async (input) => {
-              const created = createStarterLedger(input);
-              if (!created.ok) return created;
-              const saved = await handleUpdateState(created.state);
-              recordDraftOutcome(HOME_ONBOARDING_DRAFT_KEY, !saved.ok);
-              return saved;
-            }}
-          />
-        )}
-        {section === "money" && (
-          <MoneyView
-            state={state}
-            asOf={asOf}
-            startingBalanceCents={outcome.startingBalanceCents}
-            onEdit={onEdit}
-            saving={isSaving}
-          />
-        )}
-        {section === "budget" && (
-          <BudgetView
-            current={currentSpend}
-            previous={previousSpend}
-            payments={state.payments}
-            targets={targets}
-            warning={targetWarning}
-            onSave={saveTargets}
-          />
-        )}
-        {section === "bills" && (
-          <fieldset disabled={isSaving} className="m-0 min-w-0 w-full border-0 p-0">
-            <BillsView
+        <React.Fragment key={ledgerViewGeneration}>
+          {section === "home" && (
+            <HomeView
+              asOf={asOf}
+              usingDemo={usingDemo}
+              needsSetup={needsSetup}
+              copy={copy}
+              startingBalanceCents={outcome.startingBalanceCents}
+              safeSpendCents={safeSpendCents}
+              guidanceIssue={guidanceIssue}
+              plannedLowCents={outcome.projectedLowCents}
+              plannedLowDate={outcome.projectedLowDate}
+              slice={slice}
+              insights={insights}
+              assumptionsChanged={assumptionsChanged}
+              horizonDays={assumptions.horizonDays}
+              reserveCents={assumptions.reserveCents}
+              runs={outcome.runs}
+              onNavigate={navigate}
+              saving={isSaving}
+              createOwn={async (nextState) => {
+                const saved = await handleUpdateState(nextState);
+                recordDraftOutcome(HOME_ONBOARDING_DRAFT_KEY, !saved.ok);
+                return saved;
+              }}
+            />
+          )}
+          {section === "money" && (
+            <MoneyView
               state={state}
               asOf={asOf}
-              slice={slicePlan(rows, asOf, assumptions.horizonDays, outcome.startingBalanceCents)}
-              horizonDays={assumptions.horizonDays}
+              startingBalanceCents={outcome.startingBalanceCents}
+              onEdit={onEdit}
+              saving={isSaving}
+            />
+          )}
+          {section === "budget" && (
+            <BudgetView
+              current={currentSpend}
+              previous={previousSpend}
+              payments={state.payments}
+              targets={targets}
+              warning={targetWarning}
+              onSave={saveTargets}
+            />
+          )}
+          {section === "bills" && (
+            <fieldset disabled={isSaving} className="m-0 min-w-0 w-full border-0 p-0">
+              <BillsView
+                state={state}
+                asOf={asOf}
+                slice={slicePlan(rows, asOf, assumptions.horizonDays, outcome.startingBalanceCents)}
+                horizonDays={assumptions.horizonDays}
+                assumptions={assumptions}
+                overdue={overdue}
+                onEdit={onEdit}
+                onDiscardDraft={discardFailedDraft}
+              />
+            </fieldset>
+          )}
+          {section === "plan" && (
+            <PlanView
+              state={state}
+              asOf={asOf}
               assumptions={assumptions}
-              overdue={overdue}
+              base={outcome}
+              showGuidance={showGuidance}
               onEdit={onEdit}
               onDiscardDraft={discardFailedDraft}
+              saving={isSaving}
             />
-          </fieldset>
-        )}
-        {section === "plan" && (
-          <PlanView
-            state={state}
-            asOf={asOf}
-            assumptions={assumptions}
-            base={outcome}
-            showGuidance={showGuidance}
-            onEdit={onEdit}
-            onDiscardDraft={discardFailedDraft}
-            saving={isSaving}
-          />
-        )}
-        {section === "future" && (
-          <FutureView asOf={asOf} outcome={outcome} rows={rows} showGuidance={showGuidance} assumptionsChanged={assumptionsChanged} />
-        )}
-        {section === "advanced" && (
-          <AdvancedView assumptions={assumptions} outcome={outcome} asOf={asOf} showGuidance={showGuidance} onApply={handleApplyAssumptions} />
-        )}
+          )}
+          {section === "future" && (
+            <FutureView asOf={asOf} outcome={outcome} rows={rows} showGuidance={showGuidance} assumptionsChanged={assumptionsChanged} />
+          )}
+          {section === "advanced" && (
+            <AdvancedView assumptions={assumptions} outcome={outcome} asOf={asOf} showGuidance={showGuidance} onApply={handleApplyAssumptions} />
+          )}
+        </React.Fragment>
       </main>
       <footer className="border-t border-line px-4 py-6 text-center text-sm text-muted">
         <p>MonteCarlo keeps this plan in your browser. Sync is optional. Forecasts are estimates, not guarantees.</p>

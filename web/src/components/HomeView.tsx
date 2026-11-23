@@ -7,7 +7,7 @@ import { formatMoney } from "@/lib/money-format";
 import { type Insight, type PlanSlice, type PositionCopy } from "@/lib/present";
 import { type Section } from "@/lib/sections";
 import { type PersistenceResult } from "@/lib/sync-state";
-import { type IncomeItem } from "@/lib/types";
+import type { IncomeItem, LedgerState } from "@/lib/types";
 import { Button, Explain, fieldClass, Metric, Notice } from "./ui";
 
 interface HomeViewProps {
@@ -29,7 +29,7 @@ interface HomeViewProps {
   onNavigate: (section: Section) => void;
   /** Another ledger edit is pending; onboarding and navigation wait for it. */
   saving?: boolean;
-  createOwn: (input: Parameters<typeof createStarterLedger>[0]) => Promise<PersistenceResult>;
+  createOwn: (validated: LedgerState) => Promise<PersistenceResult>;
 }
 
 export function HomeView({
@@ -99,10 +99,15 @@ export function HomeView({
       }
       bill = { name: billName, amountCents, dueDay: day };
     }
+    const starter = createStarterLedger({ asOf: submittedAsOf, balanceCents, income, bill });
+    if (!starter.ok) {
+      setError(starter.error);
+      return;
+    }
     if (balanceCents !== 0) setPinnedOpeningAsOf(submittedAsOf);
     if (income && paydayInput === null) setPinnedPayday(submittedPayday);
     setSubmitting(true);
-    const created = await createOwn({ asOf: submittedAsOf, balanceCents, income, bill });
+    const created = await createOwn(starter.state);
     setSubmitting(false);
     if (!created.ok) {
       setError(created.error);

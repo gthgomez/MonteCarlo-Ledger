@@ -454,6 +454,32 @@ test("the starter ledger keeps its communicated payday and opening as-of through
   await expect(page.getByLabel("Date", { exact: true })).toHaveValue("2026-11-02");
 });
 
+test("invalid starter data does not pin an opening date before there is a write", async ({ page }) => {
+  await installDuskClock(page);
+  await page.goto("/");
+  await page.getByRole("button", { name: "Enter my own numbers" }).click();
+  const balance = page.getByLabel("Money you have now ($)");
+  const payday = page.getByLabel("Next payday", { exact: true });
+  const save = page.getByRole("button", { name: "Save and show my plan" });
+  await balance.fill("500");
+  await page.getByLabel("Paycheck name").fill("Synthetic job");
+  await page.getByLabel("Take-home amount ($)").fill("1900");
+  await payday.fill("");
+  await save.click();
+  await expect(page.getByRole("alert").filter({ hasText: "must be a valid date" })).toBeVisible();
+  expect(await storedRaw(page)).toBeNull();
+
+  await page.clock.runFor(20_000);
+  await expect(page.getByText("Opening balance date: Oct 31, 2026.", { exact: true })).toHaveCount(0);
+  await balance.fill("750");
+  await payday.fill("2026-11-15");
+  await save.click();
+  await expect(save).toHaveCount(0);
+  const saved = await storedLedger(page);
+  expect(saved.transactions).toMatchObject([{ amount_cents: 75_000, type: "Adjustment", date: "2026-11-01" }]);
+  expect(saved.incomes).toMatchObject([{ name: "Synthetic job", next_payday: "2026-11-15" }]);
+});
+
 test("an explicit transaction date survives successful saves and later days", async ({ page }) => {
   await installDuskClock(page);
   await seedSyntheticLedger(page);

@@ -1,8 +1,14 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Dialog, type Page } from "@playwright/test";
 import { randomBytes } from "node:crypto";
 
 import { LEDGER_LOCK_NAME } from "../src/lib/persistence";
 import { SAMPLE_LEDGER_STATE, type LedgerState } from "../src/lib/types";
+import {
+  failNextLedgerWrite,
+  holdLedgerLock,
+  queuedWrites,
+  releaseLedgerLock,
+} from "./helpers/ledger-lock";
 
 /**
  * Focused replacement-safety regressions.
@@ -54,6 +60,89 @@ function validImportState(): LedgerState {
     ...(JSON.parse(JSON.stringify(SAMPLE_LEDGER_STATE)) as LedgerState),
     updated_at: "2026-11-22T12:00:00.000Z",
   };
+}
+
+function syntheticLedger(
+  payments: LedgerState["payments"],
+  updatedAt = "2026-11-01T00:00:00.000Z"
+): LedgerState {
+  return {
+    version: "2.0",
+    updated_at: updatedAt,
+    current_balance_cents: 100_000,
+    incomes: [],
+    payments,
+    transactions: [
+      {
+        id: "tx-opening",
+        amount_cents: 100_000,
+        category: "Adjustment",
+        type: "Adjustment",
+        date: "2026-11-01",
+        description: "Opening balance",
+      },
+    ],
+    bill_occurrences: [],
+    liabilities: [],
+  };
+}
+
+/** The bill that will be moved and then replaced by an unrelated payment. */
+function powerLedger(): LedgerState {
+  return syntheticLedger([
+    { id: "pmt-1", name: "Power", amount_cents: 10_000, recurrence: "Monthly", due_day: 23 },
+  ]);
+}
+
+/**
+ * An independent snapshot that reuses the same payment ID and recurrence slot
+ * as the bill whose move draft is retained in this tab.
+ */
+function rentImportState(): LedgerState {
+  return syntheticLedger(
+    [{ id: "pmt-1", name: "Rent", amount_cents: 50_000, recurrence: "Monthly", due_day: 23 }],
+    "2026-11-24T00:10:00.000Z"
+  );
+}
+
+async function seedSyntheticLedger(page: Page, state: LedgerState): Promise<void> {
+  await page.goto("/");
+  await page.evaluate(
+    ({ key, ledger }) => localStorage.setItem(key, JSON.stringify(ledger)),
+    { key: LEDGER_STORAGE_KEY, ledger: state }
+  );
+  await page.reload();
+}
+
+function storedRaw(page: Page): Promise<string | null> {
+  return page.evaluate((key) => localStorage.getItem(key), LEDGER_STORAGE_KEY);
+}
+
+async function openImportTab(page: Page): Promise<void> {
+  await openSync(page);
+  await page.getByRole("button", { name: "Local JSON Backup" }).click();
+}
+
+/** Choose the backup file and answer the native discard confirmation. */
+async function importBackup(
+  page: Page,
+  state: LedgerState,
+  answer: "accept" | "dismiss"
+): Promise<{ type: string; message: string }> {
+  // Answer the native confirmation as it appears; the file change event stays
+  // blocked until the dialog is settled.
+  const answered = page.waitForEvent("dialog", { timeout: 5_000 }).then(async (dialog) => {
+    const result = { type: dialog.type(), message: dialog.message() };
+    if (answer === "accept") await dialog.accept();
+    else await dialog.dismiss();
+    return result;
+  });
+  await page.locator('input[type="file"]').setInputFiles({
+    name: "replacement.json",
+    mimeType: "application/json",
+    buffer: Buffer.from(JSON.stringify(state)),
+  });
+  return answered;
 }
 
 test.describe("replacement safety", () => {
@@ -166,7 +255,6 @@ test.describe("replacement safety", () => {
     page,
     browser,
   }) => {
-    test.setTimeout(90_000);
     await page.goto("/");
 
     // A new profile with a real local ledger but no synchronization history yet.
@@ -301,4 +389,150 @@ test.describe("replacement safety", () => {
       }
     });
   }
+});
+
+test.describe("snapshot-local identity reuse", () => {
+  test.use({ locale: "en-US", timezoneId: "UTC" });
+
+  test("a verified replacement cannot inherit a failed move draft that reuses bill IDs", async ({
+    page,
+  }) => {
+    test.setTimeout(90_000);
+    await page.clock.install({ time: new Date("2026-11-23T23:59:00.000Z") });
+    await page.clock.pauseAt(new Date("2026-11-23T23:59:30.000Z"));
+    const original = powerLedger();
+    await seedSyntheticLedger(page, original);
+    const originalRaw = await storedRaw(page);
+
+    await page.getByRole("button", { name: "Bills", exact: true }).click();
+    const powerRow = page.getByRole("listitem", { name: "Power due Nov 23, 2026", exact: true });
+    const powerDate = powerRow.getByLabel("New date for Power due Nov 23, 2026");
+    const keptMove = page.getByRole("listitem", {
+      name: "Kept move for Power, original slot Nov 23, 2026",
+      exact: true,
+    });
+    const keptDate = keptMove.getByLabel(
+      "New date for kept move of Power, original slot Nov 23, 2026"
+    );
+    await expect(powerDate).toHaveValue("2026-11-23");
+
+    // Genuine one-shot storage failure: the write reaches localStorage's setItem
+    // once and is rejected, so the move is a submitted failed draft, not a mock.
+    await powerDate.fill("2026-12-03");
+    await holdLedgerLock(page);
+    try {
+      await powerRow.getByRole("button", { name: "Move", exact: true }).click();
+      await expect(page.getByText("Saving your ledger change", { exact: true })).toBeVisible();
+      await expect.poll(() => queuedWrites(page)).toBe(1);
+      expect(await storedRaw(page)).toBe(originalRaw);
+
+      // Cross midnight while the write is queued. The original slot leaves the
+      // projection, so the submitted move is retained in its own fallback list.
+      await page.clock.runFor(60_000);
+      await expect(page.getByText("Saving your ledger change", { exact: true })).toBeVisible();
+      await expect(powerRow).toHaveCount(0);
+      await expect(keptMove).toBeVisible();
+      await expect(keptDate).toHaveValue("2026-12-03");
+      await failNextLedgerWrite(page);
+    } finally {
+      await releaseLedgerLock(page);
+    }
+    await expect(page.getByText("Saving your ledger change", { exact: true })).toHaveCount(0);
+    await expect(page.getByText("Not saved", { exact: true })).toBeVisible();
+    await expect(keptMove).toBeVisible();
+    await expect(keptDate).toHaveValue("2026-12-03");
+    expect(await storedRaw(page)).toBe(originalRaw);
+
+    // Declining the replacement's discard confirmation must not queue any write
+    // and must leave both the exact raw ledger and the submitted draft intact.
+    await openImportTab(page);
+    await holdLedgerLock(page);
+    try {
+      const declined = await importBackup(page, rentImportState(), "dismiss");
+      expect(declined.type).toBe("confirm");
+      expect(declined.message).toMatch(/not saved.*discard/i);
+      await expect(
+        page.getByRole("alert").filter({ hasText: "Replacement cancelled" })
+      ).toBeVisible();
+      await expect(page.getByText(/Successfully imported/)).toHaveCount(0);
+      expect(await storedRaw(page)).toBe(originalRaw);
+      expect(await queuedWrites(page)).toBe(0);
+    } finally {
+      await releaseLedgerLock(page);
+    }
+    await closeSync(page);
+    await expect(keptMove).toBeVisible();
+    await expect(keptDate).toHaveValue("2026-12-03");
+    await expect(page.getByText("Not saved", { exact: true })).toBeVisible();
+
+    // Accepting the discard is not enough: a confirmed storage failure keeps the
+    // same draft and marker, and reports that the previous data is intact.
+    await openImportTab(page);
+    await failNextLedgerWrite(page);
+    const failed = await importBackup(page, rentImportState(), "accept");
+    expect(failed.type).toBe("confirm");
+    const importFailure = page.getByRole("dialog").getByRole("alert").filter({
+      hasText: "Import could not be saved:",
+    });
+    await expect(importFailure).toBeVisible();
+    await expect(importFailure).toContainText(/previous saved data is intact/i);
+    await expect(page.getByText(/Successfully imported/)).toHaveCount(0);
+    expect(await storedRaw(page)).toBe(originalRaw);
+    await closeSync(page);
+    await expect(keptMove).toBeVisible();
+    await expect(keptDate).toHaveValue("2026-12-03");
+    await expect(page.getByText("Not saved", { exact: true })).toBeVisible();
+
+    // A verified retry replaces the ledger. The replacement reuses pmt-1 and the
+    // monthly slot, so only a remounted editor subtree can keep the old draft
+    // from targeting the new bill.
+    await openImportTab(page);
+    const accepted = await importBackup(page, rentImportState(), "accept");
+    expect(accepted.type).toBe("confirm");
+    await expect(page.getByText("Successfully imported ledger backup file!")).toBeVisible();
+    const importedRaw = await storedRaw(page);
+    expect(importedRaw).not.toBe(originalRaw);
+    const imported = JSON.parse(importedRaw ?? "null");
+    expect(imported).toEqual(rentImportState());
+    // The replacement is the independent Rent snapshot: the old move was not
+    // applied and no charge was posted.
+    expect(imported.current_balance_cents).toBe(100_000);
+    expect(imported.payments).toEqual([
+      { id: "pmt-1", name: "Rent", amount_cents: 50_000, recurrence: "Monthly", due_day: 23 },
+    ]);
+    expect(imported.bill_occurrences).toEqual([]);
+    expect(imported.transactions).toEqual(original.transactions);
+
+    await closeSync(page);
+    // The same section stays open and now shows the replacement's ordinary view.
+    await expect(page.getByRole("button", { name: "Bills", exact: true })).toHaveAttribute(
+      "aria-current",
+      "page"
+    );
+    await expect(keptMove).toHaveCount(0);
+    const rentRow = page.getByRole("listitem", { name: "Rent due Dec 23, 2026", exact: true });
+    await expect(rentRow).toBeVisible();
+    await expect(rentRow.getByLabel("New date for Rent due Dec 23, 2026")).toHaveValue("2026-12-23");
+    await expect(page.getByText("Not saved", { exact: true })).toHaveCount(0);
+
+    // The failed-draft marker is gone with the verified replacement, so ordinary
+    // navigation no longer warns about a draft that the old subtree held.
+    let navigationPrompt: string | null = null;
+    const onDialog = async (dialog: Dialog) => {
+      navigationPrompt = dialog.message();
+      await dialog.dismiss();
+    };
+    page.on("dialog", onDialog);
+    try {
+      await page.getByRole("button", { name: "Home", exact: true }).click();
+      await expect(page.getByRole("button", { name: "Home", exact: true })).toHaveAttribute(
+        "aria-current",
+        "page"
+      );
+    } finally {
+      page.off("dialog", onDialog);
+    }
+    expect(navigationPrompt).toBeNull();
+    expect(await storedRaw(page)).toBe(importedRaw);
+  });
 });

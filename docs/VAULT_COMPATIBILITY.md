@@ -35,6 +35,11 @@ ledger before trying again. If storage fails during restore, the app checks that
 data was preserved and reports if it could not verify that. In a browser without Web Locks,
 ordinary edits still work locally, but only one tab should edit the ledger.
 
+Unsaved form drafts are not included in exports or vault snapshots. A successful replacement
+clears the open drafts in that tab; matching IDs do not transfer drafts to the new ledger.
+If a save failed, the app asks before replacing the ledger. Cancel and keep a copy of the
+draft if you need it. A failed or declined replacement does not clear the open draft.
+
 After restoring, check the recorded balance, the next required payment and any bill-to-debt links.
 Re-enter browser-only settings under **Budget** and **Advanced**; they can differ from the settings
 used when the ledger was last viewed. If validation fails or you see a conflict, retain the local

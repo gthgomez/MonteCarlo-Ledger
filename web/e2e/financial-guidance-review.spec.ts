@@ -194,6 +194,7 @@ test("a past one-time bill can link an already-posted expense without a second d
   await failNextLedgerWrite(page);
   await row.getByRole("button", { name: "Link recorded expense" }).click();
   await expect(page.getByText("Not saved", { exact: true })).toBeVisible();
+  await expect(row.getByText(/Linking an expense already in Money; no new debit/)).toBeVisible();
   await row.getByLabel("New date for Car repair due Nov 9, 2026").fill("2026-11-12");
   await row.getByRole("button", { name: "Cancel move", exact: true }).click();
   await expect(expense).toHaveValue("tx-repair");
@@ -285,6 +286,48 @@ test("a past one-time bill with no recorded expense posts exactly once", async (
   expect(reloaded.current_balance_cents).toBe(10_000);
   expect(reloaded.transactions).toHaveLength(2);
   expect(reloaded.bill_occurrences[0].transaction_id).toBe("tx-2");
+});
+
+test("a failed one-time payment that becomes overdue still requires explicit debit consent", async ({ page }) => {
+  await page.clock.install({ time: new Date(`${AS_OF}T23:50:00Z`) });
+  await page.clock.pauseAt(new Date(`${AS_OF}T23:59:50Z`));
+  await seed(page, ledger([{ ...repair, due_date: AS_OF }, subscription]), { useFixedTime: false });
+  await page.getByRole("button", { name: "Bills", exact: true }).click();
+  const row = page.getByRole("listitem", { name: "Car repair due Nov 10, 2026", exact: true });
+  const markPaid = row.getByRole("button", { name: "Mark paid", exact: true });
+  const raw = () => page.evaluate((key) => localStorage.getItem(key), LEDGER_KEY);
+  const before = await raw();
+  await holdLedgerLock(page);
+  try {
+    await failNextLedgerWrite(page);
+    await markPaid.click();
+    await expect.poll(() => queuedWrites(page)).toBe(1);
+    await page.clock.runFor(20_000);
+    await expect(row.getByText("What happened to this bill?")).toBeVisible();
+    expect(await raw()).toBe(before);
+  } finally {
+    await releaseLedgerLock(page);
+  }
+
+  await expect(page.getByText("Not saved", { exact: true })).toBeVisible();
+  await expect(markPaid).toHaveCount(0);
+  expect(await raw()).toBe(before);
+  await row.getByRole("radio", { name: /not recorded in Money and my current cash does not include it/ }).check();
+  const debit = row.getByRole("button", { name: "Record new expense", exact: true });
+  const consent = row.getByRole("checkbox", { name: /I confirm this payment is not already recorded/ });
+  await expect(consent).not.toBeChecked();
+  await expect(debit).toBeDisabled();
+  await consent.check();
+  await debit.click();
+  await expect(row).toHaveCount(0);
+
+  const saved = JSON.parse((await raw()) ?? "null") as LedgerState;
+  expect(saved.current_balance_cents).toBe(100_000);
+  expect(saved.transactions).toHaveLength(2);
+  expect(saved.transactions[1]).toMatchObject({ amount_cents: -90_000, date: AS_OF, type: "Expense" });
+  expect(saved.bill_occurrences).toMatchObject([
+    { payment_id: repair.id, original_due_date: AS_OF, paid: true, transaction_id: saved.transactions[1].id },
+  ]);
 });
 
 test("cash already reflecting a past payment marks the bill paid without a new debit", async ({ page }) => {
