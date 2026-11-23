@@ -26,7 +26,7 @@ export function MoneyView({
   state: LedgerState;
   asOf: string;
   startingBalanceCents: number;
-  onEdit: (result: EditResult) => Promise<PersistenceResult>;
+  onEdit: (result: EditResult, draftKey?: string) => Promise<PersistenceResult>;
   saving: boolean;
 }) {
   const [kind, setKind] = useState<"Expense" | "Income">("Expense");
@@ -77,7 +77,7 @@ export function MoneyView({
       return;
     }
     setFormError(null);
-    const saved = await onEdit(result);
+    const saved = await onEdit(result, "money:record");
     if (!saved.ok) {
       // Keep the submitted draft visible so the user can retry without retyping.
       setFormError(saved.error);
@@ -109,7 +109,7 @@ export function MoneyView({
       return;
     }
     setIncomeError(null);
-    const saved = await onEdit(result);
+    const saved = await onEdit(result, "money:income");
     if (!saved.ok) {
       setIncomeError(saved.error);
       return;
@@ -130,7 +130,7 @@ export function MoneyView({
       return;
     }
     setReconcileError(null);
-    const saved = await onEdit(result);
+    const saved = await onEdit(result, "money:reconcile");
     if (!saved.ok) {
       setReconcileError(saved.error);
       return;

@@ -109,14 +109,17 @@ test("a past one-time bill can link an already-posted expense without a second d
   await expect(row).toBeVisible();
   await expect(row).toContainText("$900.00");
 
-  // A matching posted expense exists, so posting a second one requires explicit confirmation.
+  // A matching posted expense exists, but a new debit still requires choosing that
+  // treatment and explicitly confirming the payment is not already reflected.
+  await row.getByRole("radio", { name: /not recorded in Money and my current cash does not include it/ }).check();
   const recordNew = row.getByRole("button", { name: "Record new expense" });
   await expect(recordNew).toBeDisabled();
-  const confirm = row.getByRole("checkbox", { name: /have not recorded the payment in Money/ });
+  const confirm = row.getByRole("checkbox", { name: /I confirm this payment is not already recorded/ });
   await confirm.check();
   await expect(recordNew).toBeEnabled();
   await confirm.uncheck();
 
+  await row.getByRole("radio", { name: /already recorded in Money/ }).check();
   await row.getByLabel("Recorded expense for Car repair due Nov 9, 2026").selectOption("tx-repair");
   await row.getByRole("button", { name: "Link recorded expense" }).click();
   await expect(row).toHaveCount(0);
@@ -164,9 +167,11 @@ test("a past one-time bill with no recorded expense posts exactly once", async (
   await page.getByRole("button", { name: "Bills", exact: true }).click();
   const row = page.locator('li[aria-label="Car repair due Nov 9, 2026"]');
   await expect(row).toBeVisible();
+  await expect(row.getByRole("radio", { name: /already recorded in Money/ })).toBeDisabled();
   await expect(row.getByLabel(/^Recorded expense for/)).toHaveCount(0);
+  await row.getByRole("radio", { name: /not recorded in Money and my current cash does not include it/ }).check();
   await expect(row.getByRole("button", { name: "Record new expense" })).toBeDisabled();
-  await row.getByRole("checkbox", { name: /have not recorded the payment in Money/ }).check();
+  await row.getByRole("checkbox", { name: /I confirm this payment is not already recorded/ }).check();
   await row.getByRole("button", { name: "Record new expense" }).click();
   await expect(row).toHaveCount(0);
 
@@ -194,6 +199,94 @@ test("a past one-time bill with no recorded expense posts exactly once", async (
   expect(reloaded.current_balance_cents).toBe(10_000);
   expect(reloaded.transactions).toHaveLength(2);
   expect(reloaded.bill_occurrences[0].transaction_id).toBe("tx-2");
+});
+
+test("cash already reflecting a past payment marks the bill paid without a new debit", async ({ page }) => {
+  // Normal onboarding: $1,000 is the only cash entry and already reflects a
+  // prior $900 repair, so no separate Expense exists. A future $10 subscription
+  // keeps a known in-window bill on the schedule.
+  await page.clock.setFixedTime(new Date(`${AS_OF}T12:00:00Z`));
+  await page.addInitScript(({ assumptions, assumptionsKey }) => {
+    if (localStorage.getItem(assumptionsKey) === null) {
+      localStorage.setItem(assumptionsKey, JSON.stringify(assumptions));
+    }
+  }, { assumptions: ASSUMPTIONS, assumptionsKey: ASSUMPTIONS_KEY });
+  await page.goto("/");
+
+  await page.getByRole("button", { name: "Enter my own numbers" }).click();
+  await page.getByLabel("Money you have now ($)").fill("1000");
+  await page.getByLabel("A regular bill").fill("Subscription");
+  await page.getByLabel("Bill amount ($)").fill("10");
+  await page.getByLabel("Due day").fill("15");
+  await page.getByRole("button", { name: "Save and show my plan" }).click();
+  await expect(page.getByRole("heading", { name: "Your numbers" })).toHaveCount(0);
+
+  const onboarded = await page.evaluate((key) => JSON.parse(localStorage.getItem(key) ?? "null"), LEDGER_KEY);
+  expect(onboarded.current_balance_cents).toBe(100_000);
+  expect(onboarded.transactions).toHaveLength(1);
+  expect(onboarded.transactions[0]).toMatchObject({
+    id: "tx-open", amount_cents: 100_000, type: "Adjustment", date: AS_OF,
+  });
+  expect(onboarded.payments).toHaveLength(1);
+  expect(onboarded.bill_occurrences).toEqual([]);
+
+  // Enter the overdue one-time bill through the ordinary Add Bill form.
+  await page.getByRole("button", { name: "Bills", exact: true }).click();
+  await page.getByLabel("Bill name").fill("Car repair");
+  await page.getByLabel("Amount ($)").fill("900");
+  await page.getByLabel("How often").selectOption("One-time");
+  await page.getByLabel("Next date").fill("2026-11-09");
+  await page.getByRole("button", { name: "Add Recurring Bill" }).click();
+
+  const row = page.locator('li[aria-label="Car repair due Nov 9, 2026"]');
+  await expect(row).toBeVisible();
+  await expect(row).toContainText("$900.00");
+  const before = await page.evaluate((key) => JSON.parse(localStorage.getItem(key) ?? "null"), LEDGER_KEY);
+  expect(before.current_balance_cents).toBe(100_000);
+  expect(before.transactions).toHaveLength(1);
+  expect(before.bill_occurrences).toEqual([]);
+
+  // All three treatments are visible, but neither paid action exists until the
+  // person explicitly selects one.
+  await expect(row.getByRole("radio")).toHaveCount(3);
+  await expect(row.getByRole("button", { name: "Mark paid without new expense" })).toHaveCount(0);
+  await expect(row.getByRole("button", { name: "Record new expense" })).toHaveCount(0);
+
+  // The second treatment is explicit: cash already reflects this payment, so
+  // record only the paid occurrence and add no transaction or balance change.
+  await row.getByRole("radio", { name: /already reflected in the cash I have now/ }).check();
+  await row.getByRole("button", { name: "Mark paid without new expense" }).click();
+  await expect(row).toHaveCount(0);
+
+  const saved = await page.evaluate((key) => JSON.parse(localStorage.getItem(key) ?? "null"), LEDGER_KEY);
+  expect(saved.current_balance_cents).toBe(100_000);
+  expect(saved.transactions).toHaveLength(1);
+  expect(saved.transactions[0].id).toBe("tx-open");
+  expect(saved.bill_occurrences).toEqual([{
+    id: "occ-1",
+    payment_id: "pmt-2",
+    due_date: "2026-11-09",
+    paid: true,
+    transaction_id: null,
+    original_due_date: "2026-11-09",
+    is_user_modified: false,
+  }]);
+  expect(saved.bill_occurrences[0].transaction_id).toBeNull();
+
+  // Reload proves the snapshot-compatible null link and identical cash survive.
+  await page.reload();
+  await page.getByRole("button", { name: "Bills", exact: true }).click();
+  await expect(page.locator('li[aria-label="Car repair due Nov 9, 2026"]')).toHaveCount(0);
+  const reloaded = await page.evaluate((key) => JSON.parse(localStorage.getItem(key) ?? "null"), LEDGER_KEY);
+  expect(reloaded.current_balance_cents).toBe(100_000);
+  expect(reloaded.transactions).toHaveLength(1);
+  expect(reloaded.bill_occurrences[0]).toEqual(saved.bill_occurrences[0]);
+
+  // The resolved bill no longer withholds guidance, and the upcoming subscription
+  // keeps the cautious estimate available for this window.
+  await page.getByRole("button", { name: "Home", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Cautious amount to spend" })).toBeVisible();
+  await expect(page.getByText(/has no linked bill record/)).toHaveCount(0);
 });
 
 test("a one-time bill after the window is informational without withholding advice", async ({ page }) => {

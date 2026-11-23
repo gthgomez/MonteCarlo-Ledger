@@ -10,6 +10,7 @@ import {
   dollarsToCents,
   linkPostedExpenseToPastOneTimeBill,
   markBillOccurrencePaid,
+  markPastOneTimeBillPaidWithoutExpense,
   moveBillOccurrence,
   parseDollarsToCents,
   postedExpenseMatchesForPastOneTimeBill,
@@ -377,6 +378,121 @@ test("paid or moved one-time slots and future or missing slots cannot link", () 
   future.payments[0].due_date = "2026-11-20";
   assert.deepEqual(postedExpenseMatchesForPastOneTimeBill(future, "repair", "2026-11-20", AS_OF), []);
   assert.equal(linkPostedExpenseToPastOneTimeBill(future, "repair", "2026-11-20", "tx-repair", AS_OF).ok, false);
+});
+
+test("a payment already reflected in starting cash is marked paid without a new expense", () => {
+  const state = pastOneTimeState();
+  state.current_balance_cents = 100_000;
+  state.transactions = [{
+    id: "tx-open", amount_cents: 100_000, type: "Adjustment", date: "2026-11-01",
+    description: "Opening balance",
+  }];
+  const before = structuredClone(state);
+
+  const result = markPastOneTimeBillPaidWithoutExpense(state, "repair", "2026-11-09", AS_OF);
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+
+  // Only the paid occurrence changed: cash, transactions, ids, and their dates do not.
+  assert.equal(result.state.current_balance_cents, 100_000);
+  assert.deepEqual(result.state.transactions, before.transactions);
+  assert.deepEqual(result.state.bill_occurrences, [{
+    id: "occ-1",
+    payment_id: "repair",
+    due_date: "2026-11-09",
+    paid: true,
+    transaction_id: null,
+    original_due_date: "2026-11-09",
+    is_user_modified: false,
+  }]);
+  assert.equal(result.state.bill_occurrences[0].transaction_id, null);
+  assert.deepEqual(unresolvedPastOneTimeSlots(result.state, AS_OF), []);
+  assert.equal(transactionSumCents(result.state.transactions), result.state.current_balance_cents);
+  assert.deepEqual(
+    { ...result.state, bill_occurrences: before.bill_occurrences, updated_at: before.updated_at },
+    before
+  );
+  // The pure action did not mutate its input.
+  assert.deepEqual(state, before);
+
+  // A retry recognises the same reflected slot and posts nothing again.
+  const retry = markPastOneTimeBillPaidWithoutExpense(result.state, "repair", "2026-11-09", AS_OF);
+  assert.equal(retry.ok, true);
+  if (!retry.ok) return;
+  assert.equal(retry.state.current_balance_cents, 100_000);
+  assert.equal(retry.state.transactions.length, 1);
+  assert.equal(retry.state.bill_occurrences.length, 1);
+  assert.deepEqual(retry.state.transactions, before.transactions);
+});
+
+test("marking a payment reflected fails closed outside unresolved past one-time slots", () => {
+  const state = pastOneTimeState();
+  state.current_balance_cents = 100_000;
+  state.transactions = [{
+    id: "tx-open", amount_cents: 100_000, type: "Adjustment", date: "2026-11-01",
+    description: "Opening balance",
+  }];
+  const before = structuredClone(state);
+
+  assert.equal(markPastOneTimeBillPaidWithoutExpense(state, "repair", "2026-02-30", AS_OF).ok, false);
+  assert.equal(markPastOneTimeBillPaidWithoutExpense(state, "gone", "2026-11-09", AS_OF).ok, false);
+  assert.equal(markPastOneTimeBillPaidWithoutExpense(state, "subscription", "2026-11-09", AS_OF).ok, false);
+  assert.equal(markPastOneTimeBillPaidWithoutExpense(state, "repair", "2026-11-08", AS_OF).ok, false);
+  assert.equal(markPastOneTimeBillPaidWithoutExpense(state, "repair", "2026-11-09", "2026-11-09").ok, false);
+
+  const moved = structuredClone(state);
+  moved.bill_occurrences = [{
+    id: "occ-moved",
+    payment_id: "repair",
+    due_date: "2026-11-12",
+    original_due_date: "2026-11-09",
+    paid: false,
+    is_user_modified: true,
+  }];
+  assert.equal(markPastOneTimeBillPaidWithoutExpense(moved, "repair", "2026-11-09", AS_OF).ok, false);
+
+  const linked = structuredClone(state);
+  linked.bill_occurrences = [{
+    id: "occ-linked",
+    payment_id: "repair",
+    due_date: "2026-11-09",
+    paid: true,
+    transaction_id: "tx-old",
+    original_due_date: "2026-11-09",
+    is_user_modified: false,
+  }];
+  assert.equal(markPastOneTimeBillPaidWithoutExpense(linked, "repair", "2026-11-09", AS_OF).ok, false);
+
+  const unpaid = structuredClone(state);
+  unpaid.bill_occurrences = [{
+    id: "occ-unpaid",
+    payment_id: "repair",
+    due_date: "2026-11-09",
+    paid: false,
+    original_due_date: "2026-11-09",
+    is_user_modified: false,
+  }];
+  assert.equal(markPastOneTimeBillPaidWithoutExpense(unpaid, "repair", "2026-11-09", AS_OF).ok, false);
+
+  // Every rejected attempt left its input ledger untouched.
+  assert.deepEqual(state, before);
+  assert.deepEqual(moved.bill_occurrences[0], {
+    id: "occ-moved",
+    payment_id: "repair",
+    due_date: "2026-11-12",
+    original_due_date: "2026-11-09",
+    paid: false,
+    is_user_modified: true,
+  });
+  assert.deepEqual(linked.bill_occurrences[0], {
+    id: "occ-linked",
+    payment_id: "repair",
+    due_date: "2026-11-09",
+    paid: true,
+    transaction_id: "tx-old",
+    original_due_date: "2026-11-09",
+    is_user_modified: false,
+  });
 });
 
 test("numeric ids stay numeric and links remain unique", () => {

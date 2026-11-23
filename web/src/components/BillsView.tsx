@@ -8,6 +8,7 @@ import {
   dollarsToCents,
   linkPostedExpenseToPastOneTimeBill,
   markBillOccurrencePaid,
+  markPastOneTimeBillPaidWithoutExpense,
   moveBillOccurrence,
   postedExpenseMatchesForPastOneTimeBill,
   removePayment,
@@ -40,7 +41,7 @@ export function BillsView({
   horizonDays: number;
   assumptions: Assumptions;
   overdue: OverdueAssessment;
-  onEdit: (result: EditResult) => Promise<PersistenceResult>;
+  onEdit: (result: EditResult, draftKey?: string) => Promise<PersistenceResult>;
 }) {
   const [name, setName] = useState("");
   const [amount, setAmount] = useState("100");
@@ -53,6 +54,11 @@ export function BillsView({
   const [moveDates, setMoveDates] = useState<Record<string, string>>({});
   const [linkChoices, setLinkChoices] = useState<Record<string, string>>({});
   const [confirmNewExpense, setConfirmNewExpense] = useState<Record<string, boolean>>({});
+  // One unlinked treatment per unresolved slot: link, already reflected in cash,
+  // or a new expense. This is a person's explicit choice, never inferred.
+  const [resolutionChoices, setResolutionChoices] = useState<
+    Record<string, "link" | "reflected" | "new">
+  >({});
   const billsVary = assumptions.expenseVariationMin !== 0 || assumptions.expenseVariationMax !== 0;
   const billSlots = useMemo(
     () => projectBillPayments(state, asOf, addDaysIso(asOf, horizonDays)).slots
@@ -71,14 +77,49 @@ export function BillsView({
   );
   const upcoming = slice.events.filter((event) => event.amount_cents < 0);
 
+  function chooseResolution(key: string, choice: "link" | "reflected" | "new") {
+    setResolutionChoices((current) => ({ ...current, [key]: choice }));
+    if (choice !== "new") {
+      setConfirmNewExpense((current) => {
+        if (!(key in current)) return current;
+        const next = { ...current };
+        delete next[key];
+        return next;
+      });
+    }
+    if (choice !== "link") {
+      setLinkChoices((current) => {
+        if (!(key in current)) return current;
+        const next = { ...current };
+        delete next[key];
+        return next;
+      });
+    }
+  }
+
   async function settleRow(key: string, result: EditResult) {
-    if (!(await onEdit(result)).ok) return;
+    if (!(await onEdit(result, `bills:slot:${key}`)).ok) return;
     setLinkChoices((current) => {
       const next = { ...current };
       delete next[key];
       return next;
     });
     setConfirmNewExpense((current) => {
+      const next = { ...current };
+      delete next[key];
+      return next;
+    });
+    setResolutionChoices((current) => {
+      const next = { ...current };
+      delete next[key];
+      return next;
+    });
+  }
+
+  async function moveRow(key: string, result: EditResult) {
+    const saved = await onEdit(result, `bills:slot:${key}`);
+    if (!saved.ok) return;
+    setMoveDates((current) => {
       const next = { ...current };
       delete next[key];
       return next;
@@ -104,7 +145,7 @@ export function BillsView({
       setError(result.error);
       return;
     }
-    const saved = await onEdit(result);
+    const saved = await onEdit(result, "bills:add");
     if (!saved.ok) {
       setError(saved.error);
       return;
@@ -120,7 +161,7 @@ export function BillsView({
           They total {formatMoney(overdue.total_cents)}
           {overdue.earliest_date ? `, earliest ${formatDateLabel(overdue.earliest_date)}` : ""}.{" "}
           {(overdue.unresolved_one_time_count ?? 0) > 0
-            ? "A one-time bill with no linked bill record is not in the plan until you link a recorded expense, record it, or move it below. A missing link does not prove no payment was made; nothing was added automatically."
+            ? "A one-time bill with no linked bill record is not in the plan until you resolve it below: link a recorded expense, mark it paid if the payment is already reflected in your current cash, record it if it is not, or move it. A missing link does not prove no payment was made; nothing was added automatically."
             : "The forecast counts them today while they are unpaid."}
         </Notice>
       )}
@@ -223,7 +264,11 @@ export function BillsView({
               </div>
               <div className="flex items-center gap-3">
                 <span className="tabular-nums font-semibold">{formatMoney(payment.amount_cents)}</span>
-                <Button type="button" variant="quiet" onClick={() => onEdit(removePayment(state, payment.id ?? ""))}>
+                <Button
+                  type="button"
+                  variant="quiet"
+                  onClick={() => void onEdit(removePayment(state, payment.id ?? ""))}
+                >
                   Remove {payment.name}
                 </Button>
               </div>
@@ -235,8 +280,10 @@ export function BillsView({
             <h3 className="font-semibold">Record or move a payment</h3>
             <p className="mt-1 text-sm text-muted">
               Marking an ordinary bill paid records the expense today. For a past one-time bill with no linked
-              bill record, link a posted expense if you already paid it; record a new expense only if it is not
-              already in Money. If it pays a debt, use the lender’s balance to update the amount still owed in Plan.
+              bill record, choose what happened: link the full posted expense if it is already in Money, mark it
+              paid without a debit when the payment is already reflected in the cash you entered (for example, it
+              is in “Money you have now”), or record a new expense only if the payment is not recorded and current
+              cash excludes it. If it pays a debt, use the lender’s balance to update the amount still owed in Plan.
             </p>
             <ul className="mt-2 divide-y divide-line">
               {billSlots.map(({ payment, slotDate, dueDate }) => {
@@ -248,27 +295,43 @@ export function BillsView({
                 const matches = isUnresolved
                   ? postedExpenseMatchesForPastOneTimeBill(state, paymentId, slotDate, asOf)
                   : [];
-                const needsConfirmation = isUnresolved && !confirmNewExpense[key];
+                const resolution = resolutionChoices[key];
                 const choice = linkChoices[key] ?? "";
+                const dueLabel = formatDateLabel(dueDate);
                 return (
-                  <li key={key} aria-label={`${payment.name} due ${formatDateLabel(dueDate)}`} className="grid gap-2 py-3 text-sm">
-                    <span>{payment.name} · due {formatDateLabel(dueDate)} · {formatMoney(payment.amount_cents)}</span>
+                  <li key={key} aria-label={`${payment.name} due ${dueLabel}`} className="grid gap-2 py-3 text-sm">
+                    <span>{payment.name} · due {dueLabel} · {formatMoney(payment.amount_cents)}</span>
                     {isUnresolved && (
-                      <>
+                      <fieldset className="grid gap-2 rounded-lg border border-line p-3">
+                        <legend className="px-1 font-medium">What happened to this bill?</legend>
                         <p className="text-muted">
                           No linked bill record exists for this one-time bill. That does not prove no payment was
-                          made; an expense may already be recorded in Money.
+                          made. Choose one treatment; nothing is inferred from the opening balance.
                         </p>
-                        {matches.length > 0 ? (
-                          <>
-                            <p className="text-muted">
-                              A recorded expense for the same amount exists. Select the one that paid this bill.
-                              Linking it does not change your balance or add a transaction.
-                            </p>
+                        <label className="flex items-start gap-2">
+                          <input
+                            type="radio"
+                            name={`bill-resolution-${key}`}
+                            checked={resolution === "link"}
+                            disabled={matches.length === 0}
+                            onChange={() => chooseResolution(key, "link")}
+                          />
+                          <span>
+                            An expense for the full amount is already recorded in Money. Link it; this does not
+                            change your balance or add a transaction.
+                          </span>
+                        </label>
+                        {matches.length === 0 ? (
+                          <p className="pl-6 text-muted">
+                            Only a single recorded expense for the full amount can be linked. If you paid this in
+                            parts or recorded a different amount, review the entries in Money instead of adding it again.
+                          </p>
+                        ) : resolution === "link" ? (
+                          <div className="grid gap-2 pl-6">
                             <div className="flex flex-wrap items-center gap-2">
                               <select
                                 className={`${fieldClass} w-auto`}
-                                aria-label={`Recorded expense for ${payment.name} due ${formatDateLabel(dueDate)}`}
+                                aria-label={`Recorded expense for ${payment.name} due ${dueLabel}`}
                                 value={choice}
                                 onChange={(event) => setLinkChoices((current) => ({ ...current, [key]: event.target.value }))}
                               >
@@ -284,51 +347,116 @@ export function BillsView({
                                 variant="quiet"
                                 disabled={!choice}
                                 onClick={() => void settleRow(
-                                  key, linkPostedExpenseToPastOneTimeBill(state, paymentId, slotDate, choice, asOf),
+                                  key,
+                                  linkPostedExpenseToPastOneTimeBill(state, paymentId, slotDate, choice, asOf),
                                 )}
                               >
                                 Link recorded expense
                               </Button>
                             </div>
-                          </>
-                        ) : (
-                          <p className="text-muted">
-                            Only a single recorded expense for the full amount can be linked. If you paid this
-                            in parts or recorded a different amount, review the entries in Money instead of adding it again.
-                          </p>
-                        )}
-                        <label className="flex items-center gap-2">
+                          </div>
+                        ) : null}
+                        <label className="flex items-start gap-2">
                           <input
-                            type="checkbox"
-                            checked={confirmNewExpense[key] ?? false}
-                            onChange={(event) =>
-                              setConfirmNewExpense((current) => ({ ...current, [key]: event.target.checked }))
-                            }
+                            type="radio"
+                            name={`bill-resolution-${key}`}
+                            checked={resolution === "reflected"}
+                            onChange={() => chooseResolution(key, "reflected")}
                           />
-                          I paid this bill and have not recorded the payment in Money
+                          <span>
+                            The payment is already reflected in the cash I have now. Mark it paid without a debit.
+                            Use this when, for example, yesterday’s payment is already in “Money you have now”.
+                          </span>
                         </label>
-                      </>
+                        {resolution === "reflected" && (
+                          <div className="grid gap-2 pl-6">
+                            <p className="text-muted">
+                              This records the bill as paid and adds no transaction or new expense. Your current
+                              balance stays unchanged.
+                            </p>
+                            <div>
+                              <Button
+                                type="button"
+                                variant="quiet"
+                                onClick={() => void settleRow(
+                                  key,
+                                  markPastOneTimeBillPaidWithoutExpense(state, paymentId, slotDate, asOf),
+                                )}
+                              >
+                                Mark paid without new expense
+                              </Button>
+                            </div>
+                          </div>
+                        )}
+                        <label className="flex items-start gap-2">
+                          <input
+                            type="radio"
+                            name={`bill-resolution-${key}`}
+                            checked={resolution === "new"}
+                            onChange={() => chooseResolution(key, "new")}
+                          />
+                          <span>
+                            I paid it, but the payment is not recorded in Money and my current cash does not include
+                            it. This records a new expense and lowers the balance.
+                          </span>
+                        </label>
+                        {resolution === "new" && (
+                          <div className="grid gap-2 pl-6">
+                            <p className="text-muted">
+                              Recording adds a {formatMoney(payment.amount_cents)} expense dated today. To
+                              record the original date instead, add the expense in Money and then link it.
+                              Do not do either if your current cash already reflects the payment.
+                            </p>
+                            <label className="flex items-start gap-2">
+                              <input
+                                type="checkbox"
+                                checked={confirmNewExpense[key] ?? false}
+                                onChange={(event) =>
+                                  setConfirmNewExpense((current) => ({ ...current, [key]: event.target.checked }))
+                                }
+                              />
+                              <span>I confirm this payment is not already recorded and is not reflected in my current cash.</span>
+                            </label>
+                            <div>
+                              <Button
+                                type="button"
+                                variant="quiet"
+                                disabled={!confirmNewExpense[key]}
+                                onClick={() => void settleRow(
+                                  key,
+                                  markBillOccurrencePaid(state, paymentId, slotDate, asOf),
+                                )}
+                              >
+                                Record new expense
+                              </Button>
+                            </div>
+                          </div>
+                        )}
+                      </fieldset>
                     )}
                     <div className="flex flex-wrap items-center gap-2">
-                      <Button
-                        type="button"
-                        variant="quiet"
-                        disabled={needsConfirmation}
-                        onClick={() => void settleRow(key, markBillOccurrencePaid(state, paymentId, slotDate, asOf))}
-                      >
-                        {isUnresolved ? "Record new expense" : "Mark paid"}
-                      </Button>
+                      {!isUnresolved && (
+                        <Button
+                          type="button"
+                          variant="quiet"
+                          onClick={() => void onEdit(markBillOccurrencePaid(state, paymentId, slotDate, asOf))}
+                        >
+                          Mark paid
+                        </Button>
+                      )}
                       <input
                         className={`${fieldClass} w-auto`}
                         type="date"
                         value={selectedDate}
                         onChange={(event) => setMoveDates((current) => ({ ...current, [key]: event.target.value }))}
-                        aria-label={`New date for ${payment.name} due ${formatDateLabel(dueDate)}`}
+                        aria-label={`New date for ${payment.name} due ${dueLabel}`}
                       />
                       <Button
                         type="button"
                         variant="quiet"
-                        onClick={() => void onEdit(moveBillOccurrence(state, paymentId, slotDate, selectedDate))}
+                        onClick={() => void moveRow(
+                          key, moveBillOccurrence(state, paymentId, slotDate, selectedDate),
+                        )}
                       >
                         Move
                       </Button>

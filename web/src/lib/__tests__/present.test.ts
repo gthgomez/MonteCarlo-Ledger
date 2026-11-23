@@ -101,7 +101,8 @@ test("an unresolved past one-time bill withholds guidance but keeps the known sc
   assert.match(issue ?? "", /Nov 9, 2026 \(2026-11-09\)/);
   assert.match(issue ?? "", /has no linked bill record/);
   assert.match(issue ?? "", /not that no payment was made/);
-  assert.match(issue ?? "", /link a recorded expense, record it only if you have not entered it yet, or move the bill if it is still unpaid/);
+  assert.match(issue ?? "", /mark it paid if your current cash already reflects the payment/);
+  assert.match(issue ?? "", /record a new expense only if neither Money nor your current cash reflects it/);
   // The in-window bill is still shown; only the cautious advice is withheld.
   assert.deepEqual(rows.map((row) => row.amount_cents), [-1_000]);
 });
@@ -124,6 +125,7 @@ test("paid or moved one-time slots do not withhold guidance", () => {
     ...base,
     bill_occurrences: [{
       id: "occ-paid", payment_id: "repair", due_date: "2026-11-09", paid: true,
+      transaction_id: null,
     }],
   };
   assert.equal(spendingGuidanceIssue(paid, rows, AS_OF), null);
@@ -415,7 +417,7 @@ test("overdue insight says the plan counts recorded unpaid occurrences and flags
   assert.ok(overdue);
   assert.match(overdue.detail, /\$42\.00/);
   assert.match(overdue.detail, /Recorded unpaid occurrences are counted today/);
-  assert.match(overdue.detail, /no linked bill record is left out until you link or record it in Bills/);
+  assert.match(overdue.detail, /no linked bill record stays out until you review its payment status in Bills/);
 });
 
 test("even set-aside is integer division with a remainder, not a forecast", () => {

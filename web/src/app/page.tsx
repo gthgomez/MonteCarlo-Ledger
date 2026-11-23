@@ -52,6 +52,15 @@ const THEME_KEY = "mc-theme";
 const BUSY_SAVE_MESSAGE =
   "Another ledger change is still being saved. Wait for it to finish before trying again. Nothing was saved by this attempt.";
 
+const HOME_ONBOARDING_DRAFT_KEY = "home:onboarding";
+
+/**
+ * A failed save leaves its submitted values in the form's component state.
+ * Section navigation unmounts that state, so leaving must be an explicit choice.
+ */
+const UNSAVED_DRAFT_LEAVE_MESSAGE =
+  "A ledger change here was not saved. If you leave this section now, the values you typed will be discarded. Choose Cancel to stay and keep them. Reloading the page also discards them.";
+
 function warnBeforeLeavingWithLedgerSave(event: BeforeUnloadEvent) {
   event.preventDefault();
   event.returnValue = "";
@@ -84,6 +93,9 @@ export default function Home() {
   const [theme, setTheme] = useState<"light" | "dark" | null>(null);
   const [isSaving, setIsSaving] = useState(false);
   const writeInFlightRef = useRef(false);
+  // Keys of forms whose last submitted save failed. A key is added only after a
+  // real persistence failure and removed by that same form's next success.
+  const failedDraftKeysRef = useRef<Set<string>>(new Set());
 
   // The listener lives only while a ledger write is actually outstanding. It is
   // removed on success, conflict, cancellation, or storage failure.
@@ -188,10 +200,24 @@ export default function Home() {
 
   const evaluation = useMemo(() => evaluateLedger(state, asOf, assumptions), [state, asOf, assumptions]);
 
+  function recordDraftOutcome(draftKey: string | undefined, failed: boolean) {
+    if (!draftKey) return;
+    if (failed) failedDraftKeysRef.current.add(draftKey);
+    else failedDraftKeysRef.current.delete(draftKey);
+  }
+
   function navigate(next: Section) {
     // Navigation is held until the durable result is known so a pending save
     // cannot be mistaken for an abandoned draft or hidden behind another section.
     if (writeInFlightRef.current) return;
+    if (next === section) return;
+    // Every section change goes through here, including header and insight
+    // links. Only an explicit confirmation may discard a failed form draft.
+    if (failedDraftKeysRef.current.size > 0) {
+      if (!window.confirm(UNSAVED_DRAFT_LEAVE_MESSAGE)) return;
+      failedDraftKeysRef.current.clear();
+      setSaveWarning(null);
+    }
     setSection(next);
     const url = `${window.location.pathname}${window.location.search}#${next}`;
     window.history.replaceState(null, "", url);
@@ -302,12 +328,15 @@ export default function Home() {
     downloadAnchor.remove();
   }
 
-  async function onEdit(result: EditResult): Promise<PersistenceResult> {
+  async function onEdit(result: EditResult, draftKey?: string): Promise<PersistenceResult> {
     if (!result.ok) {
+      // A rejected edit was never submitted to storage, so it is not a saved draft.
       setSaveWarning(result.error);
       return { ok: false, error: result.error };
     }
-    return handleUpdateState(result.state);
+    const saved = await handleUpdateState(result.state);
+    recordDraftOutcome(draftKey, !saved.ok);
+    return saved;
   }
 
   function openSync() {
@@ -567,7 +596,9 @@ export default function Home() {
             createOwn={async (input) => {
               const created = createStarterLedger(input);
               if (!created.ok) return created;
-              return handleUpdateState(created.state);
+              const saved = await handleUpdateState(created.state);
+              recordDraftOutcome(HOME_ONBOARDING_DRAFT_KEY, !saved.ok);
+              return saved;
             }}
           />
         )}

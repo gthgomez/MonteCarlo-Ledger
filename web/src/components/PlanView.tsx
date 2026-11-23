@@ -118,7 +118,7 @@ export function PlanView({
   assumptions: Assumptions;
   base: ModelOutcome;
   showGuidance: boolean;
-  onEdit: (result: EditResult) => Promise<PersistenceResult>;
+  onEdit: (result: EditResult, draftKey?: string) => Promise<PersistenceResult>;
   saving: boolean;
 }) {
   const [question, setQuestion] = useState<Question>("purchase");
@@ -234,7 +234,7 @@ export function PlanView({
       return;
     }
     setDebtError(null);
-    const saved = await onEdit(result);
+    const saved = await onEdit(result, "plan:add-debt");
     if (!saved.ok) {
       setDebtError(saved.error);
       return;
@@ -274,8 +274,9 @@ export function PlanView({
               type="button"
               role="tab"
               aria-selected={question === tab.id}
+              disabled={saving}
               onClick={() => setQuestion(tab.id)}
-              className={`min-h-11 shrink-0 rounded-lg px-3 text-sm font-semibold ${
+              className={`min-h-11 shrink-0 rounded-lg px-3 text-sm font-semibold disabled:opacity-50 ${
                 question === tab.id ? "bg-accent text-on-accent" : "border border-line bg-inset text-ink"
               }`}
             >
@@ -592,7 +593,7 @@ export function PlanView({
                           return;
                         }
                         setDebtError(null);
-                        const saved = await onEdit(result);
+                        const saved = await onEdit(result, `plan:debt-balance:${debt.id}`);
                         if (!saved.ok) {
                           setDebtError(saved.error);
                           return;

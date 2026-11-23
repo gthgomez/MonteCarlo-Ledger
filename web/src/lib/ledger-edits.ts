@@ -36,6 +36,27 @@ function occurrenceSlot(occurrence: { due_date: string; original_due_date?: stri
   return occurrence.original_due_date || occurrence.due_date;
 }
 
+/** Append one paid occurrence for a stable schedule slot, without touching cash. */
+function appendPaidOccurrence(
+  next: LedgerState,
+  paymentId: number | string,
+  slotDate: string,
+  transactionId: number | string | null,
+): void {
+  next.bill_occurrences = [
+    ...next.bill_occurrences,
+    {
+      id: nextId("occ", next.bill_occurrences),
+      payment_id: paymentId,
+      due_date: slotDate,
+      paid: true,
+      transaction_id: transactionId,
+      original_due_date: slotDate,
+      is_user_modified: false,
+    },
+  ];
+}
+
 function isScheduledPaymentDate(payment: PaymentItem, value: string): boolean {
   if (payment.recurrence === "Monthly" && payment.due_day) {
     const [year, month, day] = value.split("-").map(Number);
@@ -91,18 +112,7 @@ export function markBillOccurrencePaid(
     occurrence.paid = true;
     occurrence.transaction_id = transactionId;
   } else {
-    next.bill_occurrences = [
-      ...next.bill_occurrences,
-      {
-        id: nextId("occ", next.bill_occurrences),
-        payment_id: paymentId,
-        due_date: slotDate,
-        paid: true,
-        transaction_id: transactionId,
-        original_due_date: slotDate,
-        is_user_modified: false,
-      },
-    ];
+    appendPaidOccurrence(next, paymentId, slotDate, transactionId);
   }
   next.updated_at = new Date().toISOString();
   return commit(next);
@@ -206,18 +216,54 @@ export function linkPostedExpenseToPastOneTimeBill(
     };
   }
   const next = clone(state);
-  next.bill_occurrences = [
-    ...next.bill_occurrences,
-    {
-      id: nextId("occ", next.bill_occurrences),
-      payment_id: paymentId,
-      due_date: slotDate,
-      paid: true,
-      transaction_id: match.id,
-      original_due_date: slotDate,
-      is_user_modified: false,
-    },
-  ];
+  appendPaidOccurrence(next, paymentId, slotDate, match.id);
+  next.updated_at = new Date().toISOString();
+  return commit(next);
+}
+
+/**
+ * Mark a past one-time bill paid without posting a debit because the payment is
+ * already included in the starting or reconciled cash balance (for example, it
+ * is part of “Money you have now”). Only the paid occurrence is added, with a
+ * null transaction id and the original scheduled date as its stable slot. No
+ * expense row and no balance adjustment are created. The action is idempotent;
+ * an already-paid slot with a transaction stays untouched and is rejected.
+ * Eligibility is rechecked here so a stale row cannot mark a different slot.
+ */
+export function markPastOneTimeBillPaidWithoutExpense(
+  state: LedgerState,
+  paymentId: number | string,
+  slotDate: string,
+  asOf: string,
+): EditResult {
+  if (!validIsoDate(slotDate) || !validIsoDate(asOf)) {
+    return { ok: false, error: "Use valid calendar dates for the bill and the review date." };
+  }
+  const payment = state.payments.find((item) => String(item.id) === String(paymentId));
+  if (!payment) return { ok: false, error: "That bill no longer exists." };
+  if (payment.recurrence !== "One-time" || payment.due_date !== slotDate) {
+    return { ok: false, error: "Only a past one-time bill can be marked paid without a new expense." };
+  }
+  if (!(slotDate < asOf)) {
+    return { ok: false, error: "That bill is not past due yet. Resolve it on its scheduled date." };
+  }
+  const existing = state.bill_occurrences.find(
+    (item) => String(item.payment_id) === String(paymentId) && occurrenceSlot(item) === slotDate,
+  );
+  if (existing) {
+    if (existing.paid && !existing.is_user_modified && existing.due_date === slotDate && existing.transaction_id == null) {
+      return { ok: true, state };
+    }
+    return { ok: false, error: "That bill already has a recorded payment. Refresh the bill list." };
+  }
+  const slot = unresolvedPastOneTimeSlots(state, asOf).find(
+    (candidate) => String(candidate.payment.id) === String(paymentId) && candidate.slotDate === slotDate,
+  );
+  if (!slot) {
+    return { ok: false, error: "This is not a past one-time slot on the bill’s schedule. Refresh the bill list." };
+  }
+  const next = clone(state);
+  appendPaidOccurrence(next, paymentId, slotDate, null);
   next.updated_at = new Date().toISOString();
   return commit(next);
 }

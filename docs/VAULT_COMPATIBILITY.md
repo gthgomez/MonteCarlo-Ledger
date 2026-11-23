@@ -55,10 +55,12 @@ Persisted overdue unpaid occurrences count at the start of the plan. A forecast 
 On Web, a one-time bill with a past due date and no saved occurrence needs review before
 the app offers spending or risk guidance. The payment may already be in **Money**. In **Bills**,
 link an eligible recorded expense for the full amount without debiting your balance again.
-If you paid in parts, review the entries in **Money** rather than entering them again.
-Only record a new expense if you paid the bill and have not entered it yet. If it is still
-unpaid, move the bill to the date you expect to pay. An upcoming one-time bill outside the
-chosen window is not included in its estimates; extend the window under **Advanced** to plan for it.
+If the full payment is already reflected in your starting or reconciled cash, you can mark
+that past bill paid without a new transaction. Only record a new expense if neither **Money**
+nor the current cash balance reflects that payment. If you recorded it in parts, check the
+entries rather than adding the full expense again. If it is still unpaid, move the bill to
+the date you expect to pay. An upcoming one-time bill outside the chosen window is not included
+in its estimates; extend the window under **Advanced** to plan for it.
 
 ## Verification limits
 

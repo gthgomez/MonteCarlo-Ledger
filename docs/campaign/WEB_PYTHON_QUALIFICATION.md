@@ -48,8 +48,9 @@ cannot explain, or data they can lose without a warning, is a release defect.
    Compare Web and Python only with the same scenario, seed, settings, and supported fields.
    Include boundary cases: opening cash already short, no eligible paycheck, zero/below-reserve
    headroom, month-end/leap-year recurrence, partial settlement, an unresolved one-time overdue bill,
-   and a bill on the first excluded day. Resolve the overdue bill both by linking an existing
-   expense (cash is unchanged) and by recording a previously unentered payment (one debit).
+   and a bill on the first excluded day. For an overdue bill, verify that both linking a recorded
+   expense and marking a payment already reflected in starting cash leave cash unchanged. Record
+   an expense exactly once only when the paid amount is not yet reflected in the ledger.
    Check that a fixed dated extra debt payment stays fixed and compares the same draws of
    other bills and surprises. This Web what-if is not a new serialized contract option.
    A reproducible seed or synthetic backtest checks implementation, not calibration.
@@ -82,7 +83,8 @@ cannot explain, or data they can lose without a warning, is a release defect.
   cash date and default transaction date across local midnight; a date the user chose must not
   change. Hold a ledger save and verify the page warns before leaving, prevents a second
   submission, and keeps the entered draft if the write fails. A failed draft stays in the
-  open form, not in the saved ledger; keep a copy before reloading. Do not claim first-ever
+  open form, not in the saved ledger. Verify that cancelling a section switch preserves the
+  values; keep a copy before deliberately discarding them or reloading. Do not claim first-ever
   offline load for a hosted browser app.
 - If hosted staging is authorized later, record the exact preview build, isolated database and
   synthetic-only fixture scope (no secrets in the record). Repeat Web ↔ Python, including restart
