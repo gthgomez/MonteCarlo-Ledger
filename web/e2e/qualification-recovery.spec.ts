@@ -471,6 +471,7 @@ test.describe("W2 Web → Python → fresh Web recovery", () => {
           page.getByText(/Successfully pushed encrypted snapshot to Cloud Vault \(rev 1\)!/)
         ).toBeVisible();
 
+        expect(await readStorage(page, VAULT_ID_STORAGE_KEY)).toBe(vaultId);
         const syncRaw = await readStorage(page, SYNC_STORAGE_KEY);
         expect(syncRaw).not.toBeNull();
         const syncMap = JSON.parse(syncRaw as string);
@@ -648,8 +649,9 @@ test.describe("W2 Web → Python → fresh Web recovery", () => {
         ).toHaveCount(0);
 
         // The conflict is local to the attempt: the stale client keeps its own
-        // ledger and ancestry, and never learns revision 2 by overwriting it.
+        // ledger, selected vault and ancestry, and never overwrites revision 2.
         expect(await readStorage(page, LEDGER_STORAGE_KEY)).toBe(beforeLedger);
+        expect(await readStorage(page, VAULT_ID_STORAGE_KEY)).toBe(vaultId);
         expect(await readStorage(page, SYNC_STORAGE_KEY)).toBe(beforeSync);
         await closeSync(page);
       });

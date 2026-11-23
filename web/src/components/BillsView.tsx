@@ -6,15 +6,22 @@ import { addDaysIso, formatDateLabel, relativeDay } from "@/lib/dates";
 import {
   addBill,
   dollarsToCents,
+  linkPostedExpenseToPastOneTimeBill,
   markBillOccurrencePaid,
   moveBillOccurrence,
+  postedExpenseMatchesForPastOneTimeBill,
   removePayment,
   type EditResult,
 } from "@/lib/ledger-edits";
 import { formatMoney } from "@/lib/money-format";
 import type { OverdueAssessment } from "@/lib/overdue";
 import { type PlanSlice } from "@/lib/present";
-import { paymentOccurrenceKey, projectBillPayments } from "@/lib/scenario-builder";
+import {
+  paymentOccurrenceKey,
+  projectBillPayments,
+  unresolvedPastOneTimeSlots,
+} from "@/lib/scenario-builder";
+import type { PersistenceResult } from "@/lib/sync-state";
 import { type LedgerState, type PaymentItem } from "@/lib/types";
 import { Button, fieldClass, Notice, Panel } from "./ui";
 
@@ -33,7 +40,7 @@ export function BillsView({
   horizonDays: number;
   assumptions: Assumptions;
   overdue: OverdueAssessment;
-  onEdit: (result: EditResult) => void;
+  onEdit: (result: EditResult) => Promise<PersistenceResult>;
 }) {
   const [name, setName] = useState("");
   const [amount, setAmount] = useState("100");
@@ -44,15 +51,41 @@ export function BillsView({
   const [auto, setAuto] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [moveDates, setMoveDates] = useState<Record<string, string>>({});
+  const [linkChoices, setLinkChoices] = useState<Record<string, string>>({});
+  const [confirmNewExpense, setConfirmNewExpense] = useState<Record<string, boolean>>({});
   const billsVary = assumptions.expenseVariationMin !== 0 || assumptions.expenseVariationMax !== 0;
   const billSlots = useMemo(
     () => projectBillPayments(state, asOf, addDaysIso(asOf, horizonDays)).slots
       .sort((left, right) => left.dueDate.localeCompare(right.dueDate)),
     [state, asOf, horizonDays]
   );
+  // Only an unresolved past one-time slot gets the "link a recorded expense" path.
+  // Ordinary occupied slots keep the standard Mark paid behavior and copy.
+  const unresolvedKeys = useMemo(
+    () => new Set(
+      unresolvedPastOneTimeSlots(state, asOf)
+        .filter((slot) => slot.payment.id !== undefined)
+        .map((slot) => paymentOccurrenceKey(slot.payment.id as number | string, slot.slotDate))
+    ),
+    [state, asOf]
+  );
   const upcoming = slice.events.filter((event) => event.amount_cents < 0);
 
-  function submit(event: React.FormEvent) {
+  async function settleRow(key: string, result: EditResult) {
+    if (!(await onEdit(result)).ok) return;
+    setLinkChoices((current) => {
+      const next = { ...current };
+      delete next[key];
+      return next;
+    });
+    setConfirmNewExpense((current) => {
+      const next = { ...current };
+      delete next[key];
+      return next;
+    });
+  }
+
+  async function submit(event: React.FormEvent) {
     event.preventDefault();
     const cents = dollarsToCents(Number(amount));
     if (cents === null) {
@@ -71,19 +104,23 @@ export function BillsView({
       setError(result.error);
       return;
     }
+    const saved = await onEdit(result);
+    if (!saved.ok) {
+      setError(saved.error);
+      return;
+    }
     setError(null);
     setName("");
-    onEdit(result);
   }
 
   return (
     <div className="space-y-6">
       {overdue.count > 0 && (
-        <Notice tone="warning" title={`${overdue.count} past-due unpaid ${overdue.count === 1 ? "bill" : "bills"}`}>
+        <Notice tone="warning" title={`${overdue.count} past-due ${overdue.count === 1 ? "bill" : "bills"} to review`}>
           They total {formatMoney(overdue.total_cents)}
           {overdue.earliest_date ? `, earliest ${formatDateLabel(overdue.earliest_date)}` : ""}.{" "}
           {(overdue.unresolved_one_time_count ?? 0) > 0
-            ? "A one-time bill with no recorded occurrence is not in the plan until you mark it paid or move it below; no expense was added automatically."
+            ? "A one-time bill with no linked bill record is not in the plan until you link a recorded expense, record it, or move it below. A missing link does not prove no payment was made; nothing was added automatically."
             : "The forecast counts them today while they are unpaid."}
         </Notice>
       )}
@@ -197,8 +234,9 @@ export function BillsView({
           <div className="mt-6 border-t border-line pt-4">
             <h3 className="font-semibold">Record or move a payment</h3>
             <p className="mt-1 text-sm text-muted">
-              Marking a bill paid records the expense today. If it pays a debt, use the lender’s balance
-              to update the amount still owed in Plan.
+              Marking an ordinary bill paid records the expense today. For a past one-time bill with no linked
+              bill record, link a posted expense if you already paid it; record a new expense only if it is not
+              already in Money. If it pays a debt, use the lender’s balance to update the amount still owed in Plan.
             </p>
             <ul className="mt-2 divide-y divide-line">
               {billSlots.map(({ payment, slotDate, dueDate }) => {
@@ -206,20 +244,79 @@ export function BillsView({
                 const paymentId = payment.id;
                 const key = paymentOccurrenceKey(paymentId, slotDate);
                 const selectedDate = moveDates[key] ?? (dueDate < asOf ? asOf : dueDate);
+                const isUnresolved = unresolvedKeys.has(key);
+                const matches = isUnresolved
+                  ? postedExpenseMatchesForPastOneTimeBill(state, paymentId, slotDate, asOf)
+                  : [];
+                const needsConfirmation = isUnresolved && !confirmNewExpense[key];
+                const choice = linkChoices[key] ?? "";
                 return (
-                  <li
-                    key={key}
-                    aria-label={`${payment.name} due ${formatDateLabel(dueDate)}`}
-                    className="flex flex-wrap items-center justify-between gap-3 py-3 text-sm"
-                  >
+                  <li key={key} aria-label={`${payment.name} due ${formatDateLabel(dueDate)}`} className="grid gap-2 py-3 text-sm">
                     <span>{payment.name} · due {formatDateLabel(dueDate)} · {formatMoney(payment.amount_cents)}</span>
+                    {isUnresolved && (
+                      <>
+                        <p className="text-muted">
+                          No linked bill record exists for this one-time bill. That does not prove no payment was
+                          made; an expense may already be recorded in Money.
+                        </p>
+                        {matches.length > 0 ? (
+                          <>
+                            <p className="text-muted">
+                              A recorded expense for the same amount exists. Select the one that paid this bill.
+                              Linking it does not change your balance or add a transaction.
+                            </p>
+                            <div className="flex flex-wrap items-center gap-2">
+                              <select
+                                className={`${fieldClass} w-auto`}
+                                aria-label={`Recorded expense for ${payment.name} due ${formatDateLabel(dueDate)}`}
+                                value={choice}
+                                onChange={(event) => setLinkChoices((current) => ({ ...current, [key]: event.target.value }))}
+                              >
+                                <option value="">Select a recorded expense…</option>
+                                {matches.map((match) => (
+                                  <option key={String(match.id)} value={String(match.id)}>
+                                    {formatDateLabel(match.date)} · {formatMoney(match.amountCents)} · {match.description} · {match.id}
+                                  </option>
+                                ))}
+                              </select>
+                              <Button
+                                type="button"
+                                variant="quiet"
+                                disabled={!choice}
+                                onClick={() => void settleRow(
+                                  key, linkPostedExpenseToPastOneTimeBill(state, paymentId, slotDate, choice, asOf),
+                                )}
+                              >
+                                Link recorded expense
+                              </Button>
+                            </div>
+                          </>
+                        ) : (
+                          <p className="text-muted">
+                            Only a single recorded expense for the full amount can be linked. If you paid this
+                            in parts or recorded a different amount, review the entries in Money instead of adding it again.
+                          </p>
+                        )}
+                        <label className="flex items-center gap-2">
+                          <input
+                            type="checkbox"
+                            checked={confirmNewExpense[key] ?? false}
+                            onChange={(event) =>
+                              setConfirmNewExpense((current) => ({ ...current, [key]: event.target.checked }))
+                            }
+                          />
+                          I paid this bill and have not recorded the payment in Money
+                        </label>
+                      </>
+                    )}
                     <div className="flex flex-wrap items-center gap-2">
                       <Button
                         type="button"
                         variant="quiet"
-                        onClick={() => onEdit(markBillOccurrencePaid(state, paymentId, slotDate, asOf))}
+                        disabled={needsConfirmation}
+                        onClick={() => void settleRow(key, markBillOccurrencePaid(state, paymentId, slotDate, asOf))}
                       >
-                        Mark paid
+                        {isUnresolved ? "Record new expense" : "Mark paid"}
                       </Button>
                       <input
                         className={`${fieldClass} w-auto`}
@@ -231,7 +328,7 @@ export function BillsView({
                       <Button
                         type="button"
                         variant="quiet"
-                        onClick={() => onEdit(moveBillOccurrence(state, paymentId, slotDate, selectedDate))}
+                        onClick={() => void onEdit(moveBillOccurrence(state, paymentId, slotDate, selectedDate))}
                       >
                         Move
                       </Button>

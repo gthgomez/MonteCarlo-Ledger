@@ -12,6 +12,7 @@ import {
 } from "@/lib/ledger-edits";
 import { formatMoney } from "@/lib/money-format";
 import { cashMinusEnteredDebt, enteredDebtCents, transactionSumCents } from "@/lib/present";
+import { type PersistenceResult } from "@/lib/sync-state";
 import { type IncomeItem, type LedgerState } from "@/lib/types";
 import { Button, Explain, fieldClass, Notice, Panel } from "./ui";
 
@@ -20,11 +21,13 @@ export function MoneyView({
   asOf,
   startingBalanceCents,
   onEdit,
+  saving,
 }: {
   state: LedgerState;
   asOf: string;
   startingBalanceCents: number;
-  onEdit: (result: EditResult) => void;
+  onEdit: (result: EditResult) => Promise<PersistenceResult>;
+  saving: boolean;
 }) {
   const [kind, setKind] = useState<"Expense" | "Income">("Expense");
   const [amount, setAmount] = useState("");
@@ -53,13 +56,15 @@ export function MoneyView({
   const reconcileDiff =
     reconcileCents === null ? null : reconcileCents - startingBalanceCents;
 
-  function submitRecord(event: React.FormEvent) {
+  async function submitRecord(event: React.FormEvent) {
     event.preventDefault();
     const cents = dollarsToCents(Number(amount));
     if (cents === null || cents <= 0) {
       setFormError("Enter an amount greater than zero.");
       return;
     }
+    const submittedAmount = amount;
+    const submittedDescription = description;
     const result = recordCashflow(state, {
       date,
       kind,
@@ -72,18 +77,27 @@ export function MoneyView({
       return;
     }
     setFormError(null);
-    setAmount("");
-    setDescription("");
-    onEdit(result);
+    const saved = await onEdit(result);
+    if (!saved.ok) {
+      // Keep the submitted draft visible so the user can retry without retyping.
+      setFormError(saved.error);
+      return;
+    }
+    setFormError(null);
+    // Clear only what was actually submitted. A value changed while the write
+    // was pending belongs to the next draft and must survive the previous save.
+    setAmount((current) => (current === submittedAmount ? "" : current));
+    setDescription((current) => (current === submittedDescription ? "" : current));
   }
 
-  function submitIncome(event: React.FormEvent) {
+  async function submitIncome(event: React.FormEvent) {
     event.preventDefault();
     const cents = dollarsToCents(Number(incomeAmount));
     if (cents === null) {
       setIncomeError("Enter the take-home amount.");
       return;
     }
+    const submittedName = incomeName;
     const result = addIncomeSchedule(state, {
       name: incomeName,
       amountCents: cents,
@@ -95,11 +109,16 @@ export function MoneyView({
       return;
     }
     setIncomeError(null);
-    setIncomeName("");
-    onEdit(result);
+    const saved = await onEdit(result);
+    if (!saved.ok) {
+      setIncomeError(saved.error);
+      return;
+    }
+    setIncomeError(null);
+    setIncomeName((current) => (current === submittedName ? "" : current));
   }
 
-  function submitReconcile(event: React.FormEvent) {
+  async function submitReconcile(event: React.FormEvent) {
     event.preventDefault();
     if (reconcileCents === null) {
       setReconcileError("Enter the balance you see, in dollars.");
@@ -111,13 +130,18 @@ export function MoneyView({
       return;
     }
     setReconcileError(null);
-    onEdit(result);
+    const saved = await onEdit(result);
+    if (!saved.ok) {
+      setReconcileError(saved.error);
+      return;
+    }
+    setReconcileError(null);
   }
 
   const rows = [...state.transactions].reverse();
 
   return (
-    <div className="space-y-6">
+    <fieldset disabled={saving} className="m-0 min-w-0 w-full space-y-6 border-0 p-0">
       <Panel
         title="What you have"
         lede="This balance uses transactions dated today or earlier. Expected paychecks appear on their scheduled dates."
@@ -260,7 +284,7 @@ export function MoneyView({
               </div>
               <div className="flex items-center gap-3">
                 <span className="tabular-nums font-semibold">{formatMoney(income.amount_cents)}</span>
-                <Button type="button" variant="quiet" onClick={() => onEdit(removeIncome(state, income.id ?? ""))}>
+                <Button type="button" variant="quiet" onClick={() => void onEdit(removeIncome(state, income.id ?? ""))}>
                   Remove {income.name}
                 </Button>
               </div>
@@ -291,6 +315,6 @@ export function MoneyView({
           <Button type="submit">Reconcile Ledger</Button>
         </form>
       </Panel>
-    </div>
+    </fieldset>
   );
 }

@@ -23,6 +23,8 @@ interface SyncModalProps {
     options: LedgerChangeOptions
   ) => Promise<PersistenceResult>;
   currentVaultId?: string;
+  /** Tells the page which vault id was durably remembered after a successful push. */
+  onVaultSelected: (vaultId: string) => void;
 }
 
 type ActiveOperation = "push" | "pull" | "import";
@@ -52,6 +54,7 @@ export function SyncModal({
   currentStoredRaw,
   onApplyState,
   currentVaultId,
+  onVaultSelected,
 }: SyncModalProps) {
   const dialogRef = useRef<HTMLDialogElement>(null);
   const operationSeq = useRef(0);
@@ -68,6 +71,12 @@ export function SyncModal({
   const [activeOperation, setActiveOperation] = useState<ActiveOperation | null>(null);
   const [pendingConflict, setPendingConflict] = useState<PullTarget | null>(null);
   const isLoading = activeOperation !== null;
+
+  // The page reads the saved vault id after its first render. Adopt it when it
+  // arrives so a reload reopens Sync with the remembered id, not a new random one.
+  useEffect(() => {
+    if (currentVaultId) setVaultId(currentVaultId);
+  }, [currentVaultId]);
 
   const invalidateOperation = useCallback(() => {
     operationSeq.current += 1;
@@ -165,18 +174,32 @@ export function SyncModal({
       // Salt discovery happens inside pushVault: an existing vault is always
       // authenticated with its stored KDF salt, never a freshly generated one.
       // The push is based on this device's recorded revision, never the latest one.
-      const { revision, ancestryPersisted } = await pushVault(
-        vaultId.trim(),
+      const chosenVaultId = vaultId.trim();
+      const { revision, ancestryPersisted, vaultIdPersisted } = await pushVault(
+        chosenVaultId,
         passphrase,
         currentState,
         { expectedLedgerRaw: currentStoredRaw }
       );
       if (operationSeq.current !== id) return;
       setErrorMessage(null);
+      // Only a push the vault accepted may change the remembered selection. If the
+      // upload succeeded but the id could not be stored (or another tab selected a
+      // different vault meanwhile), keep the page honest and ask for a manual copy.
+      if (vaultIdPersisted) onVaultSelected(chosenVaultId);
+      const problems: string[] = [];
+      if (!ancestryPersisted) {
+        problems.push("the local sync ancestry could not be saved, so pull before the next push");
+      }
+      if (!vaultIdPersisted) {
+        problems.push(
+          "this browser could not save the Vault ID (another tab may have selected a different vault, or storage failed); record the Vault ID and passphrase now so you can pull this vault again"
+        );
+      }
       setStatusMessage(
-        ancestryPersisted
+        problems.length === 0
           ? `Successfully pushed encrypted snapshot to Cloud Vault (rev ${revision})!`
-          : `Pushed to Cloud Vault (rev ${revision}), but the local sync ancestry could not be saved. Pull before the next push.`
+          : `Pushed to Cloud Vault (rev ${revision}), but ${problems.join("; ")}.`
       );
     } catch (err: unknown) {
       if (operationSeq.current !== id) return;
@@ -410,6 +433,12 @@ export function SyncModal({
               A pull replaces the ledger in this browser. To keep a copy, close Sync and use Export in the header first.
               Budget targets and forecast settings, including your reserve, stay in this browser and are not
               recovered from the vault. Android-only data needs a separate native backup.
+            </p>
+            <p className="text-muted">
+              After a successful push this browser remembers the Vault ID, but never the passphrase.
+              Before clearing browser data or moving to another device, record the Vault ID and
+              passphrase separately in a safe place outside this browser. You need both to pull the
+              encrypted snapshot into a new profile.
             </p>
 
             <div>

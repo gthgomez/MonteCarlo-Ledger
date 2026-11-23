@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { AdvancedView } from "@/components/AdvancedView";
 import { BillsView } from "@/components/BillsView";
 import { BudgetView } from "@/components/BudgetView";
@@ -43,6 +43,20 @@ import { parseLedgerState } from "@/lib/validate";
 
 const THEME_KEY = "mc-theme";
 
+/**
+ * A second submission in the same tab must fail immediately instead of queuing
+ * behind the first. Otherwise both edits are built from the same visible ledger,
+ * the second compares against a raw snapshot that the first has already replaced,
+ * and the conflict surfaces only after the form has erased the user's draft.
+ */
+const BUSY_SAVE_MESSAGE =
+  "Another ledger change is still being saved. Wait for it to finish before trying again. Nothing was saved by this attempt.";
+
+function warnBeforeLeavingWithLedgerSave(event: BeforeUnloadEvent) {
+  event.preventDefault();
+  event.returnValue = "";
+}
+
 function browserStorage(): Storage | null {
   try {
     return window.localStorage;
@@ -68,6 +82,14 @@ export default function Home() {
   const [targets, setTargets] = useState<BudgetTargets>(EMPTY_TARGETS);
   const [targetWarning, setTargetWarning] = useState<string | null>(null);
   const [theme, setTheme] = useState<"light" | "dark" | null>(null);
+  const [isSaving, setIsSaving] = useState(false);
+  const writeInFlightRef = useRef(false);
+
+  // The listener lives only while a ledger write is actually outstanding. It is
+  // removed on success, conflict, cancellation, or storage failure.
+  useEffect(() => {
+    return () => window.removeEventListener("beforeunload", warnBeforeLeavingWithLedgerSave);
+  }, []);
 
   useEffect(() => {
     const savedAssumptions = loadAssumptions(browserStorage());
@@ -167,6 +189,9 @@ export default function Home() {
   const evaluation = useMemo(() => evaluateLedger(state, asOf, assumptions), [state, asOf, assumptions]);
 
   function navigate(next: Section) {
+    // Navigation is held until the durable result is known so a pending save
+    // cannot be mistaken for an abandoned draft or hidden behind another section.
+    if (writeInFlightRef.current) return;
     setSection(next);
     const url = `${window.location.pathname}${window.location.search}#${next}`;
     window.history.replaceState(null, "", url);
@@ -190,20 +215,52 @@ export default function Home() {
     setSaveWarning(null);
   }
 
+  /**
+   * The single owner for every ledger write in this tab.
+   *
+   * The guard is a ref rather than state so two handlers firing in the same
+   * event loop turn cannot both pass it before React re-renders. The second
+   * caller gets an immediate failure and keeps its draft instead of replacing
+   * the first save with a snapshot built from the same stale ledger.
+   */
+  async function runLedgerWrite(
+    operation: () => Promise<PersistenceResult>
+  ): Promise<PersistenceResult> {
+    if (writeInFlightRef.current) {
+      return { ok: false, error: BUSY_SAVE_MESSAGE };
+    }
+    writeInFlightRef.current = true;
+    setIsSaving(true);
+    window.addEventListener("beforeunload", warnBeforeLeavingWithLedgerSave);
+    try {
+      return await operation();
+    } finally {
+      window.removeEventListener("beforeunload", warnBeforeLeavingWithLedgerSave);
+      writeInFlightRef.current = false;
+      setIsSaving(false);
+    }
+  }
+
   async function handleUpdateState(nextState: LedgerState): Promise<PersistenceResult> {
-    const saved = await saveLedgerChange(nextState, { expectedRaw: storedRaw });
-    if (saved.ok) showSavedLedger(nextState);
-    else setSaveWarning(saved.error);
+    const saved = await runLedgerWrite(async () => {
+      setSaveWarning(null);
+      const result = await saveLedgerChange(nextState, { expectedRaw: storedRaw });
+      if (result.ok) showSavedLedger(nextState);
+      return result;
+    });
+    if (!saved.ok) setSaveWarning(`${saved.error} If you entered values, keep a copy before reloading.`);
     return saved;
   }
 
   async function handleApplyState(nextState: LedgerState, options: LedgerChangeOptions): Promise<PersistenceResult> {
-    const saved = await saveLedgerChange(nextState, { ...options, requireLock: true });
-    if (saved.ok) {
-      showSavedLedger(nextState);
-      if (options.vaultId) setCurrentVaultId(options.vaultId);
-    }
-    return saved;
+    return runLedgerWrite(async () => {
+      const saved = await saveLedgerChange(nextState, { ...options, requireLock: true });
+      if (saved.ok) {
+        showSavedLedger(nextState);
+        if (options.vaultId) setCurrentVaultId(options.vaultId);
+      }
+      return saved;
+    });
   }
 
   function handleApplyAssumptions(nextAssumptions: Assumptions): string | null {
@@ -220,12 +277,17 @@ export default function Home() {
   }
 
   async function handleResetDemo() {
-    if (!confirm("Replace this ledger with the sample demo data? Your local changes will be replaced.")) return;
-    const saved = await saveLedgerChange(SAMPLE_LEDGER_STATE, { expectedRaw: storedRaw, requireLock: true });
-    if (!saved.ok) {
-      setSaveWarning(saved.error);
+    if (writeInFlightRef.current) {
+      setSaveWarning(BUSY_SAVE_MESSAGE);
       return;
     }
+    if (!confirm("Replace this ledger with the sample demo data? Your local changes will be replaced.")) return;
+    const saved = await runLedgerWrite(async () => {
+      const result = await saveLedgerChange(SAMPLE_LEDGER_STATE, { expectedRaw: storedRaw, requireLock: true });
+      if (!result.ok) setSaveWarning(result.error);
+      return result;
+    });
+    if (!saved.ok) return;
     showSavedLedger(SAMPLE_LEDGER_STATE, true);
     setLoadError(null);
   }
@@ -240,9 +302,17 @@ export default function Home() {
     downloadAnchor.remove();
   }
 
-  function onEdit(result: EditResult) {
-    if (result.ok) void handleUpdateState(result.state);
-    else setSaveWarning(result.error);
+  async function onEdit(result: EditResult): Promise<PersistenceResult> {
+    if (!result.ok) {
+      setSaveWarning(result.error);
+      return { ok: false, error: result.error };
+    }
+    return handleUpdateState(result.state);
+  }
+
+  function openSync() {
+    if (writeInFlightRef.current) return;
+    setIsSyncModalOpen(true);
   }
 
   function saveTargets(next: BudgetTargets): string | null {
@@ -252,6 +322,18 @@ export default function Home() {
     setTargetWarning(null);
     return null;
   }
+
+  // Keep the live region mounted so assistive technology announces the pending
+  // message when it appears, rather than treating a new region as first render.
+  const savingNotice = (
+    <div role="status" aria-live="polite" className={isSaving ? undefined : "sr-only"}>
+      {isSaving && (
+        <Notice tone="info" title="Saving your ledger change">
+          Keep this tab open until the browser confirms the change is stored. Your draft stays in the form until then.
+        </Notice>
+      )}
+    </div>
+  );
 
   if (!isLoaded) {
     return (
@@ -271,6 +353,7 @@ export default function Home() {
             No forecast is shown because the stored financial data could not be validated. The raw data has not been
             deleted or replaced.
           </p>
+          {savingNotice}
           {saveWarning && <Notice tone="warning" title="Not saved">{saveWarning}</Notice>}
           <div className="flex flex-wrap gap-3">
             {storedRaw && (
@@ -308,6 +391,7 @@ export default function Home() {
             Your ledger is still saved on this device. No forecast is shown until the settings are repaired or you
             choose the defaults. Choosing defaults will not replace your ledger.
           </p>
+          {savingNotice}
           {assumptionsRaw && (
             <a
               href={"data:text/json;charset=utf-8," + encodeURIComponent(assumptionsRaw)}
@@ -359,6 +443,7 @@ export default function Home() {
           <p className="text-sm text-muted">
             This is usually caused by an edited ledger entry or an amount outside the supported range.
           </p>
+          {savingNotice}
           {saveWarning && <Notice tone="warning" title="Not saved">{saveWarning}</Notice>}
           <div className="flex flex-wrap gap-3">
             <button
@@ -442,14 +527,16 @@ export default function Home() {
         onToggleTheme={toggleTheme}
         isSynced={!!currentVaultId}
         vaultId={currentVaultId}
-        onOpenSync={() => setIsSyncModalOpen(true)}
+        onOpenSync={openSync}
         onResetDemo={handleResetDemo}
         onExportJson={handleExportJson}
         section={section}
         onNavigate={navigate}
+        isSaving={isSaving}
       />
       <main id="content" className="mx-auto w-full min-w-0 max-w-5xl flex-1 space-y-4 px-4 py-6">
         <p className="text-sm text-muted">{SECTION_QUESTION[section]}</p>
+        {savingNotice}
         {saveWarning && <Notice tone="warning" title="Not saved">{saveWarning}</Notice>}
         {assumptionsWarning && <Notice tone="warning" title="Financial settings">{assumptionsWarning}</Notice>}
         {isForecastSection && guidanceIssue && (
@@ -476,6 +563,7 @@ export default function Home() {
             reserveCents={assumptions.reserveCents}
             runs={outcome.runs}
             onNavigate={navigate}
+            saving={isSaving}
             createOwn={async (input) => {
               const created = createStarterLedger(input);
               if (!created.ok) return created;
@@ -484,7 +572,13 @@ export default function Home() {
           />
         )}
         {section === "money" && (
-          <MoneyView state={state} asOf={asOf} startingBalanceCents={outcome.startingBalanceCents} onEdit={onEdit} />
+          <MoneyView
+            state={state}
+            asOf={asOf}
+            startingBalanceCents={outcome.startingBalanceCents}
+            onEdit={onEdit}
+            saving={isSaving}
+          />
         )}
         {section === "budget" && (
           <BudgetView
@@ -497,18 +591,28 @@ export default function Home() {
           />
         )}
         {section === "bills" && (
-          <BillsView
-            state={state}
-            asOf={asOf}
-            slice={slicePlan(rows, asOf, assumptions.horizonDays, outcome.startingBalanceCents)}
-            horizonDays={assumptions.horizonDays}
-            assumptions={assumptions}
-            overdue={overdue}
-            onEdit={onEdit}
-          />
+          <fieldset disabled={isSaving} className="m-0 min-w-0 w-full border-0 p-0">
+            <BillsView
+              state={state}
+              asOf={asOf}
+              slice={slicePlan(rows, asOf, assumptions.horizonDays, outcome.startingBalanceCents)}
+              horizonDays={assumptions.horizonDays}
+              assumptions={assumptions}
+              overdue={overdue}
+              onEdit={onEdit}
+            />
+          </fieldset>
         )}
         {section === "plan" && (
-          <PlanView state={state} asOf={asOf} assumptions={assumptions} base={outcome} showGuidance={showGuidance} onEdit={onEdit} />
+          <PlanView
+            state={state}
+            asOf={asOf}
+            assumptions={assumptions}
+            base={outcome}
+            showGuidance={showGuidance}
+            onEdit={onEdit}
+            saving={isSaving}
+          />
         )}
         {section === "future" && (
           <FutureView asOf={asOf} outcome={outcome} rows={rows} showGuidance={showGuidance} assumptionsChanged={assumptionsChanged} />
@@ -527,6 +631,7 @@ export default function Home() {
         currentStoredRaw={storedRaw}
         onApplyState={handleApplyState}
         currentVaultId={currentVaultId}
+        onVaultSelected={setCurrentVaultId}
       />
     </div>
   );

@@ -13,6 +13,7 @@ import { SAMPLE_LEDGER_STATE, type LedgerState } from "../src/lib/types";
  */
 
 const LEDGER_STORAGE_KEY = "montecarlo_ledger_state_v2";
+const VAULT_ID_STORAGE_KEY = "montecarlo_vault_id";
 const PASSPHRASE = "synthetic sync-replacement passphrase";
 
 function uniqueVaultId(): string {
@@ -159,6 +160,75 @@ test.describe("replacement safety", () => {
     expect(
       await page.evaluate((key) => localStorage.getItem(key), LEDGER_STORAGE_KEY)
     ).not.toBeNull();
+  });
+
+  test("a successful push keeps the generated vault id across reload and an isolated browser", async ({
+    page,
+    browser,
+  }) => {
+    test.setTimeout(90_000);
+    await page.goto("/");
+
+    // A new profile with a real local ledger but no synchronization history yet.
+    await page.getByRole("button", { name: "Enter my own numbers" }).click();
+    await page.getByLabel("Money you have now ($)").fill("1234");
+    await page.getByRole("button", { name: "Save and show my plan" }).click();
+    await expect(page.getByText(/You have \$1,234\.00 recorded/)).toBeVisible();
+
+    // Do not fill the id: this is the unguessable default generated for a new profile.
+    await openSync(page);
+    const vaultId = await page.getByLabel("Vault Identifier").inputValue();
+    expect(vaultId).toMatch(/^vault-[0-9a-f]{32}$/);
+    await page.getByLabel("Vault Secret Passphrase").fill(PASSPHRASE);
+    await page.getByRole("button", { name: "Push (Upload)" }).click();
+    await expect(
+      page.getByText(/Successfully pushed encrypted snapshot to Cloud Vault \(rev 1\)!/)
+    ).toBeVisible();
+    await closeSync(page);
+    expect(
+      await page.evaluate((key) => localStorage.getItem(key), VAULT_ID_STORAGE_KEY)
+    ).toBe(vaultId);
+
+    await page.reload();
+    // The saved id is hydrated after the first render and reopens Sync pre-filled.
+    await expect(
+      page.getByRole("button", { name: `Cloud Vault ${vaultId}` })
+    ).toBeVisible();
+    await openSync(page);
+    await expect(page.getByLabel("Vault Identifier")).toHaveValue(vaultId);
+    await closeSync(page);
+
+    // A separate browser context has none of this profile's storage. The saved id
+    // and passphrase alone recover the encrypted snapshot.
+    const origin = new URL(page.url()).origin;
+    const isolated = await browser.newContext({ baseURL: origin });
+    try {
+      const isolatedPage = await isolated.newPage();
+      await isolatedPage.goto("/");
+      await openSync(isolatedPage);
+      await isolatedPage.getByLabel("Vault Identifier").fill(vaultId);
+      await isolatedPage.getByLabel("Vault Secret Passphrase").fill(PASSPHRASE);
+      await isolatedPage.getByRole("button", { name: "Pull (Download)" }).click();
+      // A fresh profile starts from the in-memory demo ledger, which a pull must not
+      // replace without confirmation.
+      await expect(
+        isolatedPage.getByText(/This device has ledger edits that were never synchronized/)
+      ).toBeVisible();
+      await isolatedPage
+        .getByRole("button", { name: "Replace local ledger with the vault" })
+        .click();
+      await expect(
+        isolatedPage.getByText(/Successfully pulled, decrypted and saved vault \(rev 1\)!/)
+      ).toBeVisible();
+      expect(
+        await isolatedPage.evaluate(
+          (key) => localStorage.getItem(key),
+          VAULT_ID_STORAGE_KEY
+        )
+      ).toBe(vaultId);
+    } finally {
+      await isolated.close();
+    }
   });
 
   for (const order of ["valid then invalid", "invalid then valid"] as const) {

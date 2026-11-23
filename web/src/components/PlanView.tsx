@@ -25,6 +25,7 @@ import {
   type ModelOutcome,
 } from "@/lib/scenarios";
 import { planningMinimumPaymentCents } from "@/lib/scenario-builder";
+import { type PersistenceResult } from "@/lib/sync-state";
 import { type LedgerState, type LiabilityItem } from "@/lib/types";
 import { Button, Explain, fieldClass, Notice, Panel } from "./ui";
 
@@ -110,13 +111,15 @@ export function PlanView({
   base,
   showGuidance,
   onEdit,
+  saving,
 }: {
   state: LedgerState;
   asOf: string;
   assumptions: Assumptions;
   base: ModelOutcome;
   showGuidance: boolean;
-  onEdit: (result: EditResult) => void;
+  onEdit: (result: EditResult) => Promise<PersistenceResult>;
+  saving: boolean;
 }) {
   const [question, setQuestion] = useState<Question>("purchase");
   const [purchaseAmount, setPurchaseAmount] = useState(350);
@@ -200,7 +203,7 @@ export function PlanView({
     { id: "debt", label: "How do I pay off debt?" },
   ];
 
-  function submitDebt(event: React.FormEvent) {
+  async function submitDebt(event: React.FormEvent) {
     event.preventDefault();
     const balance = dollarsToCents(Number(debtBalance));
     const min = dollarsToCents(Number(debtMin));
@@ -209,6 +212,14 @@ export function PlanView({
       setDebtError("Enter a name, the amount you owe, a minimum payment, and a rate such as 21.99.");
       return;
     }
+    const submitted = {
+      name: debtName,
+      balance: debtBalance,
+      min: debtMin,
+      apr: debtApr,
+      dueDay: debtDueDay,
+      linkedPaymentId,
+    };
     const dueDay = selectedPayment?.due_day ?? Number(debtDueDay);
     const result = addInstallmentDebt(state, {
       name: debtName,
@@ -223,13 +234,20 @@ export function PlanView({
       return;
     }
     setDebtError(null);
-    setDebtName("");
-    setDebtBalance("");
-    setDebtMin("");
-    setDebtApr("");
-    setDebtDueDay("");
-    setLinkedPaymentId("");
-    onEdit(result);
+    const saved = await onEdit(result);
+    if (!saved.ok) {
+      setDebtError(saved.error);
+      return;
+    }
+    setDebtError(null);
+    // Leave any field the user changed while the write was pending. Clearing
+    // the whole form on a stale callback would erase an unsubmitted next draft.
+    setDebtName((current) => (current === submitted.name ? "" : current));
+    setDebtBalance((current) => (current === submitted.balance ? "" : current));
+    setDebtMin((current) => (current === submitted.min ? "" : current));
+    setDebtApr((current) => (current === submitted.apr ? "" : current));
+    setDebtDueDay((current) => (current === submitted.dueDay ? "" : current));
+    setLinkedPaymentId((current) => (current === submitted.linkedPaymentId ? "" : current));
   }
 
   function compareExtraPayment(event: React.FormEvent) {
@@ -545,6 +563,7 @@ export function PlanView({
                 </div>
               </section>
             )}
+            <fieldset disabled={saving} className="m-0 min-w-0 space-y-3 border-0 p-0">
             <ul className="divide-y divide-line">
               {state.liabilities.map((debt) => (
                 <li key={debt.id} className="flex flex-wrap items-center justify-between gap-2 py-2 text-sm">
@@ -556,15 +575,16 @@ export function PlanView({
                     <Button type="button" variant="quiet" onClick={() => setBalanceEdit({ id: debt.id, dollars: "" })}>
                       Update balance for {debt.name}
                     </Button>
-                    <Button type="button" variant="quiet" onClick={() => onEdit(removeLiability(state, debt.id))}>
+                    <Button type="button" variant="quiet" onClick={() => void onEdit(removeLiability(state, debt.id))}>
                       Remove {debt.name}
                     </Button>
                   </div>
                   {balanceEdit?.id === debt.id && (
                     <form
                       className="flex w-full flex-wrap items-end gap-2"
-                      onSubmit={(event) => {
+                      onSubmit={async (event) => {
                         event.preventDefault();
+                        const submitted = { id: balanceEdit.id, dollars: balanceEdit.dollars };
                         const balance = dollarsToCents(Number(balanceEdit.dollars));
                         const result = updateLiabilityBalance(state, debt.id, balance ?? NaN);
                         if (!result.ok) {
@@ -572,8 +592,17 @@ export function PlanView({
                           return;
                         }
                         setDebtError(null);
-                        setBalanceEdit(null);
-                        onEdit(result);
+                        const saved = await onEdit(result);
+                        if (!saved.ok) {
+                          setDebtError(saved.error);
+                          return;
+                        }
+                        setDebtError(null);
+                        setBalanceEdit((current) =>
+                          current && current.id === submitted.id && current.dollars === submitted.dollars
+                            ? null
+                            : current
+                        );
                       }}
                     >
                       <label className="text-sm font-medium">
@@ -649,6 +678,7 @@ export function PlanView({
                 </Button>
               </div>
             </form>
+            </fieldset>
             <Explain term="interest">
               The interest rate helps estimate what you will owe in future months. If you already track the same
               payment as a bill, choose it above so that payment is counted once.

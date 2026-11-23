@@ -25,13 +25,15 @@ authentication and revision metadata. Clearing browser storage does not remove a
 snapshot. Neither kind of copy is a record-by-record merge.
 
 If the browser has a ledger you want to keep, close **Sync** and use **Export** in the header first.
-To recover, open **Sync → Encrypted vault** and pull with the vault ID and passphrase, or use
+Record the vault ID and passphrase in a safe place outside this browser; losing browser data
+can also remove the saved ID. To recover, open **Sync → Encrypted vault** and pull with both, or use
 **Sync → Local JSON Backup** to import an exported ledger. Closing Sync while a restore is pending
 discards that restore. Web Sync and ledger replacement require cross-tab locking; use a
 current browser on HTTPS or loopback. Close older versions of the app in other tabs before
 synchronizing. If the saved ledger changed after the tab loaded it, reload and review the newer
 ledger before trying again. If storage fails during restore, the app checks that previous saved
-data was preserved and reports if it could not verify that.
+data was preserved and reports if it could not verify that. In a browser without Web Locks,
+ordinary edits still work locally, but only one tab should edit the ledger.
 
 After restoring, check the recorded balance, the next required payment and any bill-to-debt links.
 Re-enter browser-only settings under **Budget** and **Advanced**; they can differ from the settings
@@ -42,7 +44,7 @@ copy and resolve the mismatch before pushing anything back.
 
 A debt's optional `linked_payment_id` references a payment in the **same** snapshot, using the same identifier namespace as bill occurrences. A payment may be linked to one debt. A missing link means the debt is independent. A missing `is_active` means the debt is active. These fields require 2.2. Exporters may keep using 2.1 when the ledger has only active, unlinked debts.
 
-Restore replaces a ledger transactionally. It does not combine rows from separate snapshots. Clients validate link references before replacement and translate incoming identifiers using the same mapping for payments and their references. Python stores imported canonical IDs separately from SQLite row IDs. Android maps opaque canonical values to Room keys and retains the canonical values in its local database. A link belongs to a single snapshot and carries no meaning in another vault.
+Restore replaces a ledger; it does not combine rows from separate snapshots. Clients validate link references before replacement and translate incoming identifiers using the same mapping for payments and their references. Python stores imported canonical IDs separately from SQLite row IDs. Android maps opaque canonical values to Room keys and retains the canonical values in its local database. A link belongs to a single snapshot and carries no meaning in another vault.
 
 ## Cash forecasts
 
@@ -51,9 +53,12 @@ The linked payment covers a debt minimum only for the matching schedule slot. A 
 Persisted overdue unpaid occurrences count at the start of the plan. A forecast refresh does not invent past recurring payments. The scheduled bill represents the entered cash commitment. Keep that schedule up to date after payoff or when a lender changes its automatic debit. Deleting a linked bill removes the relationship and leaves any active outstanding debt in the forecast. Archived debts are retained in storage.
 
 On Web, a one-time bill with a past due date and no saved occurrence needs review before
-the app offers spending or risk guidance. In **Bills**, record the payment if it happened
-or move the bill to the date you expect to pay. An upcoming one-time bill outside the chosen
-window is not included in its estimates; extend the window under **Advanced** to plan for it.
+the app offers spending or risk guidance. The payment may already be in **Money**. In **Bills**,
+link an eligible recorded expense for the full amount without debiting your balance again.
+If you paid in parts, review the entries in **Money** rather than entering them again.
+Only record a new expense if you paid the bill and have not entered it yet. If it is still
+unpaid, move the bill to the date you expect to pay. An upcoming one-time bill outside the
+chosen window is not included in its estimates; extend the window under **Advanced** to plan for it.
 
 ## Verification limits
 

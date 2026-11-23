@@ -1,4 +1,5 @@
 import { parseLedgerState } from "./validate";
+import { unresolvedPastOneTimeSlots } from "./scenario-builder";
 import type { IncomeItem, LedgerState, PaymentItem } from "./types";
 
 export type EditResult = { ok: true; state: LedgerState } | { ok: false; error: string };
@@ -103,6 +104,120 @@ export function markBillOccurrencePaid(
       },
     ];
   }
+  next.updated_at = new Date().toISOString();
+  return commit(next);
+}
+
+export interface PostedExpenseMatch {
+  id: number | string;
+  /** Positive magnitude in integer cents, equal to the bill amount. */
+  amountCents: number;
+  date: string;
+  description: string;
+}
+
+/** Canonical key for comparisons; links use the original stored identifier. */
+function stableRowId(value: number | string | null | undefined): string | null {
+  if (typeof value === "number") return Number.isSafeInteger(value) ? String(value) : null;
+  if (typeof value === "string" && value.length > 0) return value;
+  return null;
+}
+
+/**
+ * Posted expenses that could be the payment for one unresolved past one-time
+ * bill. This is a review aid, not an automatic match: a person must select one
+ * explicitly. Candidates use the full exact amount, an Expense with a negative
+ * sign, a date on or before `asOf`, a stable id, and no link from any existing
+ * occurrence. Paid or moved occurrences already cover their slot through the
+ * bill adapter's slot helper, so they never produce candidates.
+ */
+export function postedExpenseMatchesForPastOneTimeBill(
+  state: LedgerState,
+  paymentId: number | string,
+  slotDate: string,
+  asOf: string,
+): PostedExpenseMatch[] {
+  if (!validIsoDate(slotDate) || !validIsoDate(asOf)) return [];
+  const slot = unresolvedPastOneTimeSlots(state, asOf).find(
+    (candidate) => String(candidate.payment.id) === String(paymentId) && candidate.slotDate === slotDate,
+  );
+  if (!slot) return [];
+  const amountCents = slot.payment.amount_cents;
+  if (!Number.isSafeInteger(amountCents) || amountCents <= 0) return [];
+  const referenced = new Set<string>();
+  for (const occurrence of state.bill_occurrences) {
+    const linkedId = stableRowId(occurrence.transaction_id);
+    if (linkedId !== null) referenced.add(linkedId);
+  }
+  const matches: PostedExpenseMatch[] = [];
+  for (const transaction of state.transactions) {
+    const id = stableRowId(transaction.id);
+    if (id === null || referenced.has(id)) continue;
+    if (transaction.type !== "Expense") continue;
+    if (!Number.isSafeInteger(transaction.amount_cents) || transaction.amount_cents !== -amountCents) continue;
+    if (!validIsoDate(transaction.date) || transaction.date > asOf) continue;
+    matches.push({
+      id: transaction.id as number | string,
+      amountCents,
+      date: transaction.date,
+      description: (transaction.description || transaction.category || "Recorded expense").trim()
+        || "Recorded expense",
+    });
+  }
+  matches.sort(
+    (left, right) => right.date.localeCompare(left.date) || String(left.id).localeCompare(String(right.id)),
+  );
+  return matches;
+}
+
+/**
+ * Record that an already-posted Expense paid one past one-time bill slot.
+ * The transaction keeps its id, date, amount, and description; the balance is
+ * unchanged. Only the bill occurrence is added, with the original due date as
+ * both its due date and its stable slot, and `commit` reconciles the ledger.
+ * Eligibility is rechecked here so a stale row cannot link the wrong expense.
+ */
+export function linkPostedExpenseToPastOneTimeBill(
+  state: LedgerState,
+  paymentId: number | string,
+  slotDate: string,
+  transactionId: number | string,
+  asOf: string,
+): EditResult {
+  if (!validIsoDate(slotDate) || !validIsoDate(asOf)) {
+    return { ok: false, error: "Use valid calendar dates for the bill and the review date." };
+  }
+  const transactionKey = stableRowId(transactionId);
+  if (transactionKey === null) return { ok: false, error: "Choose a recorded expense to link." };
+  const payment = state.payments.find((item) => String(item.id) === String(paymentId));
+  if (!payment) return { ok: false, error: "That bill no longer exists." };
+  if (payment.recurrence !== "One-time" || payment.due_date !== slotDate) {
+    return { ok: false, error: "Only a past one-time bill can link an existing recorded expense." };
+  }
+  if (!(slotDate < asOf)) {
+    return { ok: false, error: "That bill is not past due yet. Resolve it on its scheduled date." };
+  }
+  const match = postedExpenseMatchesForPastOneTimeBill(state, paymentId, slotDate, asOf)
+    .find((item) => String(item.id) === transactionKey);
+  if (!match) {
+    return {
+      ok: false,
+      error: "That expense no longer qualifies to pay this bill. Refresh the bill list and choose again.",
+    };
+  }
+  const next = clone(state);
+  next.bill_occurrences = [
+    ...next.bill_occurrences,
+    {
+      id: nextId("occ", next.bill_occurrences),
+      payment_id: paymentId,
+      due_date: slotDate,
+      paid: true,
+      transaction_id: match.id,
+      original_due_date: slotDate,
+      is_user_modified: false,
+    },
+  ];
   next.updated_at = new Date().toISOString();
   return commit(next);
 }

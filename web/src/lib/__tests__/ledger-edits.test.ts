@@ -8,15 +8,18 @@ import {
   aprPercentToBasisPoints,
   createStarterLedger,
   dollarsToCents,
+  linkPostedExpenseToPastOneTimeBill,
   markBillOccurrencePaid,
   moveBillOccurrence,
   parseDollarsToCents,
+  postedExpenseMatchesForPastOneTimeBill,
   reconcileBalance,
   recordCashflow,
   removePayment,
 } from "../ledger-edits";
 import { SAMPLE_LEDGER_STATE, type LedgerState } from "../types";
 import { transactionSumCents } from "../present";
+import { unresolvedPastOneTimeSlots } from "../scenario-builder";
 
 test("dollar entry becomes integer cents", () => {
   assert.equal(dollarsToCents(45.2), 4520);
@@ -216,4 +219,180 @@ test("income and installment debt can be added without breaking validation", () 
     minPaymentCents: 2_500,
   });
   assert.equal(debt.ok, true);
+});
+
+const AS_OF = "2026-11-10";
+
+/**
+ * $1,900 opening cash and an already-posted $900 repair expense leave $1,000.
+ * The one-time bill slot is unresolved because no occurrence links that expense.
+ */
+function pastOneTimeState(): LedgerState {
+  return {
+    version: "2.0",
+    updated_at: "2026-11-10T12:00:00.000Z",
+    current_balance_cents: 100_000,
+    incomes: [],
+    payments: [
+      { id: "repair", name: "Car repair", amount_cents: 90_000, recurrence: "One-time", due_date: "2026-11-09" },
+      { id: "subscription", name: "Subscription", amount_cents: 1_000, recurrence: "Monthly", due_day: 15 },
+    ],
+    transactions: [
+      { id: "tx-open", amount_cents: 190_000, type: "Adjustment", date: "2026-11-01", description: "Opening balance" },
+      { id: "tx-repair", amount_cents: -90_000, type: "Expense", category: "Bills", date: "2026-11-08", description: "Car repair" },
+    ],
+    bill_occurrences: [],
+    liabilities: [],
+  };
+}
+
+test("a posted expense matching a past one-time bill can be linked without a new debit", () => {
+  const state = pastOneTimeState();
+  const before = structuredClone(state);
+  const matches = postedExpenseMatchesForPastOneTimeBill(state, "repair", "2026-11-09", AS_OF);
+  assert.deepEqual(
+    matches.map((match) => [match.id, match.amountCents, match.date]),
+    [["tx-repair", 90_000, "2026-11-08"]]
+  );
+
+  const linked = linkPostedExpenseToPastOneTimeBill(state, "repair", "2026-11-09", "tx-repair", AS_OF);
+  assert.equal(linked.ok, true);
+  if (!linked.ok) return;
+  // $1,000 cash stays $1,000: only the occurrence link was added.
+  assert.equal(linked.state.current_balance_cents, 100_000);
+  assert.equal(linked.state.transactions.length, 2);
+  assert.deepEqual(linked.state.transactions, before.transactions);
+  assert.deepEqual(linked.state.bill_occurrences, [{
+    id: "occ-1",
+    payment_id: "repair",
+    due_date: "2026-11-09",
+    paid: true,
+    transaction_id: "tx-repair",
+    original_due_date: "2026-11-09",
+    is_user_modified: false,
+  }]);
+  assert.deepEqual(unresolvedPastOneTimeSlots(linked.state, AS_OF), []);
+  assert.equal(transactionSumCents(linked.state.transactions), linked.state.current_balance_cents);
+  // The pure action did not mutate its input.
+  assert.deepEqual(state, before);
+
+  const retry = linkPostedExpenseToPastOneTimeBill(linked.state, "repair", "2026-11-09", "tx-repair", AS_OF);
+  assert.equal(retry.ok, false);
+  assert.equal(linked.state.bill_occurrences.length, 1);
+});
+
+test("linking rejects expenses with the wrong type, sign, amount, date, or id", () => {
+  const future = pastOneTimeState();
+  future.transactions.push({
+    id: "tx-future", amount_cents: -90_000, type: "Expense", date: "2026-11-11", description: "Future repair",
+  });
+  future.current_balance_cents = 10_000;
+  assert.deepEqual(
+    postedExpenseMatchesForPastOneTimeBill(future, "repair", "2026-11-09", AS_OF).map((match) => match.id),
+    ["tx-repair"]
+  );
+
+  const wrongAmount = pastOneTimeState();
+  wrongAmount.transactions = [
+    { id: "tx-open", amount_cents: 189_999, type: "Adjustment", date: "2026-11-01" },
+    { id: "tx-close", amount_cents: -89_999, type: "Expense", date: "2026-11-08", description: "Almost" },
+  ];
+  wrongAmount.current_balance_cents = 100_000;
+  assert.deepEqual(postedExpenseMatchesForPastOneTimeBill(wrongAmount, "repair", "2026-11-09", AS_OF), []);
+
+  const income = pastOneTimeState();
+  income.transactions = [
+    { id: "tx-open", amount_cents: 190_000, type: "Adjustment", date: "2026-11-01" },
+    { id: "tx-income", amount_cents: 90_000, type: "Income", date: "2026-11-08", description: "Refund" },
+  ];
+  income.current_balance_cents = 280_000;
+  assert.deepEqual(postedExpenseMatchesForPastOneTimeBill(income, "repair", "2026-11-09", AS_OF), []);
+
+  const adjustment = pastOneTimeState();
+  adjustment.transactions = [
+    { id: "tx-open", amount_cents: 190_000, type: "Adjustment", date: "2026-11-01" },
+    { id: "tx-adj", amount_cents: -90_000, type: "Adjustment", date: "2026-11-08" },
+  ];
+  adjustment.current_balance_cents = 100_000;
+  assert.deepEqual(postedExpenseMatchesForPastOneTimeBill(adjustment, "repair", "2026-11-09", AS_OF), []);
+
+  const missingId = pastOneTimeState();
+  missingId.transactions = [
+    { id: "tx-open", amount_cents: 190_000, type: "Adjustment", date: "2026-11-01" },
+    { id: undefined, amount_cents: -90_000, type: "Expense", date: "2026-11-08" },
+  ];
+  missingId.current_balance_cents = 100_000;
+  assert.deepEqual(postedExpenseMatchesForPastOneTimeBill(missingId, "repair", "2026-11-09", AS_OF), []);
+
+  const badDate = pastOneTimeState();
+  badDate.transactions[1].date = "2026-11-31";
+  assert.deepEqual(postedExpenseMatchesForPastOneTimeBill(badDate, "repair", "2026-11-09", AS_OF), []);
+
+  for (const candidate of ["tx-future", "tx-close", "tx-income", "missing", ""]) {
+    const result = linkPostedExpenseToPastOneTimeBill(pastOneTimeState(), "repair", "2026-11-09", candidate, AS_OF);
+    assert.equal(result.ok, false, `expected ${candidate} to be rejected`);
+  }
+  const unknownBill = linkPostedExpenseToPastOneTimeBill(pastOneTimeState(), "gone", "2026-11-09", "tx-repair", AS_OF);
+  assert.equal(unknownBill.ok, false);
+  const recurring = linkPostedExpenseToPastOneTimeBill(pastOneTimeState(), "subscription", "2026-11-09", "tx-repair", AS_OF);
+  assert.equal(recurring.ok, false);
+  const notPastDue = linkPostedExpenseToPastOneTimeBill(pastOneTimeState(), "repair", "2026-11-09", "tx-repair", "2026-11-09");
+  assert.equal(notPastDue.ok, false);
+});
+
+test("linking rejects an expense already used by another bill occurrence", () => {
+  const state = pastOneTimeState();
+  state.payments.push({
+    id: "other-repair", name: "Other repair", amount_cents: 90_000, recurrence: "One-time", due_date: "2026-11-07",
+  });
+  state.bill_occurrences = [{
+    id: "occ-other", payment_id: "other-repair", due_date: "2026-11-07", paid: true, transaction_id: "tx-repair",
+  }];
+  assert.deepEqual(postedExpenseMatchesForPastOneTimeBill(state, "repair", "2026-11-09", AS_OF), []);
+  const before = structuredClone(state);
+  const result = linkPostedExpenseToPastOneTimeBill(state, "repair", "2026-11-09", "tx-repair", AS_OF);
+  assert.equal(result.ok, false);
+  assert.deepEqual(state, before);
+});
+
+test("paid or moved one-time slots and future or missing slots cannot link", () => {
+  const paid = pastOneTimeState();
+  paid.bill_occurrences = [{ id: "occ-paid", payment_id: "repair", due_date: "2026-11-09", paid: true }];
+  assert.deepEqual(postedExpenseMatchesForPastOneTimeBill(paid, "repair", "2026-11-09", AS_OF), []);
+  assert.equal(linkPostedExpenseToPastOneTimeBill(paid, "repair", "2026-11-09", "tx-repair", AS_OF).ok, false);
+
+  const moved = pastOneTimeState();
+  moved.bill_occurrences = [{
+    id: "occ-moved",
+    payment_id: "repair",
+    due_date: "2026-11-12",
+    original_due_date: "2026-11-09",
+    paid: false,
+    is_user_modified: true,
+  }];
+  assert.deepEqual(postedExpenseMatchesForPastOneTimeBill(moved, "repair", "2026-11-09", AS_OF), []);
+  assert.equal(linkPostedExpenseToPastOneTimeBill(moved, "repair", "2026-11-09", "tx-repair", AS_OF).ok, false);
+
+  const future = pastOneTimeState();
+  future.payments[0].due_date = "2026-11-20";
+  assert.deepEqual(postedExpenseMatchesForPastOneTimeBill(future, "repair", "2026-11-20", AS_OF), []);
+  assert.equal(linkPostedExpenseToPastOneTimeBill(future, "repair", "2026-11-20", "tx-repair", AS_OF).ok, false);
+});
+
+test("numeric ids stay numeric and links remain unique", () => {
+  const state = pastOneTimeState();
+  state.payments[0].id = 7;
+  state.payments[1].id = 8;
+  state.transactions[1].id = 42;
+  const matches = postedExpenseMatchesForPastOneTimeBill(state, 7, "2026-11-09", AS_OF);
+  assert.deepEqual(matches.map((match) => match.id), [42]);
+  const linked = linkPostedExpenseToPastOneTimeBill(state, 7, "2026-11-09", "42", AS_OF);
+  assert.equal(linked.ok, true);
+  if (!linked.ok) return;
+  const occurrence = linked.state.bill_occurrences[0];
+  assert.equal(occurrence.payment_id, 7);
+  assert.equal(occurrence.transaction_id, 42);
+  assert.equal(typeof occurrence.transaction_id, "number");
+  assert.equal(linked.state.current_balance_cents, 100_000);
+  assert.equal(linked.state.transactions.length, 2);
 });

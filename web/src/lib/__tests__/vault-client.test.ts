@@ -9,6 +9,7 @@ import {
 } from "../vault-client";
 import {
   SyncStorage,
+  VAULT_ID_STORAGE_KEY,
   commitSynchronizedState,
   readSyncRecord,
 } from "../sync-state";
@@ -128,6 +129,31 @@ async function withServer<T>(
   } finally {
     (globalThis as any).fetch = original;
   }
+}
+
+async function withFakeLocks<T>(fn: () => Promise<T>): Promise<T> {
+  const original = Object.getOwnPropertyDescriptor(globalThis, "navigator");
+  Object.defineProperty(globalThis, "navigator", {
+    configurable: true,
+    value: {
+      locks: {
+        async request(_name: string, _options: unknown, callback: () => unknown) {
+          return callback();
+        },
+      },
+    },
+  });
+  try {
+    return await fn();
+  } finally {
+    if (original) Object.defineProperty(globalThis, "navigator", original);
+    else Reflect.deleteProperty(globalThis, "navigator");
+  }
+}
+
+function requestUrl(input: any): string {
+  if (typeof input === "string") return input;
+  return input.url ?? input.href;
 }
 
 test("a returning client pulls to establish ancestry, then both clients share a base", async () => {
@@ -354,6 +380,8 @@ test("a successful push whose ancestry cannot be persisted is reported honestly"
     const result = await pushVault("vault-1", pass, mutateState(50), { storage: a });
     assert.equal(result.revision, 2);
     assert.equal(result.ancestryPersisted, false);
+    // The id from the earlier successful push is already durable, so it is still known.
+    assert.equal(result.vaultIdPersisted, true);
     assert.equal(server.vaults.get("vault-1")!.revision, 2);
   });
 });
@@ -385,5 +413,128 @@ test("conflict recovery preserves the loser's data and lets it push after a pull
     const pushed = await pushVault("vault-1", pass, localEdit, { storage: b });
     assert.equal(pushed.revision, 3);
     assert.equal(server.vaults.get("vault-1")!.revision, 3);
+  });
+});
+
+test("an upload whose local id cannot be stored is reported without failing the push", async () => {
+  await withServer(async (server) => {
+    const storage = new FakeStorage();
+    storage.failWrites = true;
+    const result = await pushVault("vault-1", "synthetic passphrase", mutateState(0), {
+      storage,
+    });
+    assert.equal(result.revision, 1);
+    assert.equal(result.ancestryPersisted, false);
+    assert.equal(result.vaultIdPersisted, false);
+    assert.equal(storage.getItem(VAULT_ID_STORAGE_KEY), null);
+    assert.equal(server.vaults.get("vault-1")!.revision, 1);
+  });
+});
+
+test("a successful push remembers the generated vault id for the next page load", async () => {
+  await withFakeLocks(() => withServer(async () => {
+    const storage = new FakeStorage();
+    const vaultId = "vault-generated-default";
+    const result = await pushVault(vaultId, "synthetic passphrase", mutateState(0), {
+      storage,
+      expectedLedgerRaw: null,
+    });
+    assert.equal(result.revision, 1);
+    assert.equal(result.ancestryPersisted, true);
+    assert.equal(result.vaultIdPersisted, true);
+    // A reload observes the same durable origin storage.
+    assert.equal(storage.getItem(VAULT_ID_STORAGE_KEY), vaultId);
+    assert.equal(readSyncRecord(vaultId, storage)?.baseRevision, 1);
+  }));
+});
+
+test("a successful push updates the saved selection this tab chose", async () => {
+  await withFakeLocks(() => withServer(async () => {
+    const storage = new FakeStorage();
+    storage.setItem(VAULT_ID_STORAGE_KEY, "vault-previously-selected");
+    const result = await pushVault("vault-newly-chosen", "synthetic passphrase", mutateState(0), {
+      storage,
+      expectedLedgerRaw: null,
+    });
+    assert.equal(result.vaultIdPersisted, true);
+    assert.equal(storage.getItem(VAULT_ID_STORAGE_KEY), "vault-newly-chosen");
+  }));
+});
+
+test("a push refused by ancestry does not replace the saved vault selection", async () => {
+  await withServer(async (server) => {
+    const owner = new FakeStorage();
+    const pass = "synthetic passphrase";
+    await pushVault("vault-1", pass, mutateState(0), { storage: owner });
+
+    const fresh = new FakeStorage();
+    await withFakeLocks(async () => {
+      await assert.rejects(
+        () => pushVault("vault-1", pass, mutateState(5), {
+          storage: fresh,
+          expectedLedgerRaw: null,
+        }),
+        (err: unknown) => err instanceof VaultAncestryError
+      );
+    });
+    assert.equal(fresh.getItem(VAULT_ID_STORAGE_KEY), null);
+    assert.equal(server.vaults.get("vault-1")!.revision, 1);
+  });
+});
+
+test("a slowed push does not overwrite a vault selection another tab made meanwhile", async () => {
+  await withServer(async (server) => {
+    const storage = new FakeStorage();
+    const vaultId = "vault-this-tab";
+    let selectedElsewhere = false;
+    globalThis.fetch = (input, init) => {
+      if (!selectedElsewhere && requestUrl(input).endsWith(`/api/vault/${vaultId}/metadata`)) {
+        selectedElsewhere = true;
+        // Another tab intentionally chose a different vault while this push waited.
+        storage.setItem(VAULT_ID_STORAGE_KEY, "vault-other-tab");
+      }
+      return server.fetchImpl(input, init);
+    };
+
+    await withFakeLocks(async () => {
+      const result = await pushVault(vaultId, "synthetic passphrase", mutateState(0), {
+        storage,
+        expectedLedgerRaw: null,
+      });
+      // The upload is still safe to record as ancestry, but the newer selection wins.
+      assert.equal(result.ancestryPersisted, true);
+      assert.equal(result.vaultIdPersisted, false);
+    });
+    assert.equal(storage.getItem(VAULT_ID_STORAGE_KEY), "vault-other-tab");
+    assert.equal(readSyncRecord(vaultId, storage)?.baseRevision, 1);
+    assert.equal(server.vaults.get(vaultId)?.revision, 1);
+  });
+});
+
+test("a push does not attach its vault id after another tab replaced the ledger", async () => {
+  await withServer(async (server) => {
+    const storage = new FakeStorage();
+    const vaultId = "vault-this-tab";
+    let replaced = false;
+    globalThis.fetch = (input, init) => {
+      if (!replaced && requestUrl(input).endsWith(`/api/vault/${vaultId}/metadata`)) {
+        replaced = true;
+        // A normal edit in another tab lands after this push captured its ledger.
+        storage.setItem(LEDGER_STORAGE_KEY, JSON.stringify(mutateState(100)));
+      }
+      return server.fetchImpl(input, init);
+    };
+
+    await withFakeLocks(async () => {
+      const result = await pushVault(vaultId, "synthetic passphrase", mutateState(0), {
+        storage,
+        expectedLedgerRaw: null,
+      });
+      assert.equal(result.ancestryPersisted, true);
+      assert.equal(result.vaultIdPersisted, false);
+    });
+    // The tab that changed the ledger keeps its own unsynchronized selection state.
+    assert.equal(storage.getItem(VAULT_ID_STORAGE_KEY), null);
+    assert.equal(server.vaults.get(vaultId)?.revision, 1);
   });
 });

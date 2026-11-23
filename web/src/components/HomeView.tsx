@@ -27,6 +27,8 @@ interface HomeViewProps {
   reserveCents: number;
   runs: number;
   onNavigate: (section: Section) => void;
+  /** Another ledger edit is pending; onboarding and navigation wait for it. */
+  saving?: boolean;
   createOwn: (input: Parameters<typeof createStarterLedger>[0]) => Promise<PersistenceResult>;
 }
 
@@ -47,10 +49,11 @@ export function HomeView({
   reserveCents,
   runs,
   onNavigate,
+  saving = false,
   createOwn,
 }: HomeViewProps) {
   const [open, setOpen] = useState(needsSetup && !usingDemo);
-  const [saving, setSaving] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [balance, setBalance] = useState("");
   const [incomeName, setIncomeName] = useState("");
@@ -64,7 +67,7 @@ export function HomeView({
 
   async function submitOwn(event: React.FormEvent) {
     event.preventDefault();
-    if (saving) return;
+    if (submitting || saving) return;
     const balanceCents = dollarsToCents(Number(balance));
     if (balance.trim() === "" || balanceCents === null) {
       setError("Enter the money you have now, in dollars. Use 0 if you are starting from nothing.");
@@ -89,9 +92,9 @@ export function HomeView({
       }
       bill = { name: billName, amountCents, dueDay: day };
     }
-    setSaving(true);
+    setSubmitting(true);
     const created = await createOwn({ asOf, balanceCents, income, bill });
-    setSaving(false);
+    setSubmitting(false);
     if (!created.ok) {
       setError(created.error);
       return;
@@ -111,7 +114,7 @@ export function HomeView({
           This is a sample household so you can see how a plan looks. It is not your bank account. Enter your own
           numbers when you want the plan to be about you.
           <div className="mt-3">
-            <Button type="button" variant="primary" onClick={() => setOpen(true)}>
+            <Button type="button" variant="primary" disabled={saving} onClick={() => setOpen(true)}>
               Enter my own numbers
             </Button>
           </div>
@@ -125,6 +128,7 @@ export function HomeView({
       )}
       {(open || (needsSetup && !usingDemo)) && (
         <form onSubmit={submitOwn} className="space-y-4 rounded-2xl border border-line bg-surface p-4 shadow-card sm:p-6">
+          <fieldset disabled={saving || submitting} className="m-0 min-w-0 space-y-4 border-0 p-0">
           <h2 className="text-lg font-semibold">Your numbers</h2>
           <p className="text-sm text-muted">
             A budget is simply a plan for where your money goes. You can leave the paycheck or the bill blank and add
@@ -173,7 +177,8 @@ export function HomeView({
               {error}
             </p>
           )}
-          <Button type="submit" disabled={saving}>Save and show my plan</Button>
+          <Button type="submit">Save and show my plan</Button>
+          </fieldset>
         </form>
       )}
 
@@ -202,7 +207,7 @@ export function HomeView({
           <Notice tone="info" title="Not enough information to suggest spending">
             {guidanceIssue}
             <div className="mt-2">
-              <Button type="button" variant="quiet" onClick={() => onNavigate("bills")}>Review bills</Button>
+              <Button type="button" variant="quiet" disabled={saving} onClick={() => onNavigate("bills")}>Review bills</Button>
             </div>
           </Notice>
         )}
@@ -261,7 +266,7 @@ export function HomeView({
                   {insight.detail}
                   {insight.action && (
                     <div className="mt-2">
-                      <Button type="button" variant="quiet" onClick={() => onNavigate(insight.action!.section)}>
+                      <Button type="button" variant="quiet" disabled={saving} onClick={() => onNavigate(insight.action!.section)}>
                         {insight.action.label}
                       </Button>
                     </div>
