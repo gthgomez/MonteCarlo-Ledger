@@ -1,6 +1,7 @@
 import { expect, test } from "@playwright/test";
 import { DEFAULT_ASSUMPTIONS } from "../src/lib/assumptions";
 import type { LedgerState, PaymentItem, TransactionItem } from "../src/lib/types";
+import { failNextLedgerWrite, holdLedgerLock, queuedWrites, releaseLedgerLock } from "./helpers/ledger-lock";
 
 // Synthetic financial-review fixtures for the guidance and bill-resolution paths:
 // 1. a past one-time bill with no linked record withholds cautious advice until a
@@ -52,8 +53,12 @@ function ledger(
   };
 }
 
-async function seed(page: import("@playwright/test").Page, state: LedgerState): Promise<void> {
-  await page.clock.setFixedTime(new Date(`${AS_OF}T12:00:00Z`));
+async function seed(
+  page: import("@playwright/test").Page,
+  state: LedgerState,
+  { useFixedTime = true } = {},
+): Promise<void> {
+  if (useFixedTime) await page.clock.setFixedTime(new Date(`${AS_OF}T12:00:00Z`));
   // Seed only an empty browser so a reload after saving keeps the saved ledger.
   await page.addInitScript(({ ledgerState, assumptions, ledgerKey, assumptionsKey }) => {
     if (localStorage.getItem(ledgerKey) === null) localStorage.setItem(ledgerKey, JSON.stringify(ledgerState));
@@ -77,6 +82,50 @@ const repair: PaymentItem = {
   recurrence: "One-time",
   due_date: "2026-11-09",
 };
+
+test("a queued one-time bill keeps its submitted default date through midnight and retry", async ({ page }) => {
+  await page.clock.install({ time: new Date(`${AS_OF}T23:50:00Z`) });
+  await page.clock.pauseAt(new Date(`${AS_OF}T23:59:50Z`));
+  const initial = ledger([subscription]);
+  await seed(page, initial, { useFixedTime: false });
+  await page.getByRole("button", { name: "Bills", exact: true }).click();
+  const add = page.getByRole("button", { name: "Add Recurring Bill" });
+  const form = page.locator("form").filter({ has: add });
+  const nextDate = form.getByLabel("Next date", { exact: true });
+  await form.getByLabel("Bill name").fill("Synthetic one-time bill");
+  await form.getByLabel("Amount ($)").fill("12.34");
+  await form.getByLabel("How often").selectOption("One-time");
+  await expect(nextDate).toHaveValue(AS_OF);
+
+  const raw = () => page.evaluate((key) => localStorage.getItem(key), LEDGER_KEY);
+  const before = await raw();
+  await holdLedgerLock(page);
+  try {
+    await failNextLedgerWrite(page);
+    await add.click();
+    await expect.poll(() => queuedWrites(page)).toBe(1);
+    await page.clock.runFor(20_000);
+    await expect(nextDate).toBeDisabled();
+    await expect(nextDate).toHaveValue(AS_OF);
+    expect(await raw()).toBe(before);
+  } finally {
+    await releaseLedgerLock(page);
+  }
+
+  await expect(page.getByText("Not saved", { exact: true })).toBeVisible();
+  await expect(nextDate).toHaveValue(AS_OF);
+  expect(await raw()).toBe(before);
+  await add.click();
+  await expect(nextDate).toHaveValue("2026-11-11");
+  const saved = JSON.parse((await raw()) ?? "null") as LedgerState;
+  expect(saved.payments).toHaveLength(2);
+  expect(saved.payments[1]).toMatchObject({
+    name: "Synthetic one-time bill", amount_cents: 1_234, recurrence: "One-time", due_date: AS_OF,
+  });
+  expect(saved.current_balance_cents).toBe(initial.current_balance_cents);
+  expect(saved.transactions).toEqual(initial.transactions);
+  expect(saved.bill_occurrences).toEqual([]);
+});
 
 test("a past one-time bill can link an already-posted expense without a second debit", async ({ page }) => {
   // $1,900 opening cash and a posted -$900 repair already leave $1,000.
@@ -111,19 +160,23 @@ test("a past one-time bill can link an already-posted expense without a second d
 
   // A matching posted expense exists, but a new debit still requires choosing that
   // treatment and explicitly confirming the payment is not already reflected.
-  await row.getByRole("radio", { name: /not recorded in Money and my current cash does not include it/ }).check();
+  const newExpense = row.getByRole("radio", { name: /not recorded in Money and my current cash does not include it/ });
+  await newExpense.check();
   const recordNew = row.getByRole("button", { name: "Record new expense" });
   await expect(recordNew).toBeDisabled();
   const confirm = row.getByRole("checkbox", { name: /I confirm this payment is not already recorded/ });
   await confirm.check();
   await expect(recordNew).toBeEnabled();
-  await confirm.uncheck();
-
-  await row.getByRole("radio", { name: /already recorded in Money/ }).check();
+  const link = row.getByRole("radio", { name: /already recorded in Money/ });
+  await link.check();
+  await newExpense.check();
+  await expect(confirm).not.toBeChecked();
+  await expect(recordNew).toBeDisabled();
+  await link.check();
   const expense = row.getByLabel("Recorded expense for Car repair due Nov 9, 2026");
   await expense.selectOption("tx-repair");
   await row.getByRole("radio", { name: /already reflected in the cash I have now/ }).check();
-  await row.getByRole("radio", { name: /already recorded in Money/ }).check();
+  await link.check();
   await expect(expense).toHaveValue("tx-repair");
   const [removePrompt] = await Promise.all([
     page.waitForEvent("dialog").then(async (dialog) => {
@@ -134,6 +187,25 @@ test("a past one-time bill can link an already-posted expense without a second d
     page.getByRole("button", { name: "Remove Car repair", exact: true }).click(),
   ]);
   expect(removePrompt).toMatch(/discards its unsaved drafts/i);
+  await expect(expense).toHaveValue("tx-repair");
+
+  // The move and linked-payment forms can both have values in this same slot.
+  // Cancelling the move must not silently discard a failed expense link.
+  await failNextLedgerWrite(page);
+  await row.getByRole("button", { name: "Link recorded expense" }).click();
+  await expect(page.getByText("Not saved", { exact: true })).toBeVisible();
+  await row.getByLabel("New date for Car repair due Nov 9, 2026").fill("2026-11-12");
+  await row.getByRole("button", { name: "Cancel move", exact: true }).click();
+  await expect(expense).toHaveValue("tx-repair");
+  const [leavePrompt] = await Promise.all([
+    page.waitForEvent("dialog").then(async (dialog) => {
+      const message = dialog.message();
+      await dialog.dismiss();
+      return message;
+    }),
+    page.getByRole("button", { name: "Home", exact: true }).click(),
+  ]);
+  expect(leavePrompt).toMatch(/values you typed will be discarded/);
   await expect(expense).toHaveValue("tx-repair");
   await row.getByRole("button", { name: "Link recorded expense" }).click();
   await expect(row).toHaveCount(0);

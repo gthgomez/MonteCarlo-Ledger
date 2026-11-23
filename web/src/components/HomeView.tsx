@@ -60,7 +60,12 @@ export function HomeView({
   const [incomeAmount, setIncomeAmount] = useState("");
   const [frequency, setFrequency] = useState<IncomeItem["frequency"]>("Bi-weekly");
   const [paydayInput, setPayday] = useState<string | null>(null);
-  const payday = paydayInput ?? asOf;
+  // A queued or failed starter save keeps the payday and opening as-of it sent,
+  // so a retry after midnight writes the dates the person already saw.
+  const [pinnedPayday, setPinnedPayday] = useState<string | null>(null);
+  const payday = paydayInput ?? pinnedPayday ?? asOf;
+  const [pinnedOpeningAsOf, setPinnedOpeningAsOf] = useState<string | null>(null);
+  const openingAsOf = pinnedOpeningAsOf ?? asOf;
   const [billName, setBillName] = useState("");
   const [billAmount, setBillAmount] = useState("");
   const [dueDay, setDueDay] = useState("1");
@@ -73,6 +78,8 @@ export function HomeView({
       setError("Enter the money you have now, in dollars. Use 0 if you are starting from nothing.");
       return;
     }
+    const submittedAsOf = openingAsOf;
+    const submittedPayday = payday;
     let income: Parameters<typeof createStarterLedger>[0]["income"] = null;
     if (incomeName.trim() || incomeAmount.trim()) {
       const amountCents = dollarsToCents(Number(incomeAmount));
@@ -80,7 +87,7 @@ export function HomeView({
         setError("A paycheck needs a name and an amount greater than zero, or leave both blank.");
         return;
       }
-      income = { name: incomeName, amountCents, frequency, nextPayday: payday };
+      income = { name: incomeName, amountCents, frequency, nextPayday: submittedPayday };
     }
     let bill: Parameters<typeof createStarterLedger>[0]["bill"] = null;
     if (billName.trim() || billAmount.trim()) {
@@ -92,14 +99,18 @@ export function HomeView({
       }
       bill = { name: billName, amountCents, dueDay: day };
     }
+    if (balanceCents !== 0) setPinnedOpeningAsOf(submittedAsOf);
+    if (income && paydayInput === null) setPinnedPayday(submittedPayday);
     setSubmitting(true);
-    const created = await createOwn({ asOf, balanceCents, income, bill });
+    const created = await createOwn({ asOf: submittedAsOf, balanceCents, income, bill });
     setSubmitting(false);
     if (!created.ok) {
       setError(created.error);
       return;
     }
     setError(null);
+    setPinnedOpeningAsOf((current) => (current === submittedAsOf ? null : current));
+    setPinnedPayday((current) => (current === submittedPayday ? null : current));
     setOpen(false);
   }
 
@@ -138,6 +149,9 @@ export function HomeView({
             Money you have now ($)
             <input className={`${fieldClass} mt-1`} inputMode="decimal" value={balance} onChange={(e) => setBalance(e.target.value)} />
           </label>
+          {pinnedOpeningAsOf !== null && pinnedOpeningAsOf !== asOf && (
+            <p className="text-sm text-muted">Opening balance date: {formatDateLabel(pinnedOpeningAsOf)}.</p>
+          )}
           <div className="grid gap-3 sm:grid-cols-2">
             <label className="block text-sm font-medium">
               Paycheck name
@@ -157,7 +171,15 @@ export function HomeView({
             </label>
             <label className="block text-sm font-medium">
               Next payday
-              <input className={`${fieldClass} mt-1`} type="date" value={payday} onChange={(e) => setPayday(e.target.value)} />
+              <input
+                className={`${fieldClass} mt-1`}
+                type="date"
+                value={payday}
+                onChange={(e) => {
+                  setPayday(e.target.value);
+                  setPinnedPayday(null);
+                }}
+              />
             </label>
             <label className="block text-sm font-medium">
               A regular bill

@@ -80,13 +80,16 @@ cannot explain, or data they can lose without a warning, is a release defect.
 - Test local persistence independently of sync: current tab with network off, online reload without
   vault access, and opening offline after a prior visit. Report each independently; a loaded tab
   working offline is not proof that an offline cold start works. In the loaded tab check the
-  cash date and default transaction date across local midnight; a date the user chose must not
-  change. Hold a ledger save and verify the page warns before leaving, prevents a second
-  submission, and keeps the entered draft if the write fails. A failed draft stays in the
-  open form, not in the saved ledger. Verify that cancelling a section switch preserves the
-  values and switching debt editors preserves each debt's own draft. Keep a copy before
-  deliberately discarding drafts or reloading. Do not claim first-ever offline load for a hosted
-  browser app.
+  cash date and fresh form defaults across local midnight. A date the user chose or already
+  submitted must not change while a save is pending or after it fails; a retry uses that date
+  unless the user changes it. Hold a ledger save and verify the page warns before leaving and
+  prevents a second submission. Check that a recurring bill's move draft remains accessible even
+  after its slot leaves the current schedule, without creating a saved occurrence or forecast
+  expense. A failed draft stays in the open section, not in the saved ledger. Verify that
+  cancelling a section switch preserves the values, switching debt editors preserves each
+  debt's own draft, and intentionally discarding one draft does not clear another's warning.
+  Keep a copy before deliberately discarding drafts or reloading. Do not claim first-ever offline
+  load for a hosted browser app.
 - If hosted staging is authorized later, record the exact preview build, isolated database and
   synthetic-only fixture scope (no secrets in the record). Repeat Web ↔ Python, including restart
   and conflict handling. Stop if staging identity or isolation cannot be established. Separately

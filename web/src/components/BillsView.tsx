@@ -33,6 +33,16 @@ function withoutDraft<T>(drafts: Record<string, T>, key: string): Record<string,
   return next;
 }
 
+interface MoveDraft {
+  paymentId: number | string;
+  name: string;
+  amountCents: number;
+  /** Stable schedule slot, even after the row has left the projected window. */
+  slotDate: string;
+  /** Exact destination date chosen or pinned when Move was submitted. */
+  destination: string;
+}
+
 export function BillsView({
   state,
   asOf,
@@ -57,10 +67,16 @@ export function BillsView({
   const [recurrence, setRecurrence] = useState<PaymentItem["recurrence"]>("Monthly");
   const [dueDay, setDueDay] = useState("15");
   const [dueDateInput, setDueDate] = useState<string | null>(null);
-  const dueDate = dueDateInput ?? asOf;
+  // An implicit date is pinned only when a submitted non-Monthly bill needs a
+  // displayed "Next date" that must not roll forward while the save is pending
+  // or after a failure. A date the person typed stays in dueDateInput.
+  const [implicitDueDate, setImplicitDueDate] = useState<string | null>(null);
+  const dueDate = dueDateInput ?? implicitDueDate ?? asOf;
   const [auto, setAuto] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [moveDates, setMoveDates] = useState<Record<string, string>>({});
+  // Kept per stable slot, not per visible row: midnight, a horizon change, or a
+  // failed move can remove the projected row without discarding the draft.
+  const [moveDrafts, setMoveDrafts] = useState<Record<string, MoveDraft>>({});
   const [linkChoices, setLinkChoices] = useState<Record<string, string>>({});
   const [confirmNewExpense, setConfirmNewExpense] = useState<Record<string, boolean>>({});
   // One unlinked treatment per unresolved slot: link, already reflected in cash,
@@ -85,6 +101,15 @@ export function BillsView({
     [state, asOf]
   );
   const upcoming = slice.events.filter((event) => event.amount_cents < 0);
+  // The fallback list is only for drafts whose slot is no longer projected. It
+  // deliberately does not add cash events, expose Mark paid, or widen a window.
+  const projectedRowKeys = new Set(
+    billSlots.flatMap(({ payment, slotDate }) =>
+      payment.id === undefined ? [] : [paymentOccurrenceKey(payment.id as number | string, slotDate)]
+    )
+  );
+  const retainedMoves = Object.entries(moveDrafts).filter(([key]) => !projectedRowKeys.has(key));
+  const paymentIds = new Set(state.payments.map((payment) => String(payment.id)));
 
   function chooseResolution(key: string, choice: "link" | "reflected" | "new") {
     setResolutionChoices((current) => ({ ...current, [key]: choice }));
@@ -94,32 +119,61 @@ export function BillsView({
     }
   }
 
-  function clearSlotDraft(key: string) {
+  function retainMove(draft: MoveDraft) {
+    setMoveDrafts((current) => ({
+      ...current,
+      [paymentOccurrenceKey(draft.paymentId, draft.slotDate)]: draft,
+    }));
+  }
+
+  function cancelMove(key: string) {
+    setMoveDrafts((current) => withoutDraft(current, key));
+    onDiscardDraft(`bills:move:${key}`);
+  }
+
+  function clearSlotDrafts(key: string) {
+    cancelMove(key);
     setLinkChoices((current) => withoutDraft(current, key));
     setConfirmNewExpense((current) => withoutDraft(current, key));
     setResolutionChoices((current) => withoutDraft(current, key));
-    setMoveDates((current) => withoutDraft(current, key));
+    onDiscardDraft(`bills:settlement:${key}`);
   }
 
   async function settleRow(key: string, result: EditResult) {
-    if (!(await onEdit(result, `bills:slot:${key}`)).ok) return;
-    clearSlotDraft(key);
+    const hasMoveDraft = key in moveDrafts;
+    if (
+      hasMoveDraft &&
+      !window.confirm(
+        "This bill has an unsaved moved date. Marking it paid discards that move draft. Mark paid and discard the move?"
+      )
+    ) {
+      return;
+    }
+    const draftKey = key in resolutionChoices
+      ? `bills:settlement:${key}`
+      : hasMoveDraft ? `bills:move:${key}` : undefined;
+    if ((await onEdit(result, draftKey)).ok) clearSlotDrafts(key);
   }
 
-  async function moveRow(key: string, result: EditResult) {
-    const hasDraft = key in moveDates || key in resolutionChoices;
-    if ((await onEdit(result, hasDraft ? `bills:slot:${key}` : undefined)).ok) clearSlotDraft(key);
+  async function moveRow(draft: MoveDraft) {
+    const key = paymentOccurrenceKey(draft.paymentId, draft.slotDate);
+    if (key in resolutionChoices && !window.confirm("Moving this bill discards its unsaved payment choice. Move it?")) {
+      return;
+    }
+    // Pin even an untouched default so midnight cannot change the submitted move.
+    retainMove(draft);
+    const result = moveBillOccurrence(state, draft.paymentId, draft.slotDate, draft.destination);
+    if ((await onEdit(result, `bills:move:${key}`)).ok) clearSlotDrafts(key);
   }
 
   async function removeBill(paymentId: number | string) {
     // The last separator belongs to the slot date; imported payment IDs are opaque.
-    const draftKeys = [...new Set([...Object.keys(moveDates), ...Object.keys(resolutionChoices)])]
+    const draftKeys = [...new Set([...Object.keys(moveDrafts), ...Object.keys(resolutionChoices)])]
       .filter((key) => key.slice(0, key.lastIndexOf("::")) === String(paymentId));
     if (draftKeys.length && !window.confirm("Removing this bill also discards its unsaved drafts. Remove it?")) return;
     if (!(await onEdit(removePayment(state, paymentId))).ok) return;
     for (const key of draftKeys) {
-      clearSlotDraft(key);
-      onDiscardDraft(`bills:slot:${key}`);
+      clearSlotDrafts(key);
     }
   }
 
@@ -130,17 +184,21 @@ export function BillsView({
       setError("Enter a bill amount greater than zero.");
       return;
     }
+    const submittedDueDate = dueDate;
     const result = addBill(state, {
       name,
       amountCents: cents,
       recurrence,
       dueDay: Number(dueDay),
-      dueDate,
+      dueDate: submittedDueDate,
       autoWithdraw: auto,
     });
     if (!result.ok) {
       setError(result.error);
       return;
+    }
+    if (recurrence !== "Monthly" && dueDateInput === null) {
+      setImplicitDueDate(submittedDueDate);
     }
     const saved = await onEdit(result, "bills:add");
     if (!saved.ok) {
@@ -149,6 +207,8 @@ export function BillsView({
     }
     setError(null);
     setName("");
+    // A fresh default stays live; an explicitly typed date remains in its input.
+    setImplicitDueDate(null);
   }
 
   return (
@@ -272,22 +332,24 @@ export function BillsView({
             </li>
           ))}
         </ul>
-        {billSlots.length > 0 && (
+        {(billSlots.length > 0 || retainedMoves.length > 0) && (
           <div className="mt-6 border-t border-line pt-4">
             <h3 className="font-semibold">Record or move a payment</h3>
             <p className="mt-1 text-sm text-muted">
-              Marking an ordinary bill paid records the expense today. For a past one-time bill with no linked
-              bill record, choose what happened: link the full posted expense if it is already in Money, mark it
-              paid without a debit when the payment is already reflected in the cash you entered (for example, it
-              is in “Money you have now”), or record a new expense only if the payment is not recorded and current
-              cash excludes it. If it pays a debt, use the lender’s balance to update the amount still owed in Plan.
+              Marking an ordinary bill paid records an expense dated the day you click Mark paid.
+              For a past one-time bill with no linked bill record, choose what happened: link the full posted
+              expense if it is already in Money, mark it paid without a debit when the payment is already reflected
+              in the cash you entered (for example, it is in “Money you have now”), or record a new expense only if
+              the payment is not recorded and current cash excludes it. If it pays a debt, use the lender’s balance
+              to update the amount still owed in Plan.
             </p>
             <ul className="mt-2 divide-y divide-line">
               {billSlots.map(({ payment, slotDate, dueDate }) => {
                 if (payment.id === undefined) return null;
                 const paymentId = payment.id;
                 const key = paymentOccurrenceKey(paymentId, slotDate);
-                const selectedDate = moveDates[key] ?? (dueDate < asOf ? asOf : dueDate);
+                const moveDraft = moveDrafts[key];
+                const selectedDate = moveDraft?.destination ?? (dueDate < asOf ? asOf : dueDate);
                 const isUnresolved = unresolvedKeys.has(key);
                 const matches = isUnresolved
                   ? postedExpenseMatchesForPastOneTimeBill(state, paymentId, slotDate, asOf)
@@ -400,9 +462,9 @@ export function BillsView({
                         {resolution === "new" && (
                           <div className="grid gap-2 pl-6">
                             <p className="text-muted">
-                              Recording adds a {formatMoney(payment.amount_cents)} expense dated today. To
-                              record the original date instead, add the expense in Money and then link it.
-                              Do not do either if your current cash already reflects the payment.
+                              Recording adds a {formatMoney(payment.amount_cents)} expense dated the day you click
+                              Record new expense. To record the original date instead, add the expense in Money
+                              and then link it. Do not do either if your current cash already reflects the payment.
                             </p>
                             <label className="flex items-start gap-2">
                               <input
@@ -436,7 +498,7 @@ export function BillsView({
                         <Button
                           type="button"
                           variant="quiet"
-                          onClick={() => void onEdit(markBillOccurrencePaid(state, paymentId, slotDate, asOf))}
+                          onClick={() => void settleRow(key, markBillOccurrencePaid(state, paymentId, slotDate, asOf))}
                         >
                           Mark paid
                         </Button>
@@ -445,23 +507,90 @@ export function BillsView({
                         className={`${fieldClass} w-auto`}
                         type="date"
                         value={selectedDate}
-                        onChange={(event) => setMoveDates((current) => ({ ...current, [key]: event.target.value }))}
+                        onChange={(event) =>
+                          retainMove({
+                            paymentId,
+                            name: payment.name,
+                            amountCents: payment.amount_cents,
+                            slotDate,
+                            destination: event.target.value,
+                          })
+                        }
                         aria-label={`New date for ${payment.name} due ${dueLabel}`}
                       />
                       <Button
                         type="button"
                         variant="quiet"
-                        onClick={() => void moveRow(
-                          key, moveBillOccurrence(state, paymentId, slotDate, selectedDate),
-                        )}
+                        onClick={() =>
+                          void moveRow({
+                            paymentId,
+                            name: payment.name,
+                            amountCents: payment.amount_cents,
+                            slotDate,
+                            destination: selectedDate,
+                          })
+                        }
                       >
                         Move
                       </Button>
+                      {moveDraft && (
+                        <Button type="button" variant="quiet" onClick={() => cancelMove(key)}>
+                          Cancel move
+                        </Button>
+                      )}
                     </div>
                   </li>
                 );
               })}
             </ul>
+            {retainedMoves.length > 0 && (
+              <div className="mt-4 rounded-lg border border-warning bg-warning-soft p-3">
+                <h4 className="font-semibold">Kept move drafts</h4>
+                <p className="mt-1 text-sm text-muted">
+                  These bills’ scheduled slots are no longer in the projected list. Your unsaved move is kept
+                  here; it is not saved, and it is not part of the forecast, until the move succeeds. Cancel
+                  discards only that draft.
+                </p>
+                <ul className="mt-2 divide-y divide-line">
+                  {retainedMoves.map(([key, draft]) => {
+                    const slotLabel = `${draft.name}, original slot ${formatDateLabel(draft.slotDate)}`;
+                    const missingPayment = !paymentIds.has(String(draft.paymentId));
+                    return (
+                      <li key={key} aria-label={`Kept move for ${slotLabel}`} className="grid gap-2 py-3 text-sm">
+                        <span>
+                          {draft.name} · original slot {formatDateLabel(draft.slotDate)} ({draft.slotDate}) ·{" "}
+                          {formatMoney(draft.amountCents)}
+                        </span>
+                        <p className="text-muted">
+                          New date <span className="font-medium text-ink">{draft.destination}</span> — not saved
+                          to the ledger until the move succeeds.
+                        </p>
+                        {missingPayment && (
+                          <p className="text-muted">This bill is no longer in the ledger. Copy the date or cancel the move.</p>
+                        )}
+                        <div className="flex flex-wrap items-center gap-2">
+                          <input
+                            className={`${fieldClass} w-auto`}
+                            type="date"
+                            value={draft.destination}
+                            onChange={(event) =>
+                              retainMove({ ...draft, destination: event.target.value })
+                            }
+                            aria-label={`New date for kept move of ${slotLabel}`}
+                          />
+                          <Button type="button" variant="quiet" disabled={missingPayment} onClick={() => void moveRow(draft)}>
+                            Move
+                          </Button>
+                          <Button type="button" variant="quiet" onClick={() => cancelMove(key)}>
+                            Cancel move
+                          </Button>
+                        </div>
+                      </li>
+                    );
+                  })}
+                </ul>
+              </div>
+            )}
           </div>
         )}
       </Panel>

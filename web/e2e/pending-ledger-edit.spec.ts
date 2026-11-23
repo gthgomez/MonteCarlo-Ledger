@@ -1,7 +1,13 @@
 import { expect, test, type Dialog, type Page } from "@playwright/test";
 
-import { LEDGER_LOCK_NAME, LEDGER_STORAGE_KEY } from "../src/lib/persistence";
+import { LEDGER_STORAGE_KEY } from "../src/lib/persistence";
 import type { LedgerState } from "../src/lib/types";
+import {
+  failNextLedgerWrite,
+  holdLedgerLock,
+  queuedWrites,
+  releaseLedgerLock,
+} from "./helpers/ledger-lock";
 
 /**
  * Ordinary-edit draft safety.
@@ -11,9 +17,7 @@ import type { LedgerState } from "../src/lib/types";
  * real ledger, or fixed sleep is involved.
  */
 
-interface PendingLedgerHarness {
-  releasePendingLedgerLock?: () => void;
-}
+test.use({ locale: "en-US", timezoneId: "UTC" });
 
 function syntheticLedger(liabilities: LedgerState["liabilities"] = []): LedgerState {
   return {
@@ -51,32 +55,6 @@ async function openMoney(page: Page): Promise<void> {
   await expect(page.getByRole("textbox", { name: "Amount ($)", exact: true })).toBeVisible();
 }
 
-async function holdLedgerLock(page: Page): Promise<void> {
-  await page.evaluate(
-    (name) =>
-      new Promise<void>((acquired) => {
-        const harness = window as Window & PendingLedgerHarness;
-        const hold = new Promise<void>((release) => {
-          harness.releasePendingLedgerLock = release;
-        });
-        void navigator.locks.request(name, () => {
-          acquired();
-          return hold;
-        });
-      }),
-    LEDGER_LOCK_NAME
-  );
-}
-
-async function releaseLedgerLock(page: Page): Promise<void> {
-  await page.evaluate(() => {
-    const harness = window as Window & PendingLedgerHarness;
-    const release = harness.releasePendingLedgerLock;
-    delete harness.releasePendingLedgerLock;
-    release?.();
-  });
-}
-
 /** Dispatch the native event the browser fires for a close or reload. */
 async function dispatchBeforeUnload(page: Page): Promise<{ defaultPrevented: boolean; dispatchResult: boolean }> {
   return page.evaluate(() => {
@@ -88,13 +66,6 @@ async function dispatchBeforeUnload(page: Page): Promise<{ defaultPrevented: boo
 
 function storedRaw(page: Page): Promise<string | null> {
   return page.evaluate((key) => localStorage.getItem(key), LEDGER_STORAGE_KEY);
-}
-
-function queuedWrites(page: Page): Promise<number> {
-  return page.evaluate(
-    async (name) => (await navigator.locks.query()).pending?.filter((lock) => lock.name === name).length ?? 0,
-    LEDGER_LOCK_NAME
-  );
 }
 
 function recordForm(page: Page) {
@@ -445,5 +416,268 @@ test.describe("ordinary ledger edit draft safety", () => {
       { id: "debt-b", balance_cents: 80_000 },
     ]);
     await sibling.close();
+  });
+
+  test("a move submitted near midnight keeps its pinned date while pending and after failure", async ({ page }) => {
+    await page.clock.install({ time: new Date("2026-11-23T23:59:00.000Z") });
+    await page.clock.pauseAt(new Date("2026-11-23T23:59:30.000Z"));
+    const ledger = syntheticLedger();
+    ledger.payments = [
+      { id: "rent", name: "Rent", amount_cents: 50_000, recurrence: "Monthly", due_day: 23 },
+      { id: "internet", name: "Internet", amount_cents: 7_500, recurrence: "Monthly", due_day: 26 },
+    ];
+    await seedSyntheticLedger(page, ledger);
+    const originalRaw = await storedRaw(page);
+    await page.getByRole("button", { name: "Bills", exact: true }).click();
+
+    const originalRow = page.getByRole("listitem", { name: "Rent due Nov 23, 2026", exact: true });
+    const originalDate = originalRow.getByLabel("New date for Rent due Nov 23, 2026");
+    const keptMove = page.getByRole("listitem", {
+      name: "Kept move for Rent, original slot Nov 23, 2026",
+      exact: true,
+    });
+    const keptDate = keptMove.getByLabel("New date for kept move of Rent, original slot Nov 23, 2026");
+    const movedRow = page.getByRole("listitem", { name: "Rent due Dec 3, 2026", exact: true });
+    const schedule = page.getByRole("heading", { name: "Payments coming up" }).locator("..");
+    // Unedited default: the row offers its own due date, not a later day.
+    await expect(originalDate).toHaveValue("2026-11-23");
+    await expect(schedule.getByText(/Nov 23, 2026/)).toBeVisible();
+    await expect(movedRow).toHaveCount(0);
+
+    await holdLedgerLock(page);
+    try {
+      await originalRow.getByRole("button", { name: "Move", exact: true }).click();
+      await expect(page.getByText("Saving your ledger change", { exact: true })).toBeVisible();
+      await expect.poll(() => queuedWrites(page)).toBe(1);
+      expect(await storedRaw(page)).toBe(originalRaw);
+
+      // Cross midnight while the write is still queued. The projected row for
+      // the old slot expires, but the move editor and its pinned date do not.
+      await page.clock.runFor(60_000);
+      await expect(page.getByText("Saving your ledger change", { exact: true })).toBeVisible();
+      await expect(originalRow).toHaveCount(0);
+      await expect(keptMove).toBeVisible();
+      await expect(keptDate).toBeDisabled();
+      await expect(keptDate).toHaveValue("2026-11-23");
+      await expect(keptMove).toContainText("New date 2026-11-23");
+      await expect(keptMove).toContainText("not saved");
+      await expect(schedule.getByText(/Nov 23, 2026/)).toHaveCount(0);
+      await expect(movedRow).toHaveCount(0);
+      expect(await storedRaw(page)).toBe(originalRaw);
+
+      await failNextLedgerWrite(page);
+    } finally {
+      await releaseLedgerLock(page);
+    }
+
+    // The one-shot storage failure keeps the exact move draft and does not
+    // create an occurrence, transaction, balance change, or forecast row.
+    await expect(page.getByText("Saving your ledger change", { exact: true })).toHaveCount(0);
+    await expect(page.getByText("Not saved", { exact: true })).toBeVisible();
+    await expect(keptMove).toBeVisible();
+    await expect(keptDate).toHaveValue("2026-11-23");
+    await expect(schedule.getByText(/Nov 23, 2026/)).toHaveCount(0);
+    await expect(movedRow).toHaveCount(0);
+    expect(await storedRaw(page)).toBe(originalRaw);
+
+    // Retry uses the stable original slot. Changing only the destination keeps
+    // the original date on the occurrence and adds no cash transaction.
+    await keptDate.fill("2026-12-03");
+    await keptMove.getByRole("button", { name: "Move", exact: true }).click();
+    await expect(keptMove).toHaveCount(0);
+    await expect(page.getByText("Not saved", { exact: true })).toHaveCount(0);
+    await expect(movedRow).toBeVisible();
+    await expect(movedRow.getByLabel("New date for Rent due Dec 3, 2026")).toHaveValue("2026-12-03");
+    await expect(schedule.getByText(/Dec 3, 2026/)).toBeVisible();
+
+    const savedRaw = await storedRaw(page);
+    expect(savedRaw).not.toBe(originalRaw);
+    const saved = JSON.parse(savedRaw ?? "null");
+    expect(saved.current_balance_cents).toBe(100_000);
+    expect(saved.transactions).toHaveLength(1);
+    expect(saved.bill_occurrences).toEqual([
+      {
+        id: "occ-1",
+        payment_id: "rent",
+        due_date: "2026-12-03",
+        paid: false,
+        original_due_date: "2026-11-23",
+        is_user_modified: true,
+      },
+    ]);
+  });
+
+  test("ordinary Mark paid requires discarding only its own move draft and keeps a sibling guard", async ({ page }) => {
+    await page.clock.install({ time: new Date("2026-11-15T12:00:00.000Z") });
+    const ledger = syntheticLedger([
+      {
+        id: "debt-a",
+        name: "Card A",
+        balance_cents: 120_000,
+        apr_basis_points: 1_999,
+        min_payment_cents: 5_000,
+        due_day_of_month: 5,
+      },
+    ]);
+    ledger.payments = [
+      { id: "rent", name: "Rent", amount_cents: 50_000, recurrence: "Monthly", due_day: 20 },
+      { id: "power", name: "Power", amount_cents: 10_000, recurrence: "Monthly", due_day: 21 },
+    ];
+    await seedSyntheticLedger(page, ledger);
+    const originalRaw = await storedRaw(page);
+    await page.getByRole("button", { name: "Bills", exact: true }).click();
+
+    const rentRow = page.getByRole("listitem", { name: "Rent due Nov 20, 2026", exact: true });
+    const powerRow = page.getByRole("listitem", { name: "Power due Nov 21, 2026", exact: true });
+    const rentDate = rentRow.getByLabel("New date for Rent due Nov 20, 2026");
+    const powerDate = powerRow.getByLabel("New date for Power due Nov 21, 2026");
+
+    // Two independent failed moves in the same pane. A failure on Power must
+    // not erase Rent's move draft or its own marker.
+    await rentDate.fill("2026-11-25");
+    await holdLedgerLock(page);
+    try {
+      await rentRow.getByRole("button", { name: "Move", exact: true }).click();
+      await expect(page.getByText("Saving your ledger change", { exact: true })).toBeVisible();
+      await expect.poll(() => queuedWrites(page)).toBe(1);
+      await failNextLedgerWrite(page);
+    } finally {
+      await releaseLedgerLock(page);
+    }
+    await expect(page.getByText("Saving your ledger change", { exact: true })).toHaveCount(0);
+    await expect(page.getByText("Not saved", { exact: true })).toBeVisible();
+    await expect(rentDate).toHaveValue("2026-11-25");
+    expect(await storedRaw(page)).toBe(originalRaw);
+
+    await powerDate.fill("2026-11-26");
+    await holdLedgerLock(page);
+    try {
+      await powerRow.getByRole("button", { name: "Move", exact: true }).click();
+      await expect(page.getByText("Saving your ledger change", { exact: true })).toBeVisible();
+      await expect.poll(() => queuedWrites(page)).toBe(1);
+      await failNextLedgerWrite(page);
+    } finally {
+      await releaseLedgerLock(page);
+    }
+    await expect(page.getByText("Saving your ledger change", { exact: true })).toHaveCount(0);
+    await expect(page.getByText("Not saved", { exact: true })).toBeVisible();
+    await expect(rentDate).toHaveValue("2026-11-25");
+    await expect(powerDate).toHaveValue("2026-11-26");
+    expect(await storedRaw(page)).toBe(originalRaw);
+
+    // Declining the discard confirmation leaves both the move draft and the
+    // durable ledger untouched.
+    const [declined] = await Promise.all([
+      page.waitForEvent("dialog").then(async (dialog) => {
+        const result = { type: dialog.type(), message: dialog.message() };
+        await dialog.dismiss();
+        return result;
+      }),
+      rentRow.getByRole("button", { name: "Mark paid" }).click(),
+    ]);
+    expect(declined.type).toBe("confirm");
+    expect(declined.message).toMatch(/moved date|move draft/i);
+    await expect(rentDate).toHaveValue("2026-11-25");
+    expect(await storedRaw(page)).toBe(originalRaw);
+
+    // Accepting a settlement that then fails keeps the move draft for retry.
+    await holdLedgerLock(page);
+    try {
+      const [failedPaid] = await Promise.all([
+        page.waitForEvent("dialog").then(async (dialog) => {
+          const type = dialog.type();
+          await dialog.accept();
+          return type;
+        }),
+        rentRow.getByRole("button", { name: "Mark paid" }).click(),
+      ]);
+      expect(failedPaid).toBe("confirm");
+      await expect(page.getByText("Saving your ledger change", { exact: true })).toBeVisible();
+      await expect.poll(() => queuedWrites(page)).toBe(1);
+      await failNextLedgerWrite(page);
+    } finally {
+      await releaseLedgerLock(page);
+    }
+    await expect(page.getByText("Saving your ledger change", { exact: true })).toHaveCount(0);
+    await expect(page.getByText("Not saved", { exact: true })).toBeVisible();
+    await expect(rentRow).toBeVisible();
+    await expect(rentDate).toHaveValue("2026-11-25");
+    expect(await storedRaw(page)).toBe(originalRaw);
+
+    // A successful settlement clears only Rent's draft. Power's draft and its
+    // navigation guard survive.
+    const [accepted] = await Promise.all([
+      page.waitForEvent("dialog").then(async (dialog) => {
+        const type = dialog.type();
+        await dialog.accept();
+        return type;
+      }),
+      rentRow.getByRole("button", { name: "Mark paid" }).click(),
+    ]);
+    expect(accepted).toBe("confirm");
+    await expect(rentRow).toHaveCount(0);
+    await expect(powerDate).toHaveValue("2026-11-26");
+
+    const paidRaw = await storedRaw(page);
+    expect(paidRaw).not.toBe(originalRaw);
+    const paid = JSON.parse(paidRaw ?? "null");
+    expect(paid.current_balance_cents).toBe(50_000);
+    expect(paid.transactions).toHaveLength(2);
+    expect(paid.transactions[1]).toMatchObject({
+      id: "tx-2",
+      amount_cents: -50_000,
+      type: "Expense",
+      date: "2026-11-15",
+      description: "Rent",
+    });
+    expect(paid.bill_occurrences).toEqual([
+      {
+        id: "occ-1",
+        payment_id: "rent",
+        due_date: "2026-11-20",
+        paid: true,
+        transaction_id: "tx-2",
+        original_due_date: "2026-11-20",
+        is_user_modified: false,
+      },
+    ]);
+
+    const [siblingGuard] = await Promise.all([
+      page.waitForEvent("dialog").then(async (dialog) => {
+        const type = dialog.type();
+        await dialog.dismiss();
+        return type;
+      }),
+      page.getByRole("button", { name: "Home", exact: true }).click(),
+    ]);
+    expect(siblingGuard).toBe("confirm");
+    await expect(page.getByRole("button", { name: "Bills", exact: true })).toHaveAttribute("aria-current", "page");
+    await expect(powerDate).toHaveValue("2026-11-26");
+    expect(await storedRaw(page)).toBe(paidRaw);
+
+    // Cancel is per slot: it discards only Power's marker and draft.
+    await powerRow.getByRole("button", { name: "Cancel move" }).click();
+    await expect(powerDate).toHaveValue("2026-11-21");
+    await expect(powerRow.getByRole("button", { name: "Cancel move" })).toHaveCount(0);
+    expect(await storedRaw(page)).toBe(paidRaw);
+
+    let navigationPrompt: string | null = null;
+    const onDialog = async (dialog: Dialog) => {
+      navigationPrompt = dialog.message();
+      await dialog.dismiss();
+    };
+    page.on("dialog", onDialog);
+    try {
+      await page.getByRole("button", { name: "Home", exact: true }).click();
+      await expect(page.getByRole("button", { name: "Home", exact: true })).toHaveAttribute("aria-current", "page");
+    } finally {
+      page.off("dialog", onDialog);
+    }
+    expect(navigationPrompt).toBeNull();
+
+    const final = JSON.parse((await storedRaw(page)) ?? "null");
+    expect(final.bill_occurrences).toEqual(paid.bill_occurrences);
+    expect(final.payments).toEqual(ledger.payments);
+    expect(final.liabilities).toEqual(ledger.liabilities);
   });
 });

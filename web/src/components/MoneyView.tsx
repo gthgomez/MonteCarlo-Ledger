@@ -34,17 +34,23 @@ export function MoneyView({
   const [category, setCategory] = useState("");
   const [description, setDescription] = useState("");
   const [dateInput, setDate] = useState<string | null>(null);
-  const date = dateInput ?? asOf;
+  // An implicit date sent to a write stays visible while that write is queued or
+  // failed. A successful write releases it, so a fresh untouched form follows asOf.
+  const [pinnedDate, setPinnedDate] = useState<string | null>(null);
+  const date = dateInput ?? pinnedDate ?? asOf;
   const [formError, setFormError] = useState<string | null>(null);
 
   const [incomeName, setIncomeName] = useState("");
   const [incomeAmount, setIncomeAmount] = useState("");
   const [frequency, setFrequency] = useState<IncomeItem["frequency"]>("Bi-weekly");
   const [paydayInput, setPayday] = useState<string | null>(null);
-  const payday = paydayInput ?? asOf;
+  const [pinnedPayday, setPinnedPayday] = useState<string | null>(null);
+  const payday = paydayInput ?? pinnedPayday ?? asOf;
   const [incomeError, setIncomeError] = useState<string | null>(null);
 
   const [reconcile, setReconcile] = useState((startingBalanceCents / 100).toFixed(2));
+  const [pinnedReconcileDate, setPinnedReconcileDate] = useState<string | null>(null);
+  const reconcileDate = pinnedReconcileDate ?? asOf;
   const [reconcileError, setReconcileError] = useState<string | null>(null);
 
   const sum = transactionSumCents(state.transactions);
@@ -53,8 +59,16 @@ export function MoneyView({
   const net = cashMinusEnteredDebt(startingBalanceCents, state.liabilities);
   const futureCount = state.transactions.filter((tx) => tx.date > asOf).length;
   const reconcileCents = dollarsToCents(Number(reconcile));
+  // A pending/failed reconcile must preview the date it actually submitted. Use
+  // the same eligible-row rule as reconcileBalance instead of a second formula.
+  const reconcileBaseCents =
+    pinnedReconcileDate === null
+      ? startingBalanceCents
+      : transactionSumCents(state.transactions.filter((tx) => tx.date <= pinnedReconcileDate));
   const reconcileDiff =
-    reconcileCents === null ? null : reconcileCents - startingBalanceCents;
+    reconcileCents === null || reconcileBaseCents === null
+      ? null
+      : reconcileCents - reconcileBaseCents;
 
   async function submitRecord(event: React.FormEvent) {
     event.preventDefault();
@@ -65,8 +79,9 @@ export function MoneyView({
     }
     const submittedAmount = amount;
     const submittedDescription = description;
+    const submittedDate = date;
     const result = recordCashflow(state, {
-      date,
+      date: submittedDate,
       kind,
       amountCents: cents,
       category,
@@ -77,13 +92,16 @@ export function MoneyView({
       return;
     }
     setFormError(null);
+    setPinnedDate(submittedDate);
     const saved = await onEdit(result, "money:record");
     if (!saved.ok) {
       // Keep the submitted draft visible so the user can retry without retyping.
+      // The date pin also makes the retry reuse the date this attempt communicated.
       setFormError(saved.error);
       return;
     }
     setFormError(null);
+    setPinnedDate((current) => (current === submittedDate ? null : current));
     // Clear only what was actually submitted. A value changed while the write
     // was pending belongs to the next draft and must survive the previous save.
     setAmount((current) => (current === submittedAmount ? "" : current));
@@ -98,23 +116,26 @@ export function MoneyView({
       return;
     }
     const submittedName = incomeName;
+    const submittedPayday = payday;
     const result = addIncomeSchedule(state, {
       name: incomeName,
       amountCents: cents,
       frequency,
-      nextPayday: payday,
+      nextPayday: submittedPayday,
     });
     if (!result.ok) {
       setIncomeError(result.error);
       return;
     }
     setIncomeError(null);
+    setPinnedPayday(submittedPayday);
     const saved = await onEdit(result, "money:income");
     if (!saved.ok) {
       setIncomeError(saved.error);
       return;
     }
     setIncomeError(null);
+    setPinnedPayday((current) => (current === submittedPayday ? null : current));
     setIncomeName((current) => (current === submittedName ? "" : current));
   }
 
@@ -124,18 +145,21 @@ export function MoneyView({
       setReconcileError("Enter the balance you see, in dollars.");
       return;
     }
-    const result = reconcileBalance(state, reconcileCents, asOf);
+    const submittedDate = reconcileDate;
+    const result = reconcileBalance(state, reconcileCents, submittedDate);
     if (!result.ok) {
       setReconcileError(result.error);
       return;
     }
     setReconcileError(null);
+    setPinnedReconcileDate(submittedDate);
     const saved = await onEdit(result, "money:reconcile");
     if (!saved.ok) {
       setReconcileError(saved.error);
       return;
     }
     setReconcileError(null);
+    setPinnedReconcileDate((current) => (current === submittedDate ? null : current));
   }
 
   const rows = [...state.transactions].reverse();
@@ -199,7 +223,15 @@ export function MoneyView({
           </label>
           <label className="text-sm font-medium">
             Date
-            <input className={`${fieldClass} mt-1`} type="date" value={date} onChange={(e) => setDate(e.target.value)} />
+            <input
+              className={`${fieldClass} mt-1`}
+              type="date"
+              value={date}
+              onChange={(e) => {
+                setDate(e.target.value);
+                setPinnedDate(null);
+              }}
+            />
           </label>
           <label className="text-sm font-medium sm:col-span-2">
             Note
@@ -261,7 +293,15 @@ export function MoneyView({
           </label>
           <label className="text-sm font-medium">
             Next payday
-            <input className={`${fieldClass} mt-1`} type="date" value={payday} onChange={(e) => setPayday(e.target.value)} />
+            <input
+              className={`${fieldClass} mt-1`}
+              type="date"
+              value={payday}
+              onChange={(e) => {
+                setPayday(e.target.value);
+                setPinnedPayday(null);
+              }}
+            />
           </label>
           {incomeError && (
             <p className="text-sm text-danger sm:col-span-2" role="alert">
@@ -304,7 +344,7 @@ export function MoneyView({
           </label>
           {reconcileDiff !== null && reconcileDiff !== 0 && (
             <p className="text-sm text-muted">
-              This will add an adjustment of {formatMoney(reconcileDiff)} dated {formatDateLabel(asOf)}.
+              This will add an adjustment of {formatMoney(reconcileDiff)} dated {formatDateLabel(reconcileDate)}.
             </p>
           )}
           {reconcileError && (
