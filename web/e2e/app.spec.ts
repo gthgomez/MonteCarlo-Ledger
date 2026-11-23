@@ -417,6 +417,10 @@ test.describe("beginner financial journey", () => {
       await otherTab.getByRole("button", { name: "Advanced", exact: true }).click();
       await otherTab.evaluate(({ key, legacy }) => localStorage.setItem(key, JSON.stringify(legacy)), { key, legacy });
       await expect(page.getByLabel(reserve)).toHaveValue("100.00");
+      // The seed above was injected from this tab, which does not receive its
+      // own storage event. Load the legacy bytes before explicitly editing them.
+      await otherTab.reload();
+      await expect(otherTab.getByLabel(reserve)).toHaveValue("100.00");
 
       const deliverQueuedEvent = () => page.evaluate(({ key, legacy }) => {
         window.dispatchEvent(new StorageEvent("storage", {
@@ -489,7 +493,9 @@ test.describe("beginner financial journey", () => {
     await expect(page.getByLabel("Reserve to subtract from the chosen low point ($)")).toHaveValue("125.00");
     expect(await page.evaluate(() => JSON.parse(localStorage.getItem("montecarlo_financial_assumptions") ?? "{}").schemaVersion)).toBeUndefined();
     await page.getByRole("button", { name: "Update results" }).click();
-    expect(await page.evaluate(() => JSON.parse(localStorage.getItem("montecarlo_financial_assumptions") ?? "{}").schemaVersion)).toBe(1);
+    await expect.poll(() => page.evaluate(() =>
+      JSON.parse(localStorage.getItem("montecarlo_financial_assumptions") ?? "{}").schemaVersion
+    )).toBe(1);
   });
 
   test("legacy startup cannot overwrite a newer explicit save in another tab", async ({ page }) => {
@@ -521,6 +527,7 @@ test.describe("beginner financial journey", () => {
     await otherTab.getByRole("button", { name: "Advanced", exact: true }).click();
     await otherTab.getByLabel("Reserve to subtract from the chosen low point ($)").fill("900");
     await otherTab.getByRole("button", { name: "Update results" }).click();
+    await expect(otherTab.getByLabel("Reserve to subtract from the chosen low point ($)")).toHaveValue("900.00");
     await page.evaluate(() => {
       const release = (window as Window & { __releaseLegacyWrite?: () => void }).__releaseLegacyWrite;
       release?.();

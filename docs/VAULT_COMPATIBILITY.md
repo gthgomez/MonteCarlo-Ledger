@@ -36,7 +36,10 @@ If storage fails during restore and the previous data cannot be verified, some o
 change may have persisted. The warning remains after closing Sync. Export the previous ledger
 and copy any drafts before explicitly reloading to inspect what is saved. Until then, forecasts,
 ledger writes, and Sync are paused in that tab. In a browser without Web Locks, ordinary edits
-still work locally, but only one tab should edit the ledger.
+still work locally, but only one tab should edit the ledger. Saving financial settings requires
+cross-tab locking too. A stale settings save keeps the draft and asks you to review newer saved
+values. If a settings write cannot be verified, the forecast is paused; use **Read saved settings**
+to check what persisted without changing the ledger or clearing your draft.
 
 Unsaved form drafts are not included in exports or vault snapshots. A successful replacement
 clears the open drafts in that tab; matching IDs do not transfer drafts to the new ledger.

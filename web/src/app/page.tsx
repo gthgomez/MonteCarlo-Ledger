@@ -17,6 +17,7 @@ import {
   loadAssumptions,
   parseSavedAssumptions,
   saveAssumptions,
+  type AssumptionsLoadResult,
 } from "@/lib/assumptions-persistence";
 import { EMPTY_TARGETS, loadBudgetTargets, saveBudgetTargets, type BudgetTargets } from "@/lib/budget-targets";
 import { type EditResult } from "@/lib/ledger-edits";
@@ -52,6 +53,9 @@ const THEME_KEY = "mc-theme";
 const BUSY_SAVE_MESSAGE =
   "Another ledger change is still being saved. Wait for it to finish before trying again. Nothing was saved by this attempt.";
 
+const SETTINGS_SAVE_BUSY =
+  "Financial settings are still being saved. Wait for that save to finish before trying again.";
+
 const HOME_ONBOARDING_DRAFT_KEY = "home:onboarding";
 const ADVANCED_SETTINGS_DRAFT_KEY = "advanced:assumptions";
 
@@ -84,7 +88,14 @@ const LEDGER_RECOVERY_REQUIRED =
 
 type LedgerFreshness = "current" | "changed" | "unreadable" | "indeterminate";
 
-function warnBeforeLeavingWithUnverifiedLedger(event: BeforeUnloadEvent) {
+interface SettingsView {
+  values: Assumptions;
+  /** Exact bytes underlying this view, including an explicitly displayed invalid record. */
+  expectedRaw: string | null;
+  problem: { error: string; raw: string | null; indeterminate?: true } | null;
+}
+
+function warnBeforeLeavingWhileSaving(event: BeforeUnloadEvent) {
   event.preventDefault();
   event.returnValue = "";
 }
@@ -102,9 +113,13 @@ export default function Home() {
   const [usingDemo, setUsingDemo] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [saveWarning, setSaveWarning] = useState<string | null>(null);
-  const [assumptionsError, setAssumptionsError] = useState<string | null>(null);
+  const [settings, setSettings] = useState<SettingsView>({
+    values: DEFAULT_ASSUMPTIONS,
+    expectedRaw: null,
+    problem: null,
+  });
+  const { values: assumptions, problem: assumptionsProblem } = settings;
   const [assumptionsWarning, setAssumptionsWarning] = useState<string | null>(null);
-  const [assumptionsRaw, setAssumptionsRaw] = useState<string | null>(null);
   const [storedRaw, setStoredRaw] = useState<string | null>(null);
   // Storage events and the write completion handler need the latest adopted
   // snapshot even before React renders the corresponding state.
@@ -115,40 +130,57 @@ export default function Home() {
   const [isSyncModalOpen, setIsSyncModalOpen] = useState(false);
   const [currentVaultId, setCurrentVaultId] = useState<string | undefined>();
   const [section, setSection] = useState<Section>("home");
-  const [assumptions, setAssumptions] = useState<Assumptions>(DEFAULT_ASSUMPTIONS);
   const [targets, setTargets] = useState<BudgetTargets>(EMPTY_TARGETS);
   const [targetWarning, setTargetWarning] = useState<string | null>(null);
   const [theme, setTheme] = useState<"light" | "dark" | null>(null);
   const [isSaving, setIsSaving] = useState(false);
+  const [isSavingSettings, setIsSavingSettings] = useState(false);
+  const savesPending = isSaving || isSavingSettings;
   // Remounts the section panes after a verified replacement. Form state can act
   // on a replacement's payment IDs and recurrence slots, so a stale draft must
   // never survive into a ledger it was not typed against.
   const [ledgerViewGeneration, setLedgerViewGeneration] = useState(0);
   const writeInFlightRef = useRef(false);
+  const settingsWriteInFlightRef = useRef(false);
   // Keys of forms whose last submitted save failed. A key is added only after a
   // real persistence failure and removed by that same form's next success.
   const failedDraftKeysRef = useRef<Set<string>>(new Set());
 
-  // Guard native close/reload while a write is outstanding, or afterward if
-  // this tab may hold the only copy of the pre-write ledger.
+  // Guard native close/reload while any save is pending, or afterward if this
+  // tab may hold the only copy of the pre-write ledger.
   useEffect(() => {
-    return () => window.removeEventListener("beforeunload", warnBeforeLeavingWithUnverifiedLedger);
+    return () => window.removeEventListener("beforeunload", warnBeforeLeavingWhileSaving);
+  }, []);
+
+  const showReadSettings = useCallback((loaded: AssumptionsLoadResult, fromOtherTab = false) => {
+    if (!loaded.ok) {
+      setSettings((current) => {
+        // A new unreadable check does not resolve a prior uncertain write.
+        if (loaded.raw === null && current.problem?.indeterminate) return current;
+        return {
+          ...current,
+          expectedRaw: loaded.raw ?? current.expectedRaw,
+          problem: { error: loaded.error, raw: loaded.raw },
+        };
+      });
+      setAssumptionsWarning(null);
+      return;
+    }
+    setSettings({ values: loaded.assumptions, expectedRaw: loaded.raw, problem: null });
+    if (loaded.migrated) {
+      // Legacy records are loaded read-only until the user saves explicitly.
+      setAssumptionsWarning("Older financial settings were loaded. Save under Advanced to update their format.");
+    } else if (fromOtherTab) {
+      setAssumptionsWarning(loaded.raw === null
+        ? "Financial settings were removed in another tab. Default assumptions are now active."
+        : "Financial settings were updated in another tab.");
+    } else {
+      setAssumptionsWarning(loaded.warning);
+    }
   }, []);
 
   useEffect(() => {
-    const savedAssumptions = loadAssumptions(browserStorage());
-    if (savedAssumptions.ok) {
-      setAssumptions(savedAssumptions.assumptions);
-      setAssumptionsWarning(savedAssumptions.warning);
-      if (savedAssumptions.migrated) {
-        // Legacy records are hydrated read-only. Writing a migrated copy during startup
-        // can race an explicit save in another tab and overwrite newer assumptions.
-        setAssumptionsWarning("Older financial settings were loaded. Save under Advanced to update their format.");
-      }
-    } else {
-      setAssumptionsError(savedAssumptions.error);
-      setAssumptionsRaw(savedAssumptions.raw);
-    }
+    showReadSettings(loadAssumptions(browserStorage()));
 
     try {
       const saved = localStorage.getItem(LEDGER_STORAGE_KEY);
@@ -190,7 +222,7 @@ export default function Home() {
     const fromHash = sectionFromHash(window.location.hash);
     if (fromHash) setSection(fromHash);
     setIsLoaded(true);
-  }, []);
+  }, [showReadSettings]);
 
   const refreshLedgerFreshness = useCallback(() => {
     // Rereading matching ledger bytes alone cannot verify vault metadata or a
@@ -231,45 +263,20 @@ export default function Home() {
   useEffect(() => {
     function receiveAssumptions(event: StorageEvent) {
       if (event.key !== ASSUMPTIONS_STORAGE_KEY && event.key !== null) return;
-      let currentRaw: string | null = null;
-      try {
-        const storage = browserStorage();
-        if (!storage) throw new Error("Browser storage unavailable");
-        currentRaw = storage.getItem(ASSUMPTIONS_STORAGE_KEY);
-      } catch {
-        setAssumptionsError("Financial settings could not be read from this browser.");
-        return;
-      }
       // Storage events may be delivered out of order; the durable key is the source of truth,
       // not the event's historical newValue payload.
-      const loaded = parseSavedAssumptions(currentRaw);
-      if (!loaded.ok) {
-        setAssumptionsRaw(loaded.raw);
-        setAssumptionsError(loaded.error);
-        setAssumptionsWarning(null);
-        return;
-      }
-      setAssumptions(loaded.assumptions);
-      setAssumptionsError(null);
-      setAssumptionsRaw(null);
-      if (loaded.migrated) {
-        setAssumptionsWarning("Older financial settings from another tab were loaded. Save under Advanced to update their format.");
-      } else if (currentRaw === null) {
-        setAssumptionsWarning("Financial settings were removed in another tab. Default assumptions are now active.");
-      } else {
-        setAssumptionsWarning("Financial settings were updated in another tab.");
-      }
+      showReadSettings(loadAssumptions(browserStorage()), true);
     }
 
     window.addEventListener("storage", receiveAssumptions);
     return () => window.removeEventListener("storage", receiveAssumptions);
-  }, []);
+  }, [showReadSettings]);
 
   const asOf = useFinancialDate();
 
   const evaluation = useMemo(
-    () => assumptionsError || ledgerFreshness !== "current" ? null : evaluateLedger(state, asOf, assumptions),
-    [state, asOf, assumptions, assumptionsError, ledgerFreshness]
+    () => assumptionsProblem || ledgerFreshness !== "current" ? null : evaluateLedger(state, asOf, assumptions),
+    [state, asOf, assumptions, assumptionsProblem, ledgerFreshness]
   );
 
   function recordDraftOutcome(draftKey: string | undefined, failed: boolean) {
@@ -301,7 +308,7 @@ export default function Home() {
   function navigate(next: Section) {
     // Navigation is held until the durable result is known so a pending save
     // cannot be mistaken for an abandoned draft or hidden behind another section.
-    if (writeInFlightRef.current) return;
+    if (writeInFlightRef.current || settingsWriteInFlightRef.current) return;
     if (next === section) return;
     // Every section change goes through here, including header and insight
     // links. Only an explicit confirmation may discard a failed form draft.
@@ -316,7 +323,7 @@ export default function Home() {
   }
 
   function reloadLedger() {
-    if (writeInFlightRef.current) return;
+    if (writeInFlightRef.current || settingsWriteInFlightRef.current) return;
     const warning = rollbackUnverifiedRef.current
       ? "Reloading discards the previous ledger and open drafts held by this tab. Export the previous ledger and copy any drafts first. Reload and inspect the saved ledger anyway?"
       : ledgerFreshness !== "current" || failedDraftKeysRef.current.size > 0
@@ -324,7 +331,7 @@ export default function Home() {
         : null;
     if (warning && !window.confirm(warning)) return;
     // The explicit recovery confirmation already covers the loss of this copy.
-    window.removeEventListener("beforeunload", warnBeforeLeavingWithUnverifiedLedger);
+    window.removeEventListener("beforeunload", warnBeforeLeavingWhileSaving);
     window.location.reload();
   }
 
@@ -365,12 +372,13 @@ export default function Home() {
     operation: () => Promise<PersistenceResult>
   ): Promise<PersistenceResult> {
     if (rollbackUnverifiedRef.current) return { ok: false, error: LEDGER_RECOVERY_REQUIRED };
+    if (settingsWriteInFlightRef.current) return { ok: false, error: SETTINGS_SAVE_BUSY };
     if (writeInFlightRef.current) {
       return { ok: false, error: BUSY_SAVE_MESSAGE };
     }
     writeInFlightRef.current = true;
     setIsSaving(true);
-    window.addEventListener("beforeunload", warnBeforeLeavingWithUnverifiedLedger);
+    window.addEventListener("beforeunload", warnBeforeLeavingWhileSaving);
     try {
       const result = await operation();
       if (!result.ok && result.indeterminate) {
@@ -382,7 +390,7 @@ export default function Home() {
       return result;
     } finally {
       if (!rollbackUnverifiedRef.current) {
-        window.removeEventListener("beforeunload", warnBeforeLeavingWithUnverifiedLedger);
+        window.removeEventListener("beforeunload", warnBeforeLeavingWhileSaving);
       }
       writeInFlightRef.current = false;
       setIsSaving(false);
@@ -406,6 +414,7 @@ export default function Home() {
     // Refuse before taking the lock: a declined discard must not queue a write
     // that could replace the ledger the person chose to keep their draft for.
     if (rollbackUnverifiedRef.current) return { ok: false, error: LEDGER_RECOVERY_REQUIRED };
+    if (settingsWriteInFlightRef.current) return { ok: false, error: SETTINGS_SAVE_BUSY };
     if (writeInFlightRef.current) return { ok: false, error: BUSY_SAVE_MESSAGE };
     if (failedDraftKeysRef.current.size > 0 && !window.confirm(REPLACEMENT_DISCARD_DRAFT_MESSAGE)) {
       return { ok: false, error: REPLACEMENT_CANCELLED_MESSAGE };
@@ -420,22 +429,65 @@ export default function Home() {
     });
   }
 
-  function handleApplyAssumptions(nextAssumptions: Assumptions): string | null {
-    const saved = saveAssumptions(browserStorage(), nextAssumptions);
-    if (!saved.ok) {
-      setAssumptionsWarning(saved.error);
-      return saved.error;
-    }
-    setAssumptions(nextAssumptions);
-    setAssumptionsError(null);
+  async function handleApplyAssumptions(
+    nextAssumptions: Assumptions,
+    fromRecovery = false
+  ): Promise<string | null> {
+    if (writeInFlightRef.current) return BUSY_SAVE_MESSAGE;
+    if (settingsWriteInFlightRef.current) return SETTINGS_SAVE_BUSY;
+    settingsWriteInFlightRef.current = true;
+    setIsSavingSettings(true);
     setAssumptionsWarning(null);
-    setAssumptionsRaw(null);
-    return null;
+    window.addEventListener("beforeunload", warnBeforeLeavingWhileSaving);
+    try {
+      // This expected value belongs to the settings rendered when the user
+      // submitted, not to an asynchronous storage event that arrives later.
+      const saved = await saveAssumptions(browserStorage(), nextAssumptions, settings.expectedRaw);
+      if (saved.ok) {
+        showReadSettings(parseSavedAssumptions(saved.raw));
+        return null;
+      }
+      if (saved.reason === "conflict") {
+        // Adopt the checked saved values, not the submitted values. Advanced
+        // continues overlaying its dirty fields for review before a retry.
+        showReadSettings(parseSavedAssumptions(saved.raw), true);
+      } else if (saved.reason === "indeterminate" || saved.reason === "unreadable") {
+        const resultProblem: SettingsView["problem"] = saved.reason === "indeterminate"
+          ? { error: saved.error, raw: null, indeterminate: true }
+          : { error: saved.error, raw: null };
+        setSettings((current) => ({
+          ...current,
+          problem: current.problem?.indeterminate && saved.reason === "unreadable"
+            ? current.problem
+            : resultProblem,
+        }));
+        // Show the uncertainty/unreadability once, in the page's recovery
+        // notice. Keep an editor-level failure so this draft still has a guard.
+        return "Your settings draft was kept. Check the saved settings before trying again.";
+      }
+      if (fromRecovery) setAssumptionsWarning(saved.error);
+      return saved.error;
+    } finally {
+      if (!rollbackUnverifiedRef.current) {
+        window.removeEventListener("beforeunload", warnBeforeLeavingWhileSaving);
+      }
+      settingsWriteInFlightRef.current = false;
+      setIsSavingSettings(false);
+    }
+  }
+
+  function readSavedSettings() {
+    if (writeInFlightRef.current || settingsWriteInFlightRef.current) return;
+    showReadSettings(loadAssumptions(browserStorage()));
   }
 
   async function handleResetDemo() {
     if (rollbackUnverifiedRef.current) {
       setSaveWarning(LEDGER_RECOVERY_REQUIRED);
+      return;
+    }
+    if (settingsWriteInFlightRef.current) {
+      setSaveWarning(SETTINGS_SAVE_BUSY);
       return;
     }
     if (writeInFlightRef.current) {
@@ -480,7 +532,7 @@ export default function Home() {
   }
 
   function openSync() {
-    if (writeInFlightRef.current) return;
+    if (writeInFlightRef.current || settingsWriteInFlightRef.current) return;
     setIsSyncModalOpen(true);
   }
 
@@ -492,13 +544,17 @@ export default function Home() {
     return null;
   }
 
-  // Keep the live region mounted so assistive technology announces the pending
-  // message when it appears, rather than treating a new region as first render.
+  // Keep the live region mounted so pending saves are announced when they start.
   const savingNotice = (
-    <div role="status" aria-live="polite" className={isSaving ? undefined : "sr-only"}>
+    <div role="status" aria-live="polite" className={savesPending ? undefined : "sr-only"}>
       {isSaving && (
         <Notice tone="info" title="Saving your ledger change">
           Keep this tab open until the browser confirms the change is stored. Your draft stays in this section until then.
+        </Notice>
+      )}
+      {isSavingSettings && (
+        <Notice tone="info" title="Saving financial settings">
+          Keep this tab open until the browser has checked the saved settings.
         </Notice>
       )}
     </div>
@@ -539,7 +595,7 @@ export default function Home() {
             Export previous ledger
           </button>
         )}
-        <button type="button" disabled={isSaving} onClick={reloadLedger} className="inline-flex min-h-11 items-center rounded-lg border border-line bg-surface px-3 text-sm font-semibold">
+        <button type="button" disabled={savesPending} onClick={reloadLedger} className="inline-flex min-h-11 items-center rounded-lg border border-line bg-surface px-3 text-sm font-semibold">
           Reload saved ledger
         </button>
       </div>
@@ -571,7 +627,7 @@ export default function Home() {
                 )}
                 <button
                   type="button"
-                  disabled={isSaving}
+                  disabled={savesPending}
                   onClick={handleResetDemo}
                   className="inline-flex min-h-11 items-center rounded-lg bg-accent px-3 text-sm font-semibold text-on-accent"
                 >
@@ -588,17 +644,18 @@ export default function Home() {
     );
   }
 
-  const forecastProblem = assumptionsError ? (
+  const forecastProblem = assumptionsProblem ? (
     <section className="space-y-4 rounded-2xl border border-warning bg-warning-soft p-6">
       <h1 className="text-lg font-semibold">Financial Settings Not Loaded</h1>
-      <p className="text-sm" role="alert">{assumptionsError}</p>
+      <p className="text-sm" role="alert">{assumptionsProblem.error}</p>
+      {assumptionsWarning && <p className="text-sm" role="status">{assumptionsWarning}</p>}
       <p className="text-sm text-muted">
-        Repair the settings or choose the defaults to make them available for forecasts again. Choosing defaults
-        does not change your ledger or discard open drafts.
+        No forecast is shown until the saved settings can be checked or repaired. Reading the settings or choosing
+        defaults does not change your ledger or discard open drafts.
       </p>
-      {assumptionsRaw && (
+      {assumptionsProblem.raw !== null && (
         <a
-          href={"data:text/json;charset=utf-8," + encodeURIComponent(assumptionsRaw)}
+          href={"data:text/json;charset=utf-8," + encodeURIComponent(assumptionsProblem.raw)}
           download="montecarlo-financial-settings-recovery.json"
           className="inline-flex min-h-11 items-center rounded-lg border border-line bg-surface px-3 text-sm font-semibold"
         >
@@ -608,11 +665,16 @@ export default function Home() {
       <div className="flex flex-wrap gap-3">
         <button
           type="button"
-          disabled={isSaving}
-          onClick={() => {
-            const problem = handleApplyAssumptions(DEFAULT_ASSUMPTIONS);
-            if (problem) setAssumptionsError(problem);
-          }}
+          disabled={savesPending}
+          onClick={readSavedSettings}
+          className="inline-flex min-h-11 items-center rounded-lg border border-line bg-surface px-3 text-sm font-semibold"
+        >
+          Read saved settings
+        </button>
+        <button
+          type="button"
+          disabled={savesPending}
+          onClick={() => void handleApplyAssumptions(DEFAULT_ASSUMPTIONS, true)}
           className="inline-flex min-h-11 items-center rounded-lg bg-accent px-3 text-sm font-semibold text-on-accent"
         >
           Use default financial assumptions
@@ -645,7 +707,7 @@ export default function Home() {
       <div className="flex flex-wrap gap-3">
         <button
           type="button"
-          disabled={isSaving}
+          disabled={savesPending}
           onClick={handleResetDemo}
           className="inline-flex min-h-11 items-center rounded-lg bg-accent px-3 text-sm font-semibold text-on-accent"
         >
@@ -746,13 +808,13 @@ export default function Home() {
         onExportJson={ledgerFreshness === "current" ? handleExportJson : undefined}
         section={section}
         onNavigate={navigate}
-        isSaving={isSaving}
+        isSaving={savesPending}
       />
       <main id="content" className="mx-auto w-full min-w-0 max-w-5xl flex-1 space-y-4 px-4 py-6">
         <p className="text-sm text-muted">{SECTION_QUESTION[section]}</p>
         {savingNotice}
         {saveWarning && <Notice tone="warning" title="Not saved">{saveWarning}</Notice>}
-        {!assumptionsError && assumptionsWarning && <Notice tone="warning" title="Financial settings">{assumptionsWarning}</Notice>}
+        {!assumptionsProblem && assumptionsWarning && <Notice tone="warning" title="Financial settings">{assumptionsWarning}</Notice>}
         {ledgerProblem}
         {forecastProblem}
         {isForecastSection && guidanceIssue && (
@@ -769,7 +831,7 @@ export default function Home() {
               needsSchedule={needsSchedule}
               forecast={homeForecast}
               onNavigate={navigate}
-              saving={isSaving}
+              saving={savesPending}
               createOwn={async (nextState) => {
                 if (!usingDemo) {
                   return { ok: false, error: "A ledger already exists here. Add new entries in Money or Bills without replacing it." };
@@ -786,7 +848,7 @@ export default function Home() {
               asOf={asOf}
               startingBalanceCents={forecast?.outcome.startingBalanceCents ?? null}
               onEdit={onEdit}
-              saving={isSaving}
+              saving={savesPending}
             />
           )}
           {section === "budget" && (
@@ -800,7 +862,7 @@ export default function Home() {
             />
           )}
           {section === "bills" && (
-            <fieldset disabled={isSaving} className="m-0 min-w-0 w-full border-0 p-0">
+            <fieldset disabled={savesPending} className="m-0 min-w-0 w-full border-0 p-0">
               <BillsView
                 state={state}
                 asOf={asOf}
@@ -822,7 +884,7 @@ export default function Home() {
               showGuidance={showGuidance}
               onEdit={onEdit}
               onDiscardDraft={discardFailedDraft}
-              saving={isSaving}
+              saving={savesPending}
             />
           )}
           {section === "future" && forecast && (
@@ -836,6 +898,7 @@ export default function Home() {
               showGuidance={showGuidance}
               onApply={handleApplyAssumptions}
               onDraftOutcome={(failed) => recordDraftOutcome(ADVANCED_SETTINGS_DRAFT_KEY, failed)}
+              saving={savesPending}
             />
           )}
         </React.Fragment>

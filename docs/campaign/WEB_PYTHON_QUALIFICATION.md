@@ -111,6 +111,11 @@ cannot explain, or data they can lose without a warning, is a release defect.
   the user explicitly resolves it. Check that an Advanced settings draft survives an external
   settings update or defaults recovery. Do not allow a reconciliation adjustment while its checked
   preview is unavailable.
+- In Advanced, delay delivery of another tab's settings update until after submitting a local
+  edit. Reject the stale write, keep the draft, and require a deliberate retry against the
+  newly observed settings. Separately fail read-back after a settings write and fail rollback
+  after a partial write. Keep the draft and hide results until saved settings can be read and
+  validated or deliberately repaired. Verified rollback must keep the previous forecast.
 - If hosted staging is authorized later, record the exact preview build, isolated database and
   synthetic-only fixture scope (no secrets in the record). Repeat Web ↔ Python, including restart
   and conflict handling. Stop if staging identity or isolation cannot be established. Separately

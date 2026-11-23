@@ -1,6 +1,6 @@
 import { expect, test, type Dialog, type Page } from "@playwright/test";
 
-import { DEFAULT_ASSUMPTIONS } from "../src/lib/assumptions";
+import { DEFAULT_ASSUMPTIONS, type Assumptions } from "../src/lib/assumptions";
 import { ASSUMPTIONS_STORAGE_KEY } from "../src/lib/assumptions-persistence";
 import { LEDGER_STORAGE_KEY } from "../src/lib/persistence";
 import type { LedgerState } from "../src/lib/types";
@@ -20,7 +20,7 @@ const AS_OF = "2026-11-15";
 const RESERVE_LABEL = "Reserve to subtract from the chosen low point ($)";
 const SEED_LABEL = "Seed";
 const PLAN_WINDOW_LABEL = "Plan window (days, 1–730)";
-const ADVANCED_DRAFT_STATUS = /Unsaved settings: the values you changed here are not applied yet/;
+const ADVANCED_DRAFT_STATUS = /Unsaved settings draft/;
 const APPLIED_STATUS = /These fields match the applied settings used by results/;
 
 function syntheticLedger(): LedgerState {
@@ -45,12 +45,45 @@ function syntheticLedger(): LedgerState {
   };
 }
 
-async function seedSyntheticLedger(page: Page): Promise<void> {
+/** Adds one supported monthly bill so Advanced has a visible Technical result. */
+function scheduledLedger(): LedgerState {
+  const ledger = syntheticLedger();
+  return {
+    ...ledger,
+    payments: [
+      {
+        id: "payment-synthetic",
+        name: "Synthetic bill",
+        amount_cents: 25_000,
+        recurrence: "Monthly",
+        due_day: 20,
+        is_auto_withdraw: false,
+      },
+    ],
+  };
+}
+
+async function seedLedger(page: Page, ledger: LedgerState): Promise<void> {
   await page.addInitScript(
-    ({ key, ledger }) => localStorage.setItem(key, JSON.stringify(ledger)),
-    { key: LEDGER_STORAGE_KEY, ledger: syntheticLedger() }
+    ({ key, state }) => localStorage.setItem(key, JSON.stringify(state)),
+    { key: LEDGER_STORAGE_KEY, state: ledger }
   );
   await page.goto("/");
+}
+
+function seedSyntheticLedger(page: Page): Promise<void> {
+  return seedLedger(page, syntheticLedger());
+}
+
+function seedScheduledLedger(page: Page): Promise<void> {
+  return seedLedger(page, scheduledLedger());
+}
+
+async function seedSavedSettings(page: Page, assumptions: Assumptions): Promise<void> {
+  await page.addInitScript(
+    ({ key, values }) => localStorage.setItem(key, JSON.stringify({ schemaVersion: 1, values })),
+    { key: ASSUMPTIONS_STORAGE_KEY, values: assumptions }
+  );
 }
 
 async function openMoney(page: Page): Promise<void> {
@@ -85,6 +118,102 @@ async function failNextSettingsWrite(page: Page): Promise<void> {
       return original.call(this, key, value);
     };
   }, ASSUMPTIONS_STORAGE_KEY);
+}
+
+/**
+ * Let the real write land, then fail the verification read once. A later explicit
+ * reread is still possible, so the test cannot rely on storage staying broken.
+ */
+async function failSettingsVerificationAfterWrite(page: Page): Promise<void> {
+  await page.evaluate((assumptionsKey) => {
+    const originalGet = Storage.prototype.getItem;
+    const originalSet = Storage.prototype.setItem;
+    const local = window.localStorage;
+    let wrote = false;
+    let verificationFailed = false;
+    Storage.prototype.setItem = function (this: Storage, key: string, value: string) {
+      const result = originalSet.call(this, key, value);
+      if (this === local && key === assumptionsKey) {
+        wrote = true;
+        Storage.prototype.setItem = originalSet;
+      }
+      return result;
+    };
+    Storage.prototype.getItem = function (this: Storage, key: string) {
+      if (this === local && key === assumptionsKey && wrote && !verificationFailed) {
+        verificationFailed = true;
+        Storage.prototype.getItem = originalGet;
+        throw new DOMException("Synthetic settings verification failure", "UnknownError");
+      }
+      return originalGet.call(this, key);
+    };
+  }, ASSUMPTIONS_STORAGE_KEY);
+}
+
+/**
+ * Mutate the settings key, report a failed write, then refuse the rollback too.
+ * The next explicit reread works, so only the write/rollback path is faulty.
+ */
+async function failSettingsRollbackAfterMutation(page: Page): Promise<void> {
+  await page.evaluate((assumptionsKey) => {
+    const originalSet = Storage.prototype.setItem;
+    const originalRemove = Storage.prototype.removeItem;
+    const local = window.localStorage;
+    let phase: "write" | "rollback" | "done" = "write";
+    function restore(): void {
+      phase = "done";
+      Storage.prototype.setItem = originalSet;
+      Storage.prototype.removeItem = originalRemove;
+    }
+    Storage.prototype.setItem = function (this: Storage, key: string, value: string) {
+      if (this === local && key === assumptionsKey) {
+        if (phase === "write") {
+          phase = "rollback";
+          originalSet.call(this, key, value);
+          throw new DOMException("Synthetic settings write failure after mutation", "QuotaExceededError");
+        }
+        if (phase === "rollback") {
+          restore();
+          throw new DOMException("Synthetic settings rollback refusal", "SecurityError");
+        }
+      }
+      return originalSet.call(this, key, value);
+    };
+    Storage.prototype.removeItem = function (this: Storage, key: string) {
+      if (this === local && key === assumptionsKey && phase === "rollback") {
+        restore();
+        throw new DOMException("Synthetic settings rollback refusal", "SecurityError");
+      }
+      return originalRemove.call(this, key);
+    };
+  }, ASSUMPTIONS_STORAGE_KEY);
+}
+
+/**
+ * Suppress the app's settings storage listener in this page only. A local,
+ * early capture listener records that the native event arrived, then stops it
+ * before the bubble listener registered after hydration can run.
+ */
+async function suppressSettingsStorageEvents(page: Page): Promise<void> {
+  await page.addInitScript((assumptionsKey) => {
+    const marker = window as Window & { __suppressedSettingsEvents?: number };
+    marker.__suppressedSettingsEvents = 0;
+    window.addEventListener(
+      "storage",
+      (event) => {
+        if (event.key !== assumptionsKey) return;
+        marker.__suppressedSettingsEvents = (marker.__suppressedSettingsEvents ?? 0) + 1;
+        event.stopImmediatePropagation();
+      },
+      true
+    );
+  }, ASSUMPTIONS_STORAGE_KEY);
+}
+
+function suppressedSettingsEvents(page: Page): Promise<number> {
+  return page.evaluate(
+    () => (window as Window & { __suppressedSettingsEvents?: number }).__suppressedSettingsEvents ?? 0
+  );
 }
 
 test.describe("settings draft safety", () => {
@@ -286,7 +415,141 @@ test.describe("settings draft safety", () => {
     expect(navigationPrompt).toBeNull();
     await sibling.close();
   });
+
+  test("a delayed settings storage event cannot let a stale draft overwrite a sibling's saved reserve", async ({ page, context }) => {
+    await suppressSettingsStorageEvents(page);
+    await seedScheduledLedger(page);
+    await openAdvanced(page);
+
+    const planWindow = page.getByLabel(PLAN_WINDOW_LABEL);
+    const reserve = page.getByLabel(RESERVE_LABEL);
+    const technical = page.getByRole("heading", { name: "Technical result" });
+    await expect(technical).toBeVisible();
+    await expect(reserve).toHaveValue("0.00");
+    const ledgerBefore = await storedRaw(page, LEDGER_STORAGE_KEY);
+
+    // B saves through the real Advanced controls. A receives the native event
+    // but its early capture listener suppresses the app listener.
+    const sibling = await context.newPage();
+    await sibling.goto("/");
+    await openAdvanced(sibling);
+    const siblingReserve = sibling.getByLabel(RESERVE_LABEL);
+    await siblingReserve.fill("500");
+    await sibling.getByRole("button", { name: "Update results" }).click();
+    await expect(siblingReserve).toHaveValue("500.00");
+
+    const siblingRaw = await storedRaw(page, ASSUMPTIONS_STORAGE_KEY);
+    expect(siblingRaw).not.toBeNull();
+    expect(JSON.parse(siblingRaw ?? "{}").values.reserveCents).toBe(50_000);
+
+    // Proving the event arrived prevents a timing race from masquerading as
+    // suppression: A still shows its stale applied reserve and no update notice.
+    await expect.poll(() => suppressedSettingsEvents(page)).toBeGreaterThanOrEqual(1);
+    await expect(reserve).toHaveValue("0.00");
+    await expect(page.getByText("Financial settings were updated in another tab.", { exact: true })).toHaveCount(0);
+
+    // A edits only the window. Its reserve is pristine and comes from the stale
+    // snapshot, so the submitted plan would silently replace B's $500 reserve.
+    await planWindow.fill("120");
+    await page.getByRole("button", { name: "Update results" }).click();
+
+    expect(await storedRaw(page, ASSUMPTIONS_STORAGE_KEY)).toBe(siblingRaw);
+    const conflict = page.getByRole("alert").filter({ hasText: /financial settings changed in another tab/i });
+    await expect(conflict).toBeVisible();
+    expect(await storedRaw(page, ASSUMPTIONS_STORAGE_KEY)).toBe(siblingRaw);
+    await expect(planWindow).toHaveValue("120");
+    await expect(reserve).toHaveValue("500.00");
+    await expect(page.getByText(ADVANCED_DRAFT_STATUS)).toBeVisible();
+
+    // The conflict path adopts the checked durable snapshot, so the visible
+    // result follows B's reserve even though A never received the storage event.
+    await expect(
+      page.getByText("Reserve subtracted", { exact: true }).locator("..")
+    ).toContainText("$500.00");
+    expect(await storedRaw(page, LEDGER_STORAGE_KEY)).toBe(ledgerBefore);
+
+    // An intentional retry merges A's dirty field onto that checked snapshot.
+    await page.getByRole("button", { name: "Update results" }).click();
+    await expect(conflict).toHaveCount(0);
+    await expect(planWindow).toHaveValue("120");
+    await expect(reserve).toHaveValue("500.00");
+    const merged = await storedAssumptions(page);
+    expect(merged?.values).toMatchObject({ horizonDays: 120, reserveCents: 50_000 });
+    expect(await storedRaw(page, LEDGER_STORAGE_KEY)).toBe(ledgerBefore);
+
+    // B receives the normal event path for A's completed save.
+    await expect(sibling.getByLabel(PLAN_WINDOW_LABEL)).toHaveValue("120");
+    await sibling.close();
+  });
+
+  test("a settings write whose verification read throws withholds the forecast until saved settings are reread", async ({ page }) => {
+    await exerciseIndeterminateSettingsWrite(page, failSettingsVerificationAfterWrite);
+  });
+
+  test("a settings write that reports failure after mutating and refuses rollback stays uncertain until saved settings are reread", async ({ page }) => {
+    await exerciseIndeterminateSettingsWrite(page, failSettingsRollbackAfterMutation);
+  });
 });
+
+async function exerciseIndeterminateSettingsWrite(
+  page: Page,
+  installFault: (page: Page) => Promise<void>
+): Promise<void> {
+  const oldSettings = { ...DEFAULT_ASSUMPTIONS, reserveCents: 10_000 };
+  await seedSavedSettings(page, oldSettings);
+  await seedScheduledLedger(page);
+  await openAdvanced(page);
+
+  const planWindow = page.getByLabel(PLAN_WINDOW_LABEL);
+  const reserve = page.getByLabel(RESERVE_LABEL);
+  const technical = page.getByRole("heading", { name: "Technical result" });
+  await expect(technical).toBeVisible();
+  await expect(reserve).toHaveValue("100.00");
+  await expect(
+    page.getByText("Reserve subtracted", { exact: true }).locator("..")
+  ).toContainText("$100.00");
+  const ledgerBefore = await storedRaw(page, LEDGER_STORAGE_KEY);
+  const oldRaw = await storedRaw(page, ASSUMPTIONS_STORAGE_KEY);
+
+  await installFault(page);
+  await reserve.fill("500");
+  await page.getByRole("button", { name: "Update results" }).click();
+
+  // The fault occurs after the store has changed. It is not a rejected input
+  // or an ordinary failed write with a verified rollback.
+  await expect.poll(async () => (await storedAssumptions(page))?.values.reserveCents).toBe(50_000);
+  const settingsError = page.getByRole("heading", { name: "Financial Settings Not Loaded" });
+  const uncertain = page.getByRole("alert").filter({ hasText: /some or all.*may have persisted/i });
+  const keptDraft = page.getByRole("alert").filter({ hasText: /Your settings draft was kept/i });
+  await expect(settingsError).toBeVisible();
+  await expect(uncertain.first()).toBeVisible();
+  await expect(keptDraft).toBeVisible();
+  await expect(technical).toHaveCount(0);
+  await expect(reserve).toHaveValue("500");
+  await expect(page.getByText(ADVANCED_DRAFT_STATUS)).toBeVisible();
+  expect(await storedRaw(page, LEDGER_STORAGE_KEY)).toBe(ledgerBefore);
+
+  // The mutation may remain durable even though the outcome is unknown. It did
+  // replace the old settings; the old assumptions cannot be used as a fallback.
+  const durableRaw = await storedRaw(page, ASSUMPTIONS_STORAGE_KEY);
+  expect(durableRaw).not.toBeNull();
+  expect(durableRaw).not.toBe(oldRaw);
+  expect(JSON.parse(durableRaw ?? "{}").values.reserveCents).toBe(50_000);
+
+  // The explicit recovery read is non-writing and must not clear this draft.
+  await planWindow.fill("120");
+  await page.getByRole("button", { name: "Read saved settings", exact: true }).click();
+  await expect(settingsError).toHaveCount(0);
+  await expect(technical).toBeVisible();
+  await expect(planWindow).toHaveValue("120");
+  await expect(page.getByText(ADVANCED_DRAFT_STATUS)).toBeVisible();
+  await expect(keptDraft).toBeVisible();
+  await expect(
+    page.getByText("Reserve subtracted", { exact: true }).locator("..")
+  ).toContainText("$500.00");
+  expect(await storedRaw(page, ASSUMPTIONS_STORAGE_KEY)).toBe(durableRaw);
+  expect(await storedRaw(page, LEDGER_STORAGE_KEY)).toBe(ledgerBefore);
+}
 
 test.describe("reconciliation preview availability", () => {
   test("a settings failure blocks reconciliation without changing the saved $1,000 ledger", async ({ page, context }) => {

@@ -456,9 +456,17 @@ test.describe("W2 Web → Python → fresh Web recovery", () => {
         await page.getByRole("button", { name: "Use dark theme" }).click();
         expect(await readStorage(page, THEME_STORAGE_KEY)).toBe("dark");
         await page.getByRole("button", { name: "Advanced", exact: true }).click();
-        await page.getByLabel("Reserve to subtract from the chosen low point ($)").fill("525");
+        const reserve = page.getByLabel("Reserve to subtract from the chosen low point ($)");
+        await reserve.fill("525");
         await page.getByRole("button", { name: "Update results" }).click();
-        expect(await readStorage(page, ASSUMPTIONS_STORAGE_KEY)).not.toBeNull();
+        // The settings lock resolves asynchronously. Canonical form values
+        // appear only after the exact saved bytes have been verified.
+        await expect(reserve).toHaveValue("525.00");
+        const settingsRaw = await readStorage(page, ASSUMPTIONS_STORAGE_KEY);
+        expect(JSON.parse(settingsRaw ?? "null")).toMatchObject({
+          schemaVersion: 1,
+          values: { reserveCents: 52_500 },
+        });
         await page.getByRole("button", { name: "Budget", exact: true }).click();
         await page.getByLabel("Monthly spending target ($)").fill("200");
         await page.getByRole("button", { name: "Save target" }).click();
