@@ -49,13 +49,24 @@ jobs:
         env:
           NODE_ENV: production
 
+      - name: Set up Python for the recovery leg
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install the Python CLI for the recovery leg
+        working-directory: .
+        run: python -m pip install -e '.[dev]'
+
       - name: Install Playwright browser
         run: pnpm exec playwright install --with-deps chromium
 
-      - name: Browser E2E against the production build (desktop + mobile)
+      - name: Browser E2E against the production build (desktop + mobile + Python recovery)
         run: pnpm exec playwright test
         env:
           NODE_ENV: production
+          MC_QUALIFICATION_PYTHON: python
 
       - name: Upload Playwright traces on failure
         if: failure()
