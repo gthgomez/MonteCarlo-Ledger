@@ -254,6 +254,7 @@ export function describePosition(input: {
   runs: number;
   isDemo: boolean;
   hasSchedule: boolean;
+  hasDebtMinimums?: boolean;
 }): PositionCopy {
   const rank = quantilePlainName(input.quantileNum, input.quantileDen);
   const who = input.isDemo
@@ -261,7 +262,7 @@ export function describePosition(input: {
     : `You have ${formatMoney(input.recordedBalanceCents)} recorded.`;
   const bills =
     input.scheduledBillCents > 0
-      ? `Known bills in the next ${input.windowDays} days total ${formatMoney(input.scheduledBillCents)}.`
+      ? `Known bills${input.hasDebtMinimums ? " and required debt payments" : ""} in the next ${input.windowDays} days total ${formatMoney(input.scheduledBillCents)}.`
       : `No bills are scheduled in the next ${input.windowDays} days.`;
   const income =
     input.scheduledIncomeCents > 0

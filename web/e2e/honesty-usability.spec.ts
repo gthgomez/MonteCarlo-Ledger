@@ -141,7 +141,7 @@ test("the Home lead describes the same horizon as the cautious amount", async ({
       ],
     })
   );
-  await expect(page.getByText(/Known bills in the next 90 days total/)).toBeVisible();
+  await expect(page.getByText(/Known bills( and required debt payments)? in the next 90 days total/)).toBeVisible();
   await expect(page.getByText(/With nothing scheduled/)).toHaveCount(0);
   await expect(page.getByText("The next 30 days, if the schedule is exact")).toBeVisible();
   await expect(page.getByText(/No payments or income are scheduled in this period/)).toBeVisible();

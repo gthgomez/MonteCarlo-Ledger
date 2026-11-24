@@ -854,6 +854,7 @@ export default function Home() {
       runs: outcome.runs,
       isDemo: usingDemo,
       hasSchedule: fullSlice.events.length > 0,
+      hasDebtMinimums: debtMinimums.length > 0,
     });
     const spendingNote =
       currentSpend.totalCents === 0 && previousSpend.totalCents === 0
