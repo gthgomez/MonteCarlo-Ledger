@@ -277,8 +277,8 @@ export function describePosition(input: {
       : input.safeSpendCents >= 0
         ? ` The ${input.quantileNum === 1 && input.quantileDen === 10 ? "cautious amount" : `rank ${input.quantileNum}/${input.quantileDen} amount`} you could spend over the ${input.windowDays}-day plan is ${formatMoney(input.safeSpendCents)}.`
         : input.reserveCents > 0
-          ? ` In the ${rank} of modeled outcomes, you are short of your reserve by ${formatMoney(-input.safeSpendCents)}, so there is no cautious amount left to spend.`
-          : ` In the ${rank} of modeled outcomes, the low point is ${formatMoney(input.safeSpendCents)} (below zero), so there is no cautious amount left to spend.`;
+          ? ` In the ${rank} of modeled outcomes, you are short of your reserve by ${formatMoney(-input.safeSpendCents)}, so there is no amount left to spend above the reserve.`
+          : ` In the ${rank} of modeled outcomes, the low point is ${formatMoney(input.safeSpendCents)} (below zero), so there is no amount left to spend above the reserve.`;
   let caution = `The amount is the ${rank} of the lowest balances in ${input.runs} modeled futures, minus a reserve of ${formatMoney(input.reserveCents)}. About ${Math.round((input.quantileNum / input.quantileDen) * 100)}% of modeled low points are at or below it; spending it would leave those futures at or below your reserve. It is an estimate from the assumptions in Advanced, not a guarantee and not your bank balance.`;
   if (input.reserveCents === 0 && input.safeSpendCents !== null) {
     caution += ` With no reserve set, it matches that modeled low point.`;
@@ -353,7 +353,7 @@ export function buildInsights(input: {
     insights.push({
       id: "no-cautious-spend",
       tone: "attention",
-      title: "There is no cautious amount left to spend",
+      title: "There is no amount left to spend above the reserve",
       detail: input.reserveCents > 0
         ? `The modeled gap to your reserve is ${formatMoney(-input.safeSpendCents)}. Falling below a reserve does not necessarily mean going below zero.`
         : `The selected modeled low point is ${formatMoney(input.safeSpendCents)}, below zero even without extra spending.`,

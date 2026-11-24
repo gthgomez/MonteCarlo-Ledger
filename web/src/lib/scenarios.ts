@@ -1,8 +1,8 @@
-import { runScenario, timelineRows, type TimelineRow } from "../contract/engine";
+import { runScenario, runScenarioWithFixedEvents, timelineRows, type TimelineRow } from "../contract/engine";
 import { ContractError } from "../contract/money";
 import { Assumptions, assumptionError, toSimulationConfig } from "./assumptions";
 import { addDaysIso, isIsoDate } from "./dates";
-import { buildScenarioFromLedger } from "./scenario-builder";
+import { buildScenarioFromLedger, fixedEventOrders, sortScenarioEvents } from "./scenario-builder";
 import { LedgerState } from "./types";
 
 export interface ModelOutcome {
@@ -67,9 +67,15 @@ function outcomeFrom(raw: any, assumptions: Assumptions, scenario: any): ModelOu
   };
 }
 
-function runBuilt(scenario: any, assumptions: Assumptions): EvalResult {
+function runBuilt(
+  scenario: any,
+  assumptions: Assumptions,
+  fixedOrders?: ReadonlySet<number>
+): EvalResult {
   try {
-    const raw = runScenario(scenario);
+    const raw = fixedOrders === undefined
+      ? runScenario(scenario)
+      : runScenarioWithFixedEvents(scenario, fixedOrders);
     if (!raw.risk || !raw.forecast) {
       return fail("UNKNOWN_ERROR", "The engine returned a result without a forecast.");
     }
@@ -144,16 +150,17 @@ function evaluateDatedOutflow(
       assumptions.horizonDays,
       toSimulationConfig(assumptions)
     );
-    scenario.events.push({
+    const fixedEvent = {
       date,
       amount_cents: -amountCents,
       type: "expense",
       name,
-      // A hypothetical amount is the decision variable. Varying it (or letting
-      // it consume a bill draw) would change the question being asked.
-      fixed: true,
-    });
-    return runBuilt(scenario, assumptions);
+    };
+    scenario.events.push(fixedEvent);
+    sortScenarioEvents(scenario.events);
+    // A hypothetical amount is the decision variable. Varying it (or letting
+    // it consume a bill draw) would change the question being asked.
+    return runBuilt(scenario, assumptions, new Set([scenario.events.indexOf(fixedEvent)]));
   } catch (err) {
     return fromThrown(err);
   }
@@ -251,7 +258,7 @@ export function evaluateMonthlySetAside(
       toSimulationConfig(assumptions),
       { fixedPaymentIds: new Set([hypotheticalId]) }
     );
-    return runBuilt(scenario, assumptions);
+    return runBuilt(scenario, assumptions, fixedEventOrders(scenario));
   } catch (err) {
     return fromThrown(err);
   }

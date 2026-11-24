@@ -1,6 +1,37 @@
 import { checkedAdd, roundHalfAway, toSafeNumber } from "../contract/money";
 import { IncomeItem, LedgerState, LiabilityItem, PaymentItem } from "./types";
 
+/**
+ * Locale-independent code-point comparison, matching Python's string ordering.
+ * `localeCompare` can put mixed-case/accented names in a different order and is
+ * browser-locale dependent, which would shift seeded draws between surfaces.
+ */
+function compareCodePoints(left: string, right: string): number {
+  const a = Array.from(left);
+  const b = Array.from(right);
+  const limit = Math.min(a.length, b.length);
+  for (let i = 0; i < limit; i += 1) {
+    const diff = a[i].codePointAt(0)! - b[i].codePointAt(0)!;
+    if (diff !== 0) return diff;
+  }
+  return a.length - b.length;
+}
+
+/** Canonical same-day order shared by the base scenario and what-if events. */
+export function sortScenarioEvents(events: any[]): void {
+  events.sort((left, right) => {
+    const byDate = compareCodePoints(String(left.date), String(right.date));
+    if (byDate !== 0) return byDate;
+    const leftRank = left.type === "income" ? 0 : left.type === "adjustment" ? 2 : 1;
+    const rightRank = right.type === "income" ? 0 : right.type === "adjustment" ? 2 : 1;
+    if (leftRank !== rightRank) return leftRank - rightRank;
+    const byName = compareCodePoints(String(left.name), String(right.name));
+    if (byName !== 0) return byName;
+    if (left.amount_cents !== right.amount_cents) return left.amount_cents - right.amount_cents;
+    return compareCodePoints(String(left.category ?? ""), String(right.category ?? ""));
+  });
+}
+
 function addDays(iso: string, days: number): string {
   const [y, m, d] = iso.split("-").map(Number);
   const date = new Date(Date.UTC(y, m - 1, d + days));
@@ -66,6 +97,13 @@ export function nextIncomeDate(income: IncomeItem, asOf: string): string {
     guard += 1;
   }
   return current;
+}
+
+const fixedOrdersByScenario = new WeakMap<object, Set<number>>();
+
+/** Adapter-private metadata; never serialized into the scenario or contract. */
+export function fixedEventOrders(scenario: any): ReadonlySet<number> | undefined {
+  return fixedOrdersByScenario.get(scenario);
 }
 
 export interface ProjectedDebtMinimum {
@@ -155,6 +193,7 @@ export function projectBillPayments(
   fixedPaymentIds?: ReadonlySet<string>
 ) {
   const events: { date: string; amount_cents: number; type: "expense"; name: string }[] = [];
+  const fixedEvents = new Set<(typeof events)[number]>();
   const slots: ProjectedBillSlot[] = [];
   const paymentById = new Map(state.payments.map((p) => [String(p.id), p] as const));
   const covered = coveredBillSlots(state.bill_occurrences);
@@ -193,13 +232,14 @@ export function projectBillPayments(
           if (!covered.has(key)) {
             generated.add(key);
             slots.push({ payment: pmt, slotDate: dueIso, dueDate: dueIso });
-            events.push({
+            const event = {
               date: dueIso,
               amount_cents: -pmt.amount_cents,
-              type: "expense",
+              type: "expense" as const,
               name: pmt.name,
-              ...(fixedPaymentIds?.has(String(pmt.id)) ? { fixed: true } : {}),
-            });
+            };
+            events.push(event);
+            if (fixedPaymentIds?.has(String(pmt.id))) fixedEvents.add(event);
           }
         }
       }
@@ -213,13 +253,14 @@ export function projectBillPayments(
           if (!covered.has(key)) {
             generated.add(key);
             slots.push({ payment: pmt, slotDate: current, dueDate: current });
-            events.push({
+            const event = {
               date: current,
               amount_cents: -pmt.amount_cents,
-              type: "expense",
+              type: "expense" as const,
               name: pmt.name,
-              ...(fixedPaymentIds?.has(String(pmt.id)) ? { fixed: true } : {}),
-            });
+            };
+            events.push(event);
+            if (fixedPaymentIds?.has(String(pmt.id))) fixedEvents.add(event);
           }
         }
         if (pmt.recurrence === "One-time") break;
@@ -238,7 +279,7 @@ export function projectBillPayments(
     slots.push(slot);
   }
 
-  return { events, generated, slots };
+  return { events, generated, slots, fixedEvents };
 }
 
 export function buildScenarioFromLedger(
@@ -317,26 +358,19 @@ export function buildScenarioFromLedger(
     state.liabilities ?? [], state.payments, state.bill_occurrences, state.transactions, bills.generated, asOf, windowEnd,
   ));
 
-  // Canonicalize same-day ties by stable, surface-independent fields. The engine's
-  // input-order tie-breaker must not depend on an array/DB order: otherwise the
-  // same ledger could assign seeded bill/income draws differently on Web/Python.
-  events.sort((left, right) => {
-    const byDate = left.date.localeCompare(right.date);
-    if (byDate !== 0) return byDate;
-    const leftRank = left.type === "income" ? 0 : left.type === "adjustment" ? 2 : 1;
-    const rightRank = right.type === "income" ? 0 : right.type === "adjustment" ? 2 : 1;
-    if (leftRank !== rightRank) return leftRank - rightRank;
-    const byName = String(left.name).localeCompare(String(right.name));
-    if (byName !== 0) return byName;
-    if (left.amount_cents !== right.amount_cents) return left.amount_cents - right.amount_cents;
-    return String(left.category ?? "").localeCompare(String(right.category ?? ""));
-  });
+  sortScenarioEvents(events);
 
   const futureOutflow = state.transactions
     .filter((tx) => tx.date > asOf)
     .reduce((sum, tx) => sum + BigInt(tx.amount_cents), 0n);
   const startingBalance = toSafeNumber(BigInt(state.current_balance_cents) - futureOutflow);
 
+  const fixedOrders = new Set<number>();
+  if (bills.fixedEvents.size > 0) {
+    events.forEach((event, index) => {
+      if (bills.fixedEvents.has(event)) fixedOrders.add(index);
+    });
+  }
   const scenario: any = {
     contract_version: "2.0",
     scenario_id: `ledger-${asOf}-${horizonDays}`,
@@ -374,6 +408,7 @@ export function buildScenarioFromLedger(
   if (includeSimulation) {
     scenario.simulation = includeSimulation;
   }
+  if (fixedOrders.size > 0) fixedOrdersByScenario.set(scenario, fixedOrders);
 
   return scenario;
 }

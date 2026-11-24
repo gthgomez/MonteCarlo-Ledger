@@ -255,8 +255,8 @@ test("an extra debt payment is frozen against bill variance but the linked minim
   assert.equal(result.status, "ok");
   if (result.status !== "ok") return;
   assert.deepEqual(result.rows.map(({ date, amount_cents }) => [date, amount_cents]), [
-    [AS_OF, -10_000],
     [AS_OF, -98_000],
+    [AS_OF, -10_000],
   ]);
   assert.equal(result.outcome.projectedLowCents, -8_000);
   assert.equal(result.outcome.safeSpendCents, -3_000);
@@ -354,4 +354,21 @@ test("a coincidental category name cannot freeze an existing future expense", ()
   // same-category expense keeps its normal seeded variation.
   assert.equal(extra.outcome.projectedLowCents, baseline.outcome.projectedLowCents - 5_000);
   assert.equal(extra.outcome.minimumBalanceP10Cents, baseline.outcome.minimumBalanceP10Cents - 5_000);
+});
+
+test("public scenarios reject an adapter-private fixed field", () => {
+  assert.throws(
+    () =>
+      runScenario({
+        contract_version: "2.0",
+        scenario_id: "fixed-field",
+        as_of: AS_OF,
+        starting_balance_cents: 100_000,
+        horizon_days: 30,
+        events: [
+          { date: AS_OF, amount_cents: -10_000, type: "expense", name: "Rent", fixed: true },
+        ],
+      }),
+    /fixed is not a contract event field/
+  );
 });

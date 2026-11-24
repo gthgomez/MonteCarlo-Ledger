@@ -13,7 +13,12 @@ from typing import Any, Dict, List, Optional
 
 from . import db_manager
 from . import scenario as scenario_mod
-from .contract import CONTRACT_VERSION, ContractError, run_scenario
+from .contract import (
+    CONTRACT_VERSION,
+    ContractError,
+    run_scenario,
+    run_scenario_with_fixed_events,
+)
 from .contract.engine import SIMULATION_DEFAULTS, SUPPORTED_CONTRACT_VERSIONS
 from .contract.money import MAX_MONEY_CENTS
 
@@ -312,16 +317,18 @@ def simulate_purchase(
 
     baseline = run_scenario(_build(as_of, horizon_days, dict(params), ledger=view))
     with_purchase_scenario = _build(as_of, horizon_days, dict(params), ledger=view)
-    with_purchase_scenario["events"].append({
+    purchase_event = {
         "date": purchase_date,
         "amount_cents": -amount_cents,
         "type": "expense",
         "name": "Planned purchase",
-        # The amount and date are the decision variables. Keeping other bill
-        # variation intact and consuming no draw matches the Web what-if.
-        "fixed": True,
-    })
-    with_purchase = run_scenario(with_purchase_scenario)
+    }
+    with_purchase_scenario["events"].append(purchase_event)
+    scenario_mod.canonical_event_order(with_purchase_scenario["events"])
+    fixed_order = with_purchase_scenario["events"].index(purchase_event)
+    # The amount and date are the decision variables. Keeping other bill variation
+    # intact and consuming no draw matches the Web what-if.
+    with_purchase = run_scenario_with_fixed_events(with_purchase_scenario, {fixed_order})
     return _attach_ledger(
         {
             "baseline": baseline,

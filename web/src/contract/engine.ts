@@ -98,6 +98,11 @@ function validateEvent(ev: any): void {
   if (etype === "adjustment" && amount === 0) {
     throw new ContractError("INVALID_AMOUNT", "zero adjustment");
   }
+  // `fixed` is an adapter-private what-if instruction, not contract input. Reject
+  // it here so an external scenario cannot silently suppress variation.
+  if ("fixed" in ev) {
+    throw new ContractError("SCHEMA_INVALID", "fixed is not a contract event field");
+  }
   if (!["income", "expense", "adjustment"].includes(etype)) {
     throw new ContractError("INVALID_EVENT_TYPE", String(etype));
   }
@@ -233,8 +238,6 @@ export interface InternalEvent {
   order: number;
   name: string;
   category?: string;
-  /** Web-local what-if flag: this event is not varied or charged a random draw. */
-  fixed?: boolean;
 }
 
 export function expand(scenario: any): {
@@ -275,7 +278,6 @@ export function expand(scenario: any): {
       order: index,
       name: ev.name ?? "",
       category: ev.category,
-      ...(ev.fixed === true ? { fixed: true } : {}),
     });
     order = index + 1;
   }
@@ -426,7 +428,8 @@ function simulateOnce(
   horizon: number,
   windowEnd: Date,
   p: any,
-  rng: SplitMix64
+  rng: SplitMix64,
+  fixedOrders?: ReadonlySet<number>
 ): any {
   const scenario: InternalEvent[] = base.map((e) => ({ ...e }));
   const imin = p.income_variation_min;
@@ -436,9 +439,9 @@ function simulateOnce(
   const categoryRanges: Map<string, [number, number]> = p.expense_category_variation;
 
   for (const ev of scenario) {
-    // Web-local what-if rows carry a fixed amount. They are present in this cash
-    // path but consume no draw, so other bills and surprises keep their sequence.
-    if (ev.fixed) continue;
+    // Adapter-private what-if rows are present in this cash path but consume no
+    // draw, so other bills and surprises keep their sequence.
+    if (fixedOrders?.has(ev.order)) continue;
     if (ev.type === "income") {
       if (imin !== 0 || imax !== 0) {
         const pct = BigInt(rng.nextInt(imin, imax));
@@ -518,7 +521,7 @@ function validateSimulationParams(p: any): void {
   simInt(p, "reserve_cents", "INVALID_AMOUNT", 0, Number.MAX_SAFE_INTEGER);
 }
 
-function runExpandedScenario(scenario: any): any {
+function runExpandedScenario(scenario: any, fixedOrders?: ReadonlySet<number>): any {
   const { events, asOf, horizon, windowEnd } = expand(scenario);
   const base = sortEvents(events);
   const start = BigInt(requireCents(scenario.starting_balance_cents, "starting_balance_cents"));
@@ -560,7 +563,7 @@ function runExpandedScenario(scenario: any): any {
   let negativeRuns = 0;
 
   for (let r = 0; r < p.runs; r++) {
-    const outcome = simulateOnce(base, start, asOf, horizon, windowEnd, p, rng);
+    const outcome = simulateOnce(base, start, asOf, horizon, windowEnd, p, rng, fixedOrders);
     endings.push(outcome.ending_balance_cents);
     minimums.push(outcome.minimum_balance_cents);
     if (outcome.first_negative_date !== null) {
@@ -594,6 +597,18 @@ function runExpandedScenario(scenario: any): any {
 
 export function runScenario(scenario: any): any {
   return runExpandedScenario(scenario);
+}
+
+/**
+ * Adapter-private what-if entry point. `fixedOrders` are input event indexes
+ * (the engine's `order` field) that must not be varied or consume a draw.
+ * Public scenarios cannot request this through an event field.
+ */
+export function runScenarioWithFixedEvents(
+  scenario: any,
+  fixedOrders: ReadonlySet<number>
+): any {
+  return runExpandedScenario(scenario, fixedOrders);
 }
 
 export function runScenarioSafe(scenario: any): any {

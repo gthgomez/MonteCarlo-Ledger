@@ -7,12 +7,20 @@ on:
       - "web/**"
       - "fixtures/**"
       - "schemas/**"
+      - "monte_carlo_ledger/**"
+      - "tests/**"
+      - "testdata/**"
+      - "pyproject.toml"
       - ".github/workflows/web.yml"
   pull_request:
     paths:
       - "web/**"
       - "fixtures/**"
       - "schemas/**"
+      - "monte_carlo_ledger/**"
+      - "tests/**"
+      - "testdata/**"
+      - "pyproject.toml"
       - ".github/workflows/web.yml"
   workflow_dispatch:
 

@@ -14,6 +14,7 @@ from .engine import (
     recurrence_dates,
     run_scenario,
     run_scenario_safe,
+    run_scenario_with_fixed_events,
 )
 from .money import (
     MAX_MONEY_CENTS,
@@ -44,6 +45,7 @@ __all__ = [
     "round_half_away",
     "run_scenario",
     "run_scenario_safe",
+    "run_scenario_with_fixed_events",
     "scale_cents_by_basis_points",
     "scale_cents_by_percent",
     "validate_liabilities",

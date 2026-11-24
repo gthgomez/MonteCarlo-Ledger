@@ -496,21 +496,21 @@ def test_identical_bills_and_debt_across_persisted_adapters(tmp_path, monkeypatc
 def test_same_day_bills_and_income_use_one_canonical_order(tmp_path, monkeypatch):
     """The same ledger must assign seeded draws identically on Web and Python.
 
-    The inputs deliberately list Z before A and use nonzero bill/income variation,
-    so an adapter-order tie-break changes the risk block even though cash totals are
-    unchanged.
+    The inputs deliberately use mixed-case names and list the lower-case item first,
+    with nonzero bill/income variation, so a locale-dependent or adapter order
+    tie-break changes the risk block even though cash totals are unchanged.
     """
     snapshot = {
         "version": "2.2",
         "updated_at": "2026-12-20T00:00:00Z",
         "current_balance_cents": 100_000,
         "incomes": [
-            {"id": "inc-z", "name": "Z Income", "amount_cents": 100_000, "frequency": "Monthly", "last_payday": "2026-12-01", "next_payday": "2027-01-01"},
-            {"id": "inc-a", "name": "A Income", "amount_cents": 200_000, "frequency": "Monthly", "last_payday": "2026-12-01", "next_payday": "2027-01-01"},
+            {"id": "inc-z", "name": "alpha income", "amount_cents": 100_000, "frequency": "Monthly", "last_payday": "2026-12-01", "next_payday": "2027-01-01"},
+            {"id": "inc-a", "name": "Zulu income", "amount_cents": 200_000, "frequency": "Monthly", "last_payday": "2026-12-01", "next_payday": "2027-01-01"},
         ],
         "payments": [
-            {"id": "pmt-z", "name": "Z Bill", "amount_cents": 10_000, "recurrence": "Monthly", "due_day": 1},
-            {"id": "pmt-a", "name": "A Bill", "amount_cents": 30_000, "recurrence": "Monthly", "due_day": 1},
+            {"id": "pmt-z", "name": "apple bill", "amount_cents": 10_000, "recurrence": "Monthly", "due_day": 1},
+            {"id": "pmt-a", "name": "Banana bill", "amount_cents": 30_000, "recurrence": "Monthly", "due_day": 1},
         ],
         "transactions": [
             {"id": "tx-open", "amount_cents": 100_000, "type": "Adjustment", "date": "2026-12-20"}

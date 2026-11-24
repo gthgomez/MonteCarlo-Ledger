@@ -2,7 +2,7 @@
 
 import React, { useMemo, useState } from "react";
 import { amortize } from "@/contract/debt";
-import { cautiousAmountHeading, type Assumptions } from "@/lib/assumptions";
+import { cautiousAmountHeading, cautiousAmountShortName, type Assumptions } from "@/lib/assumptions";
 import { addDaysIso } from "@/lib/dates";
 import {
   addInstallmentDebt,
@@ -567,8 +567,8 @@ export function PlanView({
               note={
                 showGuidance && purchase.status === "ok"
                   ? purchase.outcome.safeSpendCents >= 0
-                    ? "In this simulation the cautious amount stays at or above zero after the purchase. That is a model estimate, not a guarantee."
-                    : "In this simulation the cautious amount goes below zero. That is a model estimate, not a guarantee you will overdraw."
+                    ? `In this simulation the ${cautiousAmountShortName(base.quantileNum, base.quantileDen)} stays at or above zero after the purchase. That is a model estimate, not a guarantee.`
+                    : `In this simulation the ${cautiousAmountShortName(base.quantileNum, base.quantileDen)} goes below zero. That is a model estimate, not a guarantee you will overdraw.`
                   : ""
               }
             />

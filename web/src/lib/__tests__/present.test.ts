@@ -316,7 +316,7 @@ test("a negative cautious amount is not described as money you could spend", () 
     isDemo: false,
     hasSchedule: true,
   });
-  assert.match(copy.lead, /no cautious amount left to spend/);
+  assert.match(copy.lead, /no amount left to spend above the reserve/);
   assert.match(copy.lead, /short of your reserve by \$40\.00/);
   assert.doesNotMatch(copy.lead, /the low point is -\$40/);
   assert.doesNotMatch(copy.lead, /you could spend/);

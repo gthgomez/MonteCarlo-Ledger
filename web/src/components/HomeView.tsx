@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useState } from "react";
+import { cautiousAmountHeading, cautiousAmountShortName } from "@/lib/assumptions";
 import { formatDateLabel } from "@/lib/dates";
 import { createStarterLedger, dollarsToCents } from "@/lib/ledger-edits";
 import { formatMoney } from "@/lib/money-format";
@@ -120,7 +121,7 @@ function ForecastBody({
         <Metric
           label="Lowest point if the schedule is exact"
           value={formatMoney(plannedLowCents)}
-          detail={`On ${formatDateLabel(plannedLowDate)}, inside the ${horizonDays}-day plan. This is the exact schedule, separate from the cautious amount.`}
+          detail={`On ${formatDateLabel(plannedLowDate)}, inside the ${horizonDays}-day plan. This is the exact schedule, separate from the ${cautiousAmountShortName(quantileNum, quantileDen)}.`}
         />
       </div>
 
@@ -195,7 +196,7 @@ function ForecastBody({
           rank, not an average.
         </p>
         <div className="grid gap-2">
-          <Explain term="cautious amount to spend">
+          <Explain term={cautiousAmountHeading(quantileNum, quantileDen).toLowerCase()}>
             The lowest balance in the rank you selected, minus any reserve you set. With the default rank, about the
             more difficult tenth of modeled low points. Spending that amount in the model would bring that low point to
             the reserve. It is not cash sitting in a separate pile.

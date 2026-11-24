@@ -601,13 +601,16 @@ export default function Home() {
   }
 
   function handleExportJson() {
+    if (usingDemo && !window.confirm(
+      "This exports the sample household, not your finances. The file is not marked as sample data. Continue?"
+    )) return;
     const previous = ledgerFreshness !== "current";
     const serialized = previous ? displayedRawRef.current : JSON.stringify(state, null, 2);
     if (serialized === null) return;
     const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(serialized);
     const downloadAnchor = document.createElement("a");
     downloadAnchor.setAttribute("href", dataStr);
-    downloadAnchor.setAttribute("download", `montecarlo-ledger${previous ? "-previous" : ""}-${asOf}.json`);
+    downloadAnchor.setAttribute("download", `montecarlo-ledger${usingDemo ? "-sample" : ""}${previous ? "-previous" : ""}-${asOf}.json`);
     document.body.appendChild(downloadAnchor);
     downloadAnchor.click();
     downloadAnchor.remove();
@@ -872,24 +875,36 @@ export default function Home() {
       overdueEarliest: overdue.earliest_date,
       firstNegativeDate: outcome.firstNegativeDate,
       nextBill: (() => {
-        const keys = new Set(
-          debtMinimums.map((minimum) => `${minimum.date}|${minimum.name}|${minimum.amount_cents}`)
-        );
-        return rows.find(
-          (row) =>
-            row.amount_cents < 0 &&
-            !keys.has(`${row.date}|${row.name}|${row.amount_cents}`)
-        ) ?? null;
+        const remaining = new Map<string, number>();
+        for (const minimum of debtMinimums) {
+          const key = `${minimum.date}|${minimum.name}|${minimum.amount_cents}`;
+          remaining.set(key, (remaining.get(key) ?? 0) + 1);
+        }
+        return rows.find((row) => {
+          if (row.amount_cents >= 0) return false;
+          const key = `${row.date}|${row.name}|${row.amount_cents}`;
+          const count = remaining.get(key) ?? 0;
+          if (count === 0) return true;
+          if (count === 1) remaining.delete(key);
+          else remaining.set(key, count - 1);
+          return false;
+        }) ?? null;
       })(),
       nextDebtMinimum: (() => {
-        const keys = new Set(
-          debtMinimums.map((minimum) => `${minimum.date}|${minimum.name}|${minimum.amount_cents}`)
-        );
-        return rows.find(
-          (row) =>
-            row.amount_cents < 0 &&
-            keys.has(`${row.date}|${row.name}|${row.amount_cents}`)
-        ) ?? null;
+        const remaining = new Map<string, number>();
+        for (const minimum of debtMinimums) {
+          const key = `${minimum.date}|${minimum.name}|${minimum.amount_cents}`;
+          remaining.set(key, (remaining.get(key) ?? 0) + 1);
+        }
+        return rows.find((row) => {
+          if (row.amount_cents >= 0) return false;
+          const key = `${row.date}|${row.name}|${row.amount_cents}`;
+          const count = remaining.get(key) ?? 0;
+          if (count === 0) return false;
+          if (count === 1) remaining.delete(key);
+          else remaining.set(key, count - 1);
+          return true;
+        }) ?? null;
       })(),
       spendingNote,
       overage: categoryOverages(currentSpend.byCategory, targets.categories)[0] ?? null,

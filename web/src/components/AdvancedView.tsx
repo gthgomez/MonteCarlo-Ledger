@@ -282,7 +282,7 @@ export function AdvancedView({
             </dd>
           </div>
           <div>
-            <dt className="text-muted">Cautious amount at rank {outcome.quantileNum}/{outcome.quantileDen}</dt>
+            <dt className="text-muted">Modeled amount at rank {outcome.quantileNum}/{outcome.quantileDen}</dt>
             <dd className="font-medium tabular-nums">{formatMoney(outcome.safeSpendCents)}</dd>
           </div>
           <div>
@@ -314,10 +314,10 @@ export function AdvancedView({
             <dd className="font-medium tabular-nums">{formatMoney(outcome.reserveCents)}</dd>
           </div>
         </dl>
-        {outcome.quantileNum !== 1 || outcome.quantileDen !== 10 ? (
+        {outcome.quantileNum * 10 !== outcome.quantileDen ? (
           <div className="mt-3">
             <Notice tone="warning">
-              The cautious amount is using rank {outcome.quantileNum}/{outcome.quantileDen}, so it is not Safe to Spend
+              The modeled amount is using rank {outcome.quantileNum}/{outcome.quantileDen}, so it is not Safe to Spend
               (P10).
             </Notice>
           </div>

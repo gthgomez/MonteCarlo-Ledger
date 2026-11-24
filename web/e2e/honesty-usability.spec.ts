@@ -161,6 +161,6 @@ test("a non-P10 rank is not called cautious", async ({ page }) => {
   await page.getByRole("button", { name: "Update results" }).click();
   await page.getByRole("button", { name: "Home", exact: true }).click();
   await expect(page.getByText("This is not the cautious P10 amount")).toBeVisible();
-  await expect(page.getByText("Optimistic modeled amount")).toBeVisible();
+  await expect(page.getByText("Optimistic modeled amount").first()).toBeVisible();
   await expect(page.getByText(/About 90% of modeled low points are at or below it/)).toBeVisible();
 });
