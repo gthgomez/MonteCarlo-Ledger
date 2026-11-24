@@ -5,17 +5,57 @@ import {
   VAULT_ID_STORAGE_KEY,
   commitSynchronizedState,
   defaultSyncStorage,
+  readSyncRecord,
   SyncStorage,
 } from "./sync-state";
 
 export const LEDGER_STORAGE_KEY = "montecarlo_ledger_state_v2";
 
-function restore(storage: SyncStorage, key: string, value: string | null): void {
+/**
+ * Shared-origin lock name for every ledger write. Ordinary edits, demo resets,
+ * imports and vault restores must all use this one name so a restore can never
+ * interleave with a writer in another tab.
+ */
+export const LEDGER_LOCK_NAME = "montecarlo-ledger-write";
+
+/** Options for a ledger mutation whose authorization is tied to one durable snapshot. */
+export interface LedgerChangeOptions {
+  /** Exact raw ledger value the user authorized replacing; null means "no stored ledger". */
+  expectedRaw: string | null;
+  vaultId?: string;
+  syncRevision?: number;
+  signal?: AbortSignal;
+  /** Restores/imports must fail closed when the Web Locks API is unavailable. */
+  requireLock?: boolean;
+}
+
+type LockRequestCallback<T> = (lock: unknown) => T | Promise<T>;
+
+/** Minimal shape used to inject a lock manager in tests without DOM globals. */
+export interface LedgerLockManager {
+  request<T>(
+    name: string,
+    options: { mode?: "exclusive" | "shared"; signal?: AbortSignal },
+    callback: LockRequestCallback<T>
+  ): Promise<T>;
+}
+
+interface NativeLockManager {
+  request(
+    name: string,
+    options: { mode?: "exclusive" | "shared"; signal?: AbortSignal },
+    callback: (lock: unknown) => unknown
+  ): Promise<unknown>;
+}
+
+function restore(storage: SyncStorage, key: string, value: string | null): boolean {
   try {
+    if (storage.getItem(key) === value) return true;
     if (value === null) storage.removeItem(key);
     else storage.setItem(key, value);
+    return storage.getItem(key) === value;
   } catch {
-    // Rollback is best-effort; the caller still reports that the bundle was not saved.
+    return false;
   }
 }
 
@@ -23,9 +63,13 @@ function restore(storage: SyncStorage, key: string, value: string | null): void 
  * Persist a ledger replacement as one recoverable bundle.
  *
  * The ledger, vault id and synchronization ancestry are written in order. If any
- * write fails (quota, blocked storage), every key touched is restored to its prior
- * value so the stored ledger and the UI cannot claim a durable state that was not
- * actually written. Ancestry is only committed with a durable ledger.
+ * write fails (quota, blocked storage), restore the previous values before reporting
+ * failure. If the rollback cannot be verified, the result is marked indeterminate:
+ * some or all of the change may have persisted, so the caller must keep the prior
+ * view available until the user retains a copy and checks storage.
+ *
+ * This function performs no cross-tab check; callers that can replace a ledger
+ * should use {@link saveLedgerChange}, which performs the check under a lock.
  */
 export function applyLedgerBundle(
   state: LedgerState,
@@ -40,15 +84,25 @@ export function applyLedgerBundle(
       error: "Local storage is unavailable; the ledger was not saved.",
     };
   }
-  const previous = {
-    ledger: storage.getItem(ledgerKey),
-    vault: storage.getItem(VAULT_ID_STORAGE_KEY),
-    sync: storage.getItem(SYNC_STORAGE_KEY),
-  };
+  const previous: [string, string | null][] = [];
   try {
-    storage.setItem(ledgerKey, JSON.stringify(state));
+    const serialized = JSON.stringify(state);
+    previous.push([ledgerKey, storage.getItem(ledgerKey)]);
+    if (vaultId) {
+      previous.push([VAULT_ID_STORAGE_KEY, storage.getItem(VAULT_ID_STORAGE_KEY)]);
+      if (syncRevision !== undefined) {
+        previous.push([SYNC_STORAGE_KEY, storage.getItem(SYNC_STORAGE_KEY)]);
+      }
+    }
+    storage.setItem(ledgerKey, serialized);
+    if (storage.getItem(ledgerKey) !== serialized) {
+      throw new Error("the stored ledger did not match the change");
+    }
     if (vaultId) {
       storage.setItem(VAULT_ID_STORAGE_KEY, vaultId);
+      if (storage.getItem(VAULT_ID_STORAGE_KEY) !== vaultId) {
+        throw new Error("the stored vault ID did not match the change");
+      }
       if (syncRevision !== undefined) {
         if (!commitSynchronizedState(vaultId, syncRevision, state, storage)) {
           throw new Error("synchronization ancestry could not be stored");
@@ -56,15 +110,164 @@ export function applyLedgerBundle(
       }
     }
     return { ok: true };
-  } catch (err: any) {
-    restore(storage, ledgerKey, previous.ledger);
-    restore(storage, VAULT_ID_STORAGE_KEY, previous.vault);
-    restore(storage, SYNC_STORAGE_KEY, previous.sync);
+  } catch (err: unknown) {
+    let restored = true;
+    for (const [key, value] of previous.reverse()) {
+      if (!restore(storage, key, value)) restored = false;
+    }
+    const detail = err instanceof Error ? err.message : "storage failure";
+    if (restored) {
+      return {
+        ok: false,
+        error: `The ledger change failed (${detail}). The previous saved data is intact.`,
+      };
+    }
     return {
       ok: false,
-      error: `The ledger was not saved (${
-        err?.message ?? "storage failure"
-      }); the previous ledger is still intact.`,
+      error:
+        `The ledger change failed (${detail}). The previous saved data could not be verified, ` +
+        "and some or all of the change may have persisted.",
+      indeterminate: true,
     };
+  }
+}
+
+/**
+ * Resolve the browser's Web Locks manager when available.
+ *
+ * This is feature detection, not a fallback: callers decide whether the absence
+ * of locking is acceptable. Destructive replacements pass `requireLock` and must
+ * fail closed; ordinary edits may use the checked read/write fallback below.
+ */
+export function defaultLedgerLockManager(): LedgerLockManager | null {
+  try {
+    const locks = (globalThis as { navigator?: { locks?: NativeLockManager } })
+      .navigator?.locks;
+    if (!locks || typeof locks.request !== "function") return null;
+    return {
+      request<T>(
+        name: string,
+        options: { mode?: "exclusive" | "shared"; signal?: AbortSignal },
+        callback: LockRequestCallback<T>
+      ): Promise<T> {
+        return locks.request(name, options, () => callback(undefined)) as Promise<T>;
+      },
+    };
+  } catch {
+    // Some embedded/private contexts expose the property but throw when used.
+    return null;
+  }
+}
+
+const CANCELLED = "The ledger change was cancelled; nothing was saved.";
+const CHANGED =
+  "The stored ledger changed in another tab or after this change began. Nothing was replaced; reload and try again.";
+const LOCK_UNAVAILABLE =
+  "This browser cannot lock the ledger across tabs, so the replacement was not saved. Reload and try again.";
+const LOCK_FAILED =
+  "The ledger could not be locked for a safe save. Nothing was changed; reload and try again.";
+
+function cancelledResult(): PersistenceResult {
+  return { ok: false, error: CANCELLED };
+}
+
+function readDurableRaw(
+  storage: SyncStorage,
+  ledgerKey: string
+): { ok: true; raw: string | null } | { ok: false; error: string } {
+  try {
+    return { ok: true, raw: storage.getItem(ledgerKey) };
+  } catch {
+    return {
+      ok: false,
+      error:
+        "Local storage could not be read, so the ledger was not changed. Reload and try again.",
+    };
+  }
+}
+
+/**
+ * Compare and write in the same synchronous step. When called inside a Web Lock
+ * no other cooperating tab can commit between the comparison and the write.
+ */
+function saveIfStillCurrent(
+  state: LedgerState,
+  options: LedgerChangeOptions,
+  storage: SyncStorage,
+  ledgerKey: string
+): PersistenceResult {
+  if (options.signal?.aborted) return cancelledResult();
+
+  const durable = readDurableRaw(storage, ledgerKey);
+  if (!durable.ok) return { ok: false, error: durable.error };
+
+  // Cancellation and the durable comparison are deliberately synchronous here:
+  // nothing can run between reading the raw ledger and replacing it.
+  if (options.signal?.aborted) return cancelledResult();
+  if (durable.raw !== options.expectedRaw) {
+    return { ok: false, error: CHANGED };
+  }
+  if (options.vaultId && options.syncRevision !== undefined) {
+    const latest = readSyncRecord(options.vaultId, storage);
+    if (latest && latest.baseRevision > options.syncRevision) {
+      return { ok: false, error: "This browser already synchronized a newer vault revision. Nothing was replaced; pull again." };
+    }
+  }
+
+  return applyLedgerBundle(
+    state,
+    options.vaultId,
+    options.syncRevision,
+    storage,
+    ledgerKey
+  );
+}
+
+/**
+ * Save a ledger change without replacing a snapshot the user did not authorize.
+ *
+ * The exact `expectedRaw` is re-read inside a shared-origin Web Lock immediately
+ * before any write, so a pull that started before an edit (or before another tab's
+ * edit) fails closed instead of overwriting newer data. A cancelled signal is
+ * checked both while queued for the lock and inside the critical section.
+ *
+ * Restores pass `requireLock: true`: if Web Locks are unavailable the replacement
+ * fails rather than using a comparison-only path. Ordinary edits keep the prior
+ * checked read/write fallback when the API is unavailable.
+ */
+export async function saveLedgerChange(
+  state: LedgerState,
+  options: LedgerChangeOptions,
+  storage: SyncStorage | null = defaultSyncStorage(),
+  ledgerKey: string = LEDGER_STORAGE_KEY,
+  lockManager: LedgerLockManager | null = defaultLedgerLockManager()
+): Promise<PersistenceResult> {
+  if (options.signal?.aborted) return cancelledResult();
+  if (!storage) {
+    return {
+      ok: false,
+      error: "Local storage is unavailable; the ledger was not saved.",
+    };
+  }
+
+  if (!lockManager) {
+    if (options.requireLock) {
+      return { ok: false, error: LOCK_UNAVAILABLE };
+    }
+    return saveIfStillCurrent(state, options, storage, ledgerKey);
+  }
+
+  try {
+    return await lockManager.request(
+      LEDGER_LOCK_NAME,
+      { mode: "exclusive", signal: options.signal },
+      () => saveIfStillCurrent(state, options, storage, ledgerKey)
+    );
+  } catch (err: unknown) {
+    if (options.signal?.aborted || (err instanceof Error && err.name === "AbortError")) {
+      return cancelledResult();
+    }
+    // Once a lock manager exists, no writer may bypass it on request failure.
+    return { ok: false, error: LOCK_FAILED };
   }
 }

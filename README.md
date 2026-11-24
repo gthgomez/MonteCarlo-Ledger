@@ -117,10 +117,20 @@ python -m uvicorn monte_carlo_ledger.api:app --reload --host 127.0.0.1 --port 80
 
 ### Web Dashboard & Cloud Sync
 
-A zero-knowledge, end-to-end encrypted web companion is deployed at:
+The Web companion is available at:
 👉 **[https://montecarlo-ledger.vercel.app](https://montecarlo-ledger.vercel.app)**
 
-The web app runs Contract 2.0 TypeScript simulations client-side with zero data egress. Everyday screens ask how you are doing, where money went, which bills are coming, whether a decision fits, and what the modeled futures look like. Seed, run count, horizon, quantile, and variance stay on Advanced and feed that same plan. You can synchronize your local CLI ledger with the edge vault (backed by Turso libSQL):
+The Web app runs Contract 2.0 simulations in the browser. Your ledger stays there unless you
+choose to export or sync it. The optional vault receives an encrypted snapshot and sync
+metadata. A vault pull replaces the ledger; it does not merge records or restore browser-only
+budget targets and forecast settings, including the reserve. See [what syncs and how to
+recover](docs/VAULT_COMPATIBILITY.md#what-follows-the-ledger) and the
+[Web/Python qualification plan](docs/campaign/WEB_PYTHON_QUALIFICATION.md).
+
+An already loaded tab can record edits without a connection. Opening the site in a new tab
+still requires the app to load from its host; do not rely on it for an offline restart.
+
+You can synchronize your local CLI ledger with the vault (backed by Turso libSQL):
 
 ```bash
 # 1. Initialize a private vault (derives local PBKDF2 keys, never sent to server).

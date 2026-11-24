@@ -6,16 +6,17 @@ import { createStarterLedger, dollarsToCents } from "@/lib/ledger-edits";
 import { formatMoney } from "@/lib/money-format";
 import { type Insight, type PlanSlice, type PositionCopy } from "@/lib/present";
 import { type Section } from "@/lib/sections";
-import { type IncomeItem } from "@/lib/types";
+import { type PersistenceResult } from "@/lib/sync-state";
+import type { IncomeItem, LedgerState } from "@/lib/types";
 import { Button, Explain, fieldClass, Metric, Notice } from "./ui";
 
-interface HomeViewProps {
-  asOf: string;
-  usingDemo: boolean;
-  needsSetup: boolean;
+/** Everything Home needs to draw a forecast. Absence of this object means no
+ * forecast is shown; it never stands in for a cached or invented one. */
+export interface HomeForecast {
   copy: PositionCopy;
   startingBalanceCents: number;
-  safeSpendCents: number;
+  safeSpendCents: number | null;
+  guidanceIssue: string | null;
   plannedLowCents: number;
   plannedLowDate: string;
   slice: PlanSlice;
@@ -24,153 +25,50 @@ interface HomeViewProps {
   horizonDays: number;
   reserveCents: number;
   runs: number;
-  onNavigate: (section: Section) => void;
-  createOwn: (input: Parameters<typeof createStarterLedger>[0]) => { ok: true } | { ok: false; error: string };
 }
 
-export function HomeView({
-  asOf,
-  usingDemo,
-  needsSetup,
-  copy,
-  startingBalanceCents,
-  safeSpendCents,
-  plannedLowCents,
-  plannedLowDate,
-  slice,
-  insights,
-  assumptionsChanged,
-  horizonDays,
-  reserveCents,
-  runs,
+interface HomeViewProps {
+  asOf: string;
+  usingDemo: boolean;
+  needsSchedule: boolean;
+  forecast: HomeForecast | null;
+  onNavigate: (section: Section) => void;
+  /** Another ledger edit is pending; onboarding and navigation wait for it. */
+  saving?: boolean;
+  createOwn: (validated: LedgerState) => Promise<PersistenceResult>;
+}
+
+/** The forecast body is presentation only. It is omitted entirely when the
+ * engine could not produce a valid forecast. */
+function ForecastBody({
+  forecast,
   onNavigate,
-  createOwn,
-}: HomeViewProps) {
-  const [open, setOpen] = useState(needsSetup && !usingDemo);
-  const [error, setError] = useState<string | null>(null);
-  const [balance, setBalance] = useState("");
-  const [incomeName, setIncomeName] = useState("");
-  const [incomeAmount, setIncomeAmount] = useState("");
-  const [frequency, setFrequency] = useState<IncomeItem["frequency"]>("Bi-weekly");
-  const [payday, setPayday] = useState(asOf);
-  const [billName, setBillName] = useState("");
-  const [billAmount, setBillAmount] = useState("");
-  const [dueDay, setDueDay] = useState("1");
-
-  function submitOwn(event: React.FormEvent) {
-    event.preventDefault();
-    const balanceCents = dollarsToCents(Number(balance));
-    if (balance.trim() === "" || balanceCents === null) {
-      setError("Enter the money you have now, in dollars. Use 0 if you are starting from nothing.");
-      return;
-    }
-    let income: Parameters<typeof createStarterLedger>[0]["income"] = null;
-    if (incomeName.trim() || incomeAmount.trim()) {
-      const amountCents = dollarsToCents(Number(incomeAmount));
-      if (!incomeName.trim() || amountCents === null || amountCents <= 0) {
-        setError("A paycheck needs a name and an amount greater than zero, or leave both blank.");
-        return;
-      }
-      income = { name: incomeName, amountCents, frequency, nextPayday: payday };
-    }
-    let bill: Parameters<typeof createStarterLedger>[0]["bill"] = null;
-    if (billName.trim() || billAmount.trim()) {
-      const amountCents = dollarsToCents(Number(billAmount));
-      const day = Number(dueDay);
-      if (!billName.trim() || amountCents === null || amountCents <= 0 || !Number.isInteger(day) || day < 1 || day > 31) {
-        setError("A bill needs a name, an amount greater than zero, and a due day from 1 to 31.");
-        return;
-      }
-      bill = { name: billName, amountCents, dueDay: day };
-    }
-    const created = createOwn({ asOf, balanceCents, income, bill });
-    if (!created.ok) {
-      setError(created.error);
-      return;
-    }
-    setError(null);
-    setOpen(false);
-  }
-
+  saving,
+}: {
+  forecast: HomeForecast;
+  onNavigate: (section: Section) => void;
+  saving: boolean;
+}) {
+  const {
+    copy,
+    startingBalanceCents,
+    safeSpendCents,
+    guidanceIssue,
+    plannedLowCents,
+    plannedLowDate,
+    slice,
+    insights,
+    assumptionsChanged,
+    horizonDays,
+    reserveCents,
+    runs,
+  } = forecast;
   const previewDays = Math.min(30, horizonDays);
-  const spendDetail =
-    safeSpendCents >= 0
-      ? "An estimate of what you could spend while keeping the modeled low point at your reserve."
-      : "The model shows a shortfall against your reserve. This is the size of that gap.";
+  const hasGap = safeSpendCents !== null && safeSpendCents < 0;
+  const hasReserve = reserveCents > 0;
 
   return (
-    <div className="space-y-6">
-      {usingDemo && (
-        <Notice tone="info" title="Demo data — not your finances.">
-          This is a sample household so you can see how a plan looks. It is not your bank account. Enter your own
-          numbers when you want the plan to be about you.
-          <div className="mt-3">
-            <Button type="button" variant="primary" onClick={() => setOpen(true)}>
-              Enter my own numbers
-            </Button>
-          </div>
-        </Notice>
-      )}
-      {needsSetup && !usingDemo && (
-        <Notice tone="warning" title="Start with what you know">
-          Start by adding the money you have, your monthly income, and the bills you pay regularly. The plan stays
-          quiet until those are entered. Nothing here is guessed.
-        </Notice>
-      )}
-      {(open || (needsSetup && !usingDemo)) && (
-        <form onSubmit={submitOwn} className="space-y-4 rounded-2xl border border-line bg-surface p-4 shadow-card sm:p-6">
-          <h2 className="text-lg font-semibold">Your numbers</h2>
-          <p className="text-sm text-muted">
-            A budget is simply a plan for where your money goes. You can leave the paycheck or the bill blank and add
-            them later.
-          </p>
-          <label className="block text-sm font-medium">
-            Money you have now ($)
-            <input className={`${fieldClass} mt-1`} inputMode="decimal" value={balance} onChange={(e) => setBalance(e.target.value)} />
-          </label>
-          <div className="grid gap-3 sm:grid-cols-2">
-            <label className="block text-sm font-medium">
-              Paycheck name
-              <input className={`${fieldClass} mt-1`} value={incomeName} onChange={(e) => setIncomeName(e.target.value)} placeholder="Job" />
-            </label>
-            <label className="block text-sm font-medium">
-              Take-home amount ($)
-              <input className={`${fieldClass} mt-1`} inputMode="decimal" value={incomeAmount} onChange={(e) => setIncomeAmount(e.target.value)} />
-            </label>
-            <label className="block text-sm font-medium">
-              How often
-              <select className={`${fieldClass} mt-1`} value={frequency} onChange={(e) => setFrequency(e.target.value as IncomeItem["frequency"])}>
-                <option>Weekly</option>
-                <option>Bi-weekly</option>
-                <option>Monthly</option>
-              </select>
-            </label>
-            <label className="block text-sm font-medium">
-              Next payday
-              <input className={`${fieldClass} mt-1`} type="date" value={payday} onChange={(e) => setPayday(e.target.value)} />
-            </label>
-            <label className="block text-sm font-medium">
-              A regular bill
-              <input className={`${fieldClass} mt-1`} value={billName} onChange={(e) => setBillName(e.target.value)} placeholder="Rent" />
-            </label>
-            <label className="block text-sm font-medium">
-              Bill amount ($)
-              <input className={`${fieldClass} mt-1`} inputMode="decimal" value={billAmount} onChange={(e) => setBillAmount(e.target.value)} />
-            </label>
-            <label className="block text-sm font-medium">
-              Due day
-              <input className={`${fieldClass} mt-1`} inputMode="numeric" value={dueDay} onChange={(e) => setDueDay(e.target.value)} />
-            </label>
-          </div>
-          {error && (
-            <p className="text-sm text-danger" role="alert">
-              {error}
-            </p>
-          )}
-          <Button type="submit">Save and show my plan</Button>
-        </form>
-      )}
-
+    <>
       <p className="max-w-3xl text-base text-ink">{copy.lead}</p>
       {assumptionsChanged && (
         <Notice tone="warning">These results use assumptions you changed under Advanced. They are still estimates.</Notice>
@@ -182,7 +80,24 @@ export function HomeView({
           value={formatMoney(startingBalanceCents)}
           detail="Based on ledger entries dated today or earlier. Check it against your bank balance."
         />
-        <Metric label="Cautious amount to spend" value={formatMoney(safeSpendCents)} detail={spendDetail} />
+        {safeSpendCents !== null ? (
+          <Metric
+            label={hasGap ? (hasReserve ? "Gap to your safety reserve" : "Modeled cash shortfall") : "Cautious amount to spend"}
+            value={formatMoney(Math.abs(safeSpendCents))}
+            detail={hasGap
+              ? hasReserve
+                ? `Nothing is left for extra spending in this estimate. Falling below your ${formatMoney(reserveCents)} reserve does not necessarily mean going below zero.`
+                : "The selected modeled low point goes below zero without extra spending. This is an estimate, not a guarantee."
+              : `An estimate of what you could spend while keeping ${formatMoney(reserveCents)} set aside in the modeled low point. It is not your current balance.`}
+          />
+        ) : (
+          <Notice tone="info" title="Not enough information to suggest spending">
+            {guidanceIssue}
+            <div className="mt-2">
+              <Button type="button" variant="quiet" disabled={saving} onClick={() => onNavigate("bills")}>Review bills</Button>
+            </div>
+          </Notice>
+        )}
         <Metric
           label="Lowest point if the schedule is exact"
           value={formatMoney(plannedLowCents)}
@@ -238,7 +153,7 @@ export function HomeView({
                   {insight.detail}
                   {insight.action && (
                     <div className="mt-2">
-                      <Button type="button" variant="quiet" onClick={() => onNavigate(insight.action!.section)}>
+                      <Button type="button" variant="quiet" disabled={saving} onClick={() => onNavigate(insight.action!.section)}>
                         {insight.action.label}
                       </Button>
                     </div>
@@ -250,7 +165,7 @@ export function HomeView({
         )}
       </section>
 
-      <section className="space-y-3 rounded-2xl border border-line bg-surface p-4 shadow-card sm:p-6" aria-label="How these numbers were calculated">
+      {safeSpendCents !== null && <section className="space-y-3 rounded-2xl border border-line bg-surface p-4 shadow-card sm:p-6" aria-label="How these numbers were calculated">
         <h2 className="text-lg font-semibold">What these numbers mean</h2>
         <p className="text-sm text-muted">{copy.caution}</p>
         <p className="text-sm text-ink">
@@ -275,7 +190,188 @@ export function HomeView({
             They show how fragile the plan is. They are not promises.
           </Explain>
         </div>
-      </section>
+      </section>}
+    </>
+  );
+}
+
+export function HomeView({
+  asOf,
+  usingDemo,
+  needsSchedule,
+  forecast,
+  onNavigate,
+  saving = false,
+  createOwn,
+}: HomeViewProps) {
+  const [open, setOpen] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [balance, setBalance] = useState("");
+  const [incomeName, setIncomeName] = useState("");
+  const [incomeAmount, setIncomeAmount] = useState("");
+  const [frequency, setFrequency] = useState<IncomeItem["frequency"]>("Bi-weekly");
+  const [paydayInput, setPayday] = useState<string | null>(null);
+  // A queued or failed starter save keeps the payday and opening as-of it sent,
+  // so a retry after midnight writes the dates the person already saw.
+  const [pinnedPayday, setPinnedPayday] = useState<string | null>(null);
+  const payday = paydayInput ?? pinnedPayday ?? asOf;
+  const [pinnedOpeningAsOf, setPinnedOpeningAsOf] = useState<string | null>(null);
+  const openingAsOf = pinnedOpeningAsOf ?? asOf;
+  const [billName, setBillName] = useState("");
+  const [billAmount, setBillAmount] = useState("");
+  const [dueDay, setDueDay] = useState("1");
+
+  async function submitOwn(event: React.FormEvent) {
+    event.preventDefault();
+    if (submitting || saving) return;
+    // The starter form may replace only the demo. A saved ledger, including one
+    // restored from Sync, must never be replaced by this form.
+    if (!usingDemo) {
+      setError("This starter form is only available for the demo. Your saved ledger was not changed.");
+      return;
+    }
+    const balanceCents = dollarsToCents(Number(balance));
+    if (balance.trim() === "" || balanceCents === null) {
+      setError("Enter the money you have now, in dollars. Use 0 if you are starting from nothing.");
+      return;
+    }
+    const submittedAsOf = openingAsOf;
+    const submittedPayday = payday;
+    let income: Parameters<typeof createStarterLedger>[0]["income"] = null;
+    if (incomeName.trim() || incomeAmount.trim()) {
+      const amountCents = dollarsToCents(Number(incomeAmount));
+      if (!incomeName.trim() || amountCents === null || amountCents <= 0) {
+        setError("A paycheck needs a name and an amount greater than zero, or leave both blank.");
+        return;
+      }
+      income = { name: incomeName, amountCents, frequency, nextPayday: submittedPayday };
+    }
+    let bill: Parameters<typeof createStarterLedger>[0]["bill"] = null;
+    if (billName.trim() || billAmount.trim()) {
+      const amountCents = dollarsToCents(Number(billAmount));
+      const day = Number(dueDay);
+      if (!billName.trim() || amountCents === null || amountCents <= 0 || !Number.isInteger(day) || day < 1 || day > 31) {
+        setError("A bill needs a name, an amount greater than zero, and a due day from 1 to 31.");
+        return;
+      }
+      bill = { name: billName, amountCents, dueDay: day };
+    }
+    const starter = createStarterLedger({ asOf: submittedAsOf, balanceCents, income, bill });
+    if (!starter.ok) {
+      setError(starter.error);
+      return;
+    }
+    if (balanceCents !== 0) setPinnedOpeningAsOf(submittedAsOf);
+    if (income && paydayInput === null) setPinnedPayday(submittedPayday);
+    setSubmitting(true);
+    const created = await createOwn(starter.state);
+    setSubmitting(false);
+    if (!created.ok) {
+      setError(created.error);
+      return;
+    }
+    setError(null);
+    setPinnedOpeningAsOf((current) => (current === submittedAsOf ? null : current));
+    setPinnedPayday((current) => (current === submittedPayday ? null : current));
+    setOpen(false);
+  }
+
+  return (
+    <div className="space-y-6">
+      {usingDemo && (
+        <Notice tone="info" title="Demo data — not your finances.">
+          This is a sample household so you can see how a plan looks. It is not your bank account. Enter your own
+          numbers when you want the plan to be about you.
+          <div className="mt-3">
+            <Button type="button" variant="primary" disabled={saving} onClick={() => setOpen(true)}>
+              Enter my own numbers
+            </Button>
+          </div>
+        </Notice>
+      )}
+      {usingDemo && open && (
+        <form onSubmit={submitOwn} className="space-y-4 rounded-2xl border border-line bg-surface p-4 shadow-card sm:p-6">
+          <fieldset disabled={saving || submitting} className="m-0 min-w-0 space-y-4 border-0 p-0">
+          <h2 className="text-lg font-semibold">Your numbers</h2>
+          <p className="text-sm text-muted">
+            A budget is simply a plan for where your money goes. You can leave the paycheck or the bill blank and add
+            them later.
+          </p>
+          <label className="block text-sm font-medium">
+            Money you have now ($)
+            <input className={`${fieldClass} mt-1`} inputMode="decimal" value={balance} onChange={(e) => setBalance(e.target.value)} />
+          </label>
+          {pinnedOpeningAsOf !== null && pinnedOpeningAsOf !== asOf && (
+            <p className="text-sm text-muted">Opening balance date: {formatDateLabel(pinnedOpeningAsOf)}.</p>
+          )}
+          <div className="grid gap-3 sm:grid-cols-2">
+            <label className="block text-sm font-medium">
+              Paycheck name
+              <input className={`${fieldClass} mt-1`} value={incomeName} onChange={(e) => setIncomeName(e.target.value)} placeholder="Job" />
+            </label>
+            <label className="block text-sm font-medium">
+              Take-home amount ($)
+              <input className={`${fieldClass} mt-1`} inputMode="decimal" value={incomeAmount} onChange={(e) => setIncomeAmount(e.target.value)} />
+            </label>
+            <label className="block text-sm font-medium">
+              How often
+              <select className={`${fieldClass} mt-1`} value={frequency} onChange={(e) => setFrequency(e.target.value as IncomeItem["frequency"])}>
+                <option>Weekly</option>
+                <option>Bi-weekly</option>
+                <option>Monthly</option>
+              </select>
+            </label>
+            <label className="block text-sm font-medium">
+              Next payday
+              <input
+                className={`${fieldClass} mt-1`}
+                type="date"
+                value={payday}
+                onChange={(e) => {
+                  setPayday(e.target.value);
+                  setPinnedPayday(null);
+                }}
+              />
+            </label>
+            <label className="block text-sm font-medium">
+              A regular bill
+              <input className={`${fieldClass} mt-1`} value={billName} onChange={(e) => setBillName(e.target.value)} placeholder="Rent" />
+            </label>
+            <label className="block text-sm font-medium">
+              Bill amount ($)
+              <input className={`${fieldClass} mt-1`} inputMode="decimal" value={billAmount} onChange={(e) => setBillAmount(e.target.value)} />
+            </label>
+            <label className="block text-sm font-medium">
+              Due day
+              <input className={`${fieldClass} mt-1`} inputMode="numeric" value={dueDay} onChange={(e) => setDueDay(e.target.value)} />
+            </label>
+          </div>
+          {error && (
+            <p className="text-sm text-danger" role="alert">
+              {error}
+            </p>
+          )}
+          <Button type="submit">Save and show my plan</Button>
+          </fieldset>
+        </form>
+      )}
+      {needsSchedule && !usingDemo && (
+        <Notice tone="warning" title="Add your paycheck and bills">
+          Your recorded money and any debt entries are already saved. Add a paycheck or a bill to include upcoming
+          money and payments in the plan. Nothing already recorded is replaced.
+          <div className="mt-3 flex flex-wrap gap-3">
+            <Button type="button" variant="primary" disabled={saving} onClick={() => onNavigate("money")}>
+              Add a paycheck
+            </Button>
+            <Button type="button" variant="quiet" disabled={saving} onClick={() => onNavigate("bills")}>
+              Add a bill
+            </Button>
+          </div>
+        </Notice>
+      )}
+
+      {forecast && <ForecastBody forecast={forecast} onNavigate={onNavigate} saving={saving} />}
     </div>
   );
 }

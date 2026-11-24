@@ -41,10 +41,75 @@ function getNextDate(iso: string, frequency: string, anchorDay?: number): string
   return date.toISOString().split("T")[0];
 }
 
-interface ProjectedBillSlot {
+export interface ProjectedBillSlot {
   payment: PaymentItem;
   slotDate: string;
   dueDate: string;
+}
+
+/** Stable identity for one scheduled bill slot. */
+export function paymentOccurrenceKey(paymentId: number | string, slotDate: string): string {
+  return `${paymentId}::${slotDate}`;
+}
+
+type BillInputs = Pick<LedgerState, "payments" | "bill_occurrences">;
+
+function coveredBillSlots(occurrences: LedgerState["bill_occurrences"]): Set<string> {
+  const covered = new Set<string>();
+  for (const occ of occurrences) {
+    covered.add(paymentOccurrenceKey(occ.payment_id, occ.original_due_date || occ.due_date));
+    if (occ.is_user_modified) {
+      covered.add(paymentOccurrenceKey(occ.payment_id, occ.due_date));
+    }
+  }
+  return covered;
+}
+
+function scheduledOneTimeSlots(payments: PaymentItem[], covered: Set<string>): ProjectedBillSlot[] {
+  const slots: ProjectedBillSlot[] = [];
+  for (const payment of payments) {
+    if (payment.recurrence !== "One-time" || !payment.due_date) continue;
+    if (covered.has(paymentOccurrenceKey(String(payment.id), payment.due_date))) continue;
+    slots.push({ payment, slotDate: payment.due_date, dueDate: payment.due_date });
+  }
+  return slots;
+}
+
+function byDueDate(left: ProjectedBillSlot, right: ProjectedBillSlot): number {
+  return left.dueDate.localeCompare(right.dueDate)
+    || String(left.payment.id).localeCompare(String(right.payment.id));
+}
+
+/**
+ * One-time bills whose scheduled date passed without any stored occurrence.
+ * They stay out of the cash plan (no automatic historical expense) but must be
+ * visible for review; `projectBillPayments` exposes them as resolvable slots.
+ */
+export function unresolvedPastOneTimeSlots(
+  state: BillInputs,
+  asOf: string,
+  covered = coveredBillSlots(state.bill_occurrences)
+): ProjectedBillSlot[] {
+  return scheduledOneTimeSlots(state.payments, covered).filter((slot) => slot.dueDate < asOf).sort(byDueDate);
+}
+
+/** The earliest known one-time outflow on or after the first excluded day. */
+export function firstOneTimeBillOutsideWindow(state: BillInputs, windowEnd: string): ProjectedBillSlot | null {
+  const slots = scheduledOneTimeSlots(state.payments, coveredBillSlots(state.bill_occurrences));
+  const oneTimeById = new Map(state.payments
+    .filter((payment) => payment.recurrence === "One-time")
+    .map((payment) => [String(payment.id), payment] as const));
+  for (const occurrence of state.bill_occurrences) {
+    if (occurrence.paid || occurrence.due_date < windowEnd) continue;
+    const payment = oneTimeById.get(String(occurrence.payment_id));
+    if (!payment) continue;
+    slots.push({
+      payment,
+      slotDate: occurrence.original_due_date || occurrence.due_date,
+      dueDate: occurrence.due_date,
+    });
+  }
+  return slots.filter((slot) => slot.dueDate >= windowEnd).sort(byDueDate)[0] ?? null;
 }
 
 /** One occurrence model for cash events and editable bill rows. */
@@ -52,20 +117,8 @@ export function projectBillPayments(state: LedgerState, asOf: string, windowEnd:
   const events: { date: string; amount_cents: number; type: "expense"; name: string }[] = [];
   const slots: ProjectedBillSlot[] = [];
   const paymentById = new Map(state.payments.map((p) => [String(p.id), p] as const));
-  const represented = new Set<string>();
+  const covered = coveredBillSlots(state.bill_occurrences);
   const generated = new Set<string>();
-  const suppressed = new Set<string>();
-  const occurrenceKey = (paymentId: number | string, date: string) => `${paymentId}::${date}`;
-  for (const occ of state.bill_occurrences) {
-    const slot = occ.original_due_date || occ.due_date;
-    represented.add(occurrenceKey(occ.payment_id, slot));
-    if (occ.paid || occ.is_user_modified) {
-      suppressed.add(occurrenceKey(occ.payment_id, slot));
-    }
-    if (occ.is_user_modified) {
-      suppressed.add(occurrenceKey(occ.payment_id, occ.due_date));
-    }
-  }
   for (const occ of state.bill_occurrences) {
     if (occ.paid) continue;
     if (occ.due_date >= windowEnd) continue;
@@ -96,8 +149,8 @@ export function projectBillPayments(state: LedgerState, asOf: string, windowEnd:
         const dueIso = `${curY}-${String(actualM).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
 
         if (dueIso >= asOf && dueIso < windowEnd) {
-          const key = occurrenceKey(String(pmt.id), dueIso);
-          if (!represented.has(key) && !suppressed.has(key)) {
+          const key = paymentOccurrenceKey(String(pmt.id), dueIso);
+          if (!covered.has(key)) {
             generated.add(key);
             slots.push({ payment: pmt, slotDate: dueIso, dueDate: dueIso });
             events.push({
@@ -115,8 +168,8 @@ export function projectBillPayments(state: LedgerState, asOf: string, windowEnd:
       let guard = 0;
       while (current < windowEnd && guard < 1000) {
         if (current >= asOf) {
-          const key = occurrenceKey(String(pmt.id), current);
-          if (!represented.has(key) && !suppressed.has(key)) {
+          const key = paymentOccurrenceKey(String(pmt.id), current);
+          if (!covered.has(key)) {
             generated.add(key);
             slots.push({ payment: pmt, slotDate: current, dueDate: current });
             events.push({
@@ -134,6 +187,13 @@ export function projectBillPayments(state: LedgerState, asOf: string, windowEnd:
         guard++;
       }
     }
+  }
+
+  // A past one-time slot with no stored occurrence has no cash event, but it is
+  // still an unresolved obligation. Expose it as an editable row so a person can
+  // mark it paid or move it; do not invent a historical expense.
+  for (const slot of unresolvedPastOneTimeSlots(state, asOf, covered)) {
+    slots.push(slot);
   }
 
   return { events, generated, slots };

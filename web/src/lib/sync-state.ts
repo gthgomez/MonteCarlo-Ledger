@@ -14,7 +14,18 @@ import { LedgerState } from "./types";
 export const SYNC_STORAGE_KEY = "montecarlo_vault_sync_v1";
 export const VAULT_ID_STORAGE_KEY = "montecarlo_vault_id";
 
-export type PersistenceResult = { ok: true } | { ok: false; error: string };
+export type PersistenceResult =
+  | { ok: true }
+  | {
+      ok: false;
+      error: string;
+      /**
+       * Set only when a failed write could not be proven rolled back. The ledger
+       * or vault metadata may already reflect the change. Callers must retain
+       * the prior view until the user checks storage.
+       */
+      indeterminate?: true;
+    };
 
 export interface SyncRecord {
   vaultId: string;

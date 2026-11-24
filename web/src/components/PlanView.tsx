@@ -9,13 +9,15 @@ import {
   updateLiabilityBalance,
   aprPercentToBasisPoints,
   dollarsToCents,
+  parseDollarsToCents,
   removeLiability,
   type EditResult,
 } from "@/lib/ledger-edits";
 import { explainEngineCode, formatMoney, formatProbability } from "@/lib/money-format";
-import { evenSetAside } from "@/lib/present";
+import { evenSetAside, formatCautiousSpend } from "@/lib/present";
 import {
   evaluateBillAmount,
+  evaluateExtraDebtPayment,
   evaluateIncomeDelay,
   evaluateMonthlySetAside,
   evaluatePurchase,
@@ -23,6 +25,7 @@ import {
   type ModelOutcome,
 } from "@/lib/scenarios";
 import { planningMinimumPaymentCents } from "@/lib/scenario-builder";
+import { type PersistenceResult } from "@/lib/sync-state";
 import { type LedgerState, type LiabilityItem } from "@/lib/types";
 import { Button, Explain, fieldClass, Notice, Panel } from "./ui";
 
@@ -36,15 +39,35 @@ function debtMinimumLabel(debt: LiabilityItem): string {
 
 type Question = "purchase" | "delay" | "bill" | "aside" | "debt";
 
+/** Stable per-debt key for the balance draft and its failed-save marker. */
+function balanceDraftKey(id: string): string {
+  return `plan:debt-balance:${id}`;
+}
+
+function withoutKey<V>(map: Map<string, V>, key: string): Map<string, V> {
+  if (!map.has(key)) return map;
+  const next = new Map(map);
+  next.delete(key);
+  return next;
+}
+
+function withKey<V>(map: Map<string, V>, key: string, value: V): Map<string, V> {
+  const next = new Map(map);
+  next.set(key, value);
+  return next;
+}
+
 function Compare({
   title,
   base,
   next,
+  showGuidance,
   note,
 }: {
   title: string;
   base: ModelOutcome;
   next: EvalResult;
+  showGuidance: boolean;
   note: string;
 }) {
   if (next.status === "error") {
@@ -54,12 +77,15 @@ function Compare({
       </Notice>
     );
   }
+  const compared = next.outcome;
   const rows = [
-    ["Cautious amount to spend", base.safeSpendCents, next.outcome.safeSpendCents],
-    ["Chance of running short", base.overdraftPpm, next.outcome.overdraftPpm],
-    ["Lowest point if the schedule is exact", base.projectedLowCents, next.outcome.projectedLowCents],
-    ["Ending balance if the schedule is exact", base.endingBalanceCents, next.outcome.endingBalanceCents],
-  ] as const;
+    ...(showGuidance ? [
+      ["Cautious amount to spend", formatCautiousSpend(base.safeSpendCents, base.reserveCents), formatCautiousSpend(compared.safeSpendCents, compared.reserveCents)],
+      ["Chance of running short", formatProbability(base.overdraftPpm), formatProbability(compared.overdraftPpm)],
+    ] : []),
+    ["Lowest point if the schedule is exact", formatMoney(base.projectedLowCents), formatMoney(compared.projectedLowCents)],
+    ["Ending balance if the schedule is exact", formatMoney(base.endingBalanceCents), formatMoney(compared.endingBalanceCents)],
+  ];
   return (
     <div className="min-w-0 rounded-xl border border-line bg-inset p-4">
       <h3 className="text-base font-semibold">{title}</h3>
@@ -77,20 +103,21 @@ function Compare({
             {rows.map(([label, from, to]) => (
               <tr key={label} className="border-t border-line">
                 <th scope="row" className="py-2 pr-3 font-medium">
-                  {label === "Chance of running short" ? "Chance of running short" : label}
+                  {label}
                 </th>
-                <td className="py-2 pr-3 tabular-nums">
-                  {label === "Chance of running short" ? formatProbability(from) : formatMoney(from)}
-                </td>
-                <td className="py-2 tabular-nums font-semibold">
-                  {label === "Chance of running short" ? formatProbability(to) : formatMoney(to)}
-                </td>
+                <td className="py-2 pr-3 tabular-nums">{from}</td>
+                <td className="py-2 tabular-nums font-semibold">{to}</td>
               </tr>
             ))}
           </tbody>
         </table>
       </div>
-      <p className="mt-3 text-sm text-muted">{note}</p>
+      {showGuidance && (
+        <p className="mt-3 text-sm text-muted">
+          The chance of running short is the share of simulated plans that went below zero, not measured odds.
+        </p>
+      )}
+      {note && <p className="mt-3 text-sm text-muted">{note}</p>}
     </div>
   );
 }
@@ -100,17 +127,29 @@ export function PlanView({
   asOf,
   assumptions,
   base,
+  showGuidance,
   onEdit,
+  onDiscardDraft,
+  saving,
 }: {
   state: LedgerState;
   asOf: string;
   assumptions: Assumptions;
-  base: ModelOutcome;
-  onEdit: (result: EditResult) => void;
+  /**
+   * The evaluated ledger baseline. Null means the engine could not evaluate the
+   * current ledger (or its assumptions), so comparisons are unavailable. The
+   * recorded-debt editor must stay mounted and usable in that state.
+   */
+  base: ModelOutcome | null;
+  showGuidance: boolean;
+  onEdit: (result: EditResult, draftKey?: string) => Promise<PersistenceResult>;
+  onDiscardDraft: (draftKey: string) => void;
+  saving: boolean;
 }) {
   const [question, setQuestion] = useState<Question>("purchase");
   const [purchaseAmount, setPurchaseAmount] = useState(350);
-  const [purchaseDate, setPurchaseDate] = useState(asOf);
+  const [purchaseDateInput, setPurchaseDate] = useState<string | null>(null);
+  const purchaseDate = purchaseDateInput ?? asOf;
   const [delayDays, setDelayDays] = useState(3);
   const [billId, setBillId] = useState(String(state.payments[0]?.id ?? ""));
   const [billAmount, setBillAmount] = useState(100);
@@ -119,6 +158,11 @@ export function PlanView({
   const [months, setMonths] = useState("12");
   const [strategy, setStrategy] = useState<"snowball" | "avalanche">("snowball");
   const [extra, setExtra] = useState(100);
+  const [paymentDollars, setPaymentDollars] = useState("");
+  const [paymentDateInput, setPaymentDate] = useState<string | null>(null);
+  const paymentDate = paymentDateInput ?? asOf;
+  const [paymentPreview, setPaymentPreview] = useState<{ amountCents: number; date: string } | null>(null);
+  const [paymentError, setPaymentError] = useState<string | null>(null);
   const [debtName, setDebtName] = useState("");
   const [debtBalance, setDebtBalance] = useState("");
   const [debtApr, setDebtApr] = useState("");
@@ -127,29 +171,50 @@ export function PlanView({
   const [linkedPaymentId, setLinkedPaymentId] = useState("");
   const selectedPayment = state.payments.find((payment) => String(payment.id) === linkedPaymentId);
   const [debtError, setDebtError] = useState<string | null>(null);
-  const [balanceEdit, setBalanceEdit] = useState<{ id: string; dollars: string } | null>(null);
+  // Balance drafts are keyed by debt id and live for the whole Plan pane. Only
+  // this row's successful save or an explicit row discard may remove one, so
+  // switching editors never turns a failed draft into silent state loss.
+  const [balanceDrafts, setBalanceDrafts] = useState<Map<string, string>>(() => new Map());
+  const [balanceErrors, setBalanceErrors] = useState<Map<string, string>>(() => new Map());
+  const [openBalanceId, setOpenBalanceId] = useState<string | null>(null);
 
+  // No scenario is evaluated while the ledger cannot be forecast. This is not
+  // only a display guard: it keeps a failed ledger from producing any estimate
+  // behind the recorded-debt editor.
   const purchase = useMemo(
     () =>
-      question === "purchase"
-        ? evaluatePurchase(state, asOf, assumptions, Math.round(purchaseAmount * 100), purchaseDate)
-        : null,
-    [question, state, asOf, assumptions, purchaseAmount, purchaseDate]
+      base === null || question !== "purchase"
+        ? null
+        : evaluatePurchase(state, asOf, assumptions, Math.round(purchaseAmount * 100), purchaseDate),
+    [base, question, state, asOf, assumptions, purchaseAmount, purchaseDate]
   );
   const delay = useMemo(
-    () => (question === "delay" ? evaluateIncomeDelay(state, asOf, assumptions, delayDays) : null),
-    [question, state, asOf, assumptions, delayDays]
+    () =>
+      base === null || question !== "delay"
+        ? null
+        : evaluateIncomeDelay(state, asOf, assumptions, delayDays),
+    [base, question, state, asOf, assumptions, delayDays]
   );
   const bill = useMemo(
     () =>
-      question === "bill" && billId
+      base !== null && question === "bill" && billId
         ? evaluateBillAmount(state, asOf, assumptions, billId, Math.round(billAmount * 100))
         : null,
-    [question, state, asOf, assumptions, billId, billAmount]
+    [base, question, state, asOf, assumptions, billId, billAmount]
   );
   const asideResult = useMemo(
-    () => (question === "aside" ? evaluateMonthlySetAside(state, asOf, assumptions, Math.round(aside * 100)) : null),
-    [question, state, asOf, assumptions, aside]
+    () =>
+      base === null || question !== "aside"
+        ? null
+        : evaluateMonthlySetAside(state, asOf, assumptions, Math.round(aside * 100)),
+    [base, question, state, asOf, assumptions, aside]
+  );
+  const hasOutstandingDebt = state.liabilities.some((debt) => debt.is_active !== false && debt.balance_cents > 0);
+  const extraPayment = useMemo(
+    () => base !== null && question === "debt" && hasOutstandingDebt && paymentPreview
+      ? evaluateExtraDebtPayment(state, asOf, assumptions, paymentPreview.amountCents, paymentPreview.date)
+      : null,
+    [base, question, hasOutstandingDebt, paymentPreview, state, asOf, assumptions]
   );
 
   const goalCents = dollarsToCents(Number(goal));
@@ -161,7 +226,7 @@ export function PlanView({
   let debtResult: { months_to_payoff: number; payoff_date: string; total_interest_cents: number; total_paid_cents: number; did_not_converge?: boolean } | null = null;
   let debtCalcError: string | null = null;
   const activeDebts = state.liabilities.filter((debt) => debt.is_active !== false);
-  if (question === "debt" && activeDebts.length > 0) {
+  if (base !== null && question === "debt" && activeDebts.length > 0) {
     try {
       debtResult = amortize(asOf, activeDebts, strategy, Math.round(extra * 100));
     } catch (err: unknown) {
@@ -177,7 +242,7 @@ export function PlanView({
     { id: "debt", label: "How do I pay off debt?" },
   ];
 
-  function submitDebt(event: React.FormEvent) {
+  async function submitDebt(event: React.FormEvent) {
     event.preventDefault();
     const balance = dollarsToCents(Number(debtBalance));
     const min = dollarsToCents(Number(debtMin));
@@ -186,6 +251,14 @@ export function PlanView({
       setDebtError("Enter a name, the amount you owe, a minimum payment, and a rate such as 21.99.");
       return;
     }
+    const submitted = {
+      name: debtName,
+      balance: debtBalance,
+      min: debtMin,
+      apr: debtApr,
+      dueDay: debtDueDay,
+      linkedPaymentId,
+    };
     const dueDay = selectedPayment?.due_day ?? Number(debtDueDay);
     const result = addInstallmentDebt(state, {
       name: debtName,
@@ -200,13 +273,213 @@ export function PlanView({
       return;
     }
     setDebtError(null);
-    setDebtName("");
-    setDebtBalance("");
-    setDebtMin("");
-    setDebtApr("");
-    setDebtDueDay("");
-    setLinkedPaymentId("");
-    onEdit(result);
+    const saved = await onEdit(result, "plan:add-debt");
+    if (!saved.ok) {
+      setDebtError(saved.error);
+      return;
+    }
+    setDebtError(null);
+    // Leave any field the user changed while the write was pending. Clearing
+    // the whole form on a stale callback would erase an unsubmitted next draft.
+    setDebtName((current) => (current === submitted.name ? "" : current));
+    setDebtBalance((current) => (current === submitted.balance ? "" : current));
+    setDebtMin((current) => (current === submitted.min ? "" : current));
+    setDebtApr((current) => (current === submitted.apr ? "" : current));
+    setDebtDueDay((current) => (current === submitted.dueDay ? "" : current));
+    setLinkedPaymentId((current) => (current === submitted.linkedPaymentId ? "" : current));
+  }
+
+  function compareExtraPayment(event: React.FormEvent) {
+    event.preventDefault();
+    const amountCents = parseDollarsToCents(paymentDollars);
+    if (amountCents === null || amountCents <= 0) {
+      setPaymentError("Enter an amount above $0 with at most two decimal places, like 150 or 150.25.");
+      return;
+    }
+    setPaymentError(null);
+    setPaymentPreview({ amountCents, date: paymentDate });
+  }
+
+  function openBalanceEditor(debt: LiabilityItem) {
+    // Reopening is not a discard: the typed value and any failure stay with the
+    // row until its own save succeeds or its own Cancel removes them.
+    setOpenBalanceId(debt.id);
+  }
+
+  async function saveBalance(debt: LiabilityItem, event: React.FormEvent) {
+    event.preventDefault();
+    const submitted = balanceDrafts.get(debt.id) ?? "";
+    const balance = dollarsToCents(Number(submitted));
+    const result = updateLiabilityBalance(state, debt.id, balance ?? NaN);
+    if (!result.ok) {
+      setBalanceErrors((current) => withKey(current, debt.id, result.error));
+      return;
+    }
+    setBalanceErrors((current) => withoutKey(current, debt.id));
+    const saved = await onEdit(result, balanceDraftKey(debt.id));
+    if (!saved.ok) {
+      // The failure marker and this row's typed value stay together for a retry
+      // or an explicit Cancel, even if another debt's editor is opened.
+      setBalanceErrors((current) => withKey(current, debt.id, saved.error));
+      return;
+    }
+    // Leave a value the user changed while the write was pending. Only the
+    // exact submitted draft is settled by this success.
+    setBalanceDrafts((current) =>
+      current.get(debt.id) === submitted ? withoutKey(current, debt.id) : current
+    );
+    setBalanceErrors((current) => withoutKey(current, debt.id));
+    setOpenBalanceId((current) => (current === debt.id ? null : current));
+  }
+
+  function cancelBalance(debt: LiabilityItem) {
+    setBalanceDrafts((current) => withoutKey(current, debt.id));
+    setBalanceErrors((current) => withoutKey(current, debt.id));
+    setOpenBalanceId((current) => (current === debt.id ? null : current));
+    // Explicit discard may clear this row's failed-draft marker, never a sibling's.
+    onDiscardDraft(balanceDraftKey(debt.id));
+  }
+
+  async function removeDebt(debt: LiabilityItem) {
+    const draft = balanceDrafts.get(debt.id);
+    const hasEnteredDraft = draft !== undefined && draft.trim() !== "";
+    if (hasEnteredDraft && !window.confirm(`Remove ${debt.name}? The balance draft you entered will be discarded.`)) {
+      return;
+    }
+    if (!(await onEdit(removeLiability(state, debt.id))).ok) return;
+    setBalanceDrafts((current) => withoutKey(current, debt.id));
+    setBalanceErrors((current) => withoutKey(current, debt.id));
+    setOpenBalanceId((current) => (current === debt.id ? null : current));
+    // Only a successful removal discards this row's draft and its marker.
+    onDiscardDraft(balanceDraftKey(debt.id));
+  }
+
+  // Recorded-debt editing is deliberately independent of the selected decision
+  // tab. It is the only Plan surface that stays usable when the engine cannot
+  // evaluate the ledger. The form values stay in this Plan instance across
+  // both the normal and recovery layouts.
+  const debtManagement = (base === null || question === "debt") && (
+    <fieldset disabled={saving} className="m-0 min-w-0 space-y-3 border-0 p-0">
+      <ul className="divide-y divide-line">
+        {state.liabilities.map((debt) => (
+          <li key={debt.id} className="flex flex-wrap items-center justify-between gap-2 py-2 text-sm">
+            <span>
+              {debt.name} · owe {formatMoney(debt.balance_cents)} · {(debt.apr_basis_points / 100).toFixed(2)}%
+              {debt.is_active === false ? " · Archived" : base === null ? null : ` · ${debtMinimumLabel(debt)}`}
+            </span>
+            <div className="flex flex-wrap gap-2">
+              <Button type="button" variant="quiet" onClick={() => openBalanceEditor(debt)}>
+                Update balance for {debt.name}
+              </Button>
+              <Button type="button" variant="quiet" onClick={() => void removeDebt(debt)}>
+                Remove {debt.name}
+              </Button>
+            </div>
+            {openBalanceId === debt.id && (
+              <form
+                className="flex w-full flex-wrap items-end gap-2"
+                onSubmit={(event) => void saveBalance(debt, event)}
+              >
+                <label className="text-sm font-medium">
+                  Lender balance for {debt.name} ($)
+                  <input
+                    type="number" min={0} step="0.01" required
+                    className={`${fieldClass} mt-1`}
+                    value={balanceDrafts.get(debt.id) ?? ""}
+                    onChange={(event) => {
+                      const dollars = event.target.value;
+                      setBalanceDrafts((current) => withKey(current, debt.id, dollars));
+                      setBalanceErrors((current) => withoutKey(current, debt.id));
+                    }}
+                  />
+                </label>
+                <Button type="submit" variant="quiet">Save balance</Button>
+                <Button type="button" variant="quiet" onClick={() => cancelBalance(debt)}>Cancel</Button>
+                {balanceErrors.get(debt.id) && (
+                  <p className="w-full text-sm text-danger" role="alert">
+                    {balanceErrors.get(debt.id)}
+                  </p>
+                )}
+              </form>
+            )}
+          </li>
+        ))}
+      </ul>
+      <form onSubmit={submitDebt} className="grid gap-3 sm:grid-cols-2">
+        <label className="text-sm font-medium">
+          Debt name
+          <input className={`${fieldClass} mt-1`} value={debtName} onChange={(e) => setDebtName(e.target.value)} />
+        </label>
+        <label className="text-sm font-medium">
+          Amount still owed ($)
+          <input className={`${fieldClass} mt-1`} inputMode="decimal" value={debtBalance} onChange={(e) => setDebtBalance(e.target.value)} />
+        </label>
+        <label className="text-sm font-medium">
+          Interest rate (%)
+          <input className={`${fieldClass} mt-1`} inputMode="decimal" value={debtApr} onChange={(e) => setDebtApr(e.target.value)} placeholder="21.99" />
+        </label>
+        <label className="text-sm font-medium">
+          Minimum payment ($)
+          <input className={`${fieldClass} mt-1`} inputMode="decimal" value={debtMin} onChange={(e) => setDebtMin(e.target.value)} />
+        </label>
+        <label className="text-sm font-medium">
+          Bill for this debt (optional)
+          <select className={`${fieldClass} mt-1`} value={linkedPaymentId} onChange={(e) => setLinkedPaymentId(e.target.value)}>
+            <option value="">No matching bill</option>
+            {state.payments
+              .filter((payment) => payment.recurrence === "Monthly" && payment.due_day)
+              .filter((payment) => !(state.liabilities ?? []).some(
+                (debt) => debt.linked_payment_id != null && String(debt.linked_payment_id) === String(payment.id)
+              ))
+              .map((payment) => (
+                <option key={String(payment.id)} value={String(payment.id)}>
+                  {payment.name} · {formatMoney(payment.amount_cents)} · day {payment.due_day}
+                </option>
+              ))}
+          </select>
+        </label>
+        {!selectedPayment && (
+          <label className="text-sm font-medium">
+            Usual payment day (1–31)
+            <input
+              className={`${fieldClass} mt-1`}
+              type="number"
+              min={1}
+              max={31}
+              value={debtDueDay}
+              onChange={(e) => setDebtDueDay(e.target.value)}
+            />
+          </label>
+        )}
+        {debtError && (
+          <p className="text-sm text-danger sm:col-span-2" role="alert">
+            {debtError}
+          </p>
+        )}
+        <div>
+          <Button type="submit" variant="quiet">
+            Add debt
+          </Button>
+        </div>
+      </form>
+    </fieldset>
+  );
+
+  if (base === null) {
+    // The selected decision tab is intentionally not rendered here, but its
+    // retained state is untouched. Debt management is shown regardless of which
+    // tab was open, and no scenario, payoff, or risk value is computed.
+    return (
+      <div className="space-y-4">
+        <Panel title="Recorded debts">
+          <Notice tone="warning" title="Plan comparisons unavailable">
+            Cash, payoff, and risk comparisons are unavailable. Your saved debts and open drafts are still available
+            below.
+          </Notice>
+          <div className="mt-4">{debtManagement}</div>
+        </Panel>
+      </div>
+    );
   }
 
   return (
@@ -222,8 +495,9 @@ export function PlanView({
               type="button"
               role="tab"
               aria-selected={question === tab.id}
+              disabled={saving}
               onClick={() => setQuestion(tab.id)}
-              className={`min-h-11 shrink-0 rounded-lg px-3 text-sm font-semibold ${
+              className={`min-h-11 shrink-0 rounded-lg px-3 text-sm font-semibold disabled:opacity-50 ${
                 question === tab.id ? "bg-accent text-on-accent" : "border border-line bg-inset text-ink"
               }`}
             >
@@ -231,6 +505,12 @@ export function PlanView({
             </button>
           ))}
         </div>
+
+        {!showGuidance && (
+          <div className="mt-3">
+            <Notice tone="info">Comparisons show scheduled balances only. Check for missing bill dates or payments outside the plan window before using the comparison to decide what you can afford.</Notice>
+          </div>
+        )}
 
         {question === "purchase" && purchase && (
           <div className="mt-4 grid gap-4 lg:grid-cols-2">
@@ -275,8 +555,9 @@ export function PlanView({
               title="How this changes the plan"
               base={base}
               next={purchase}
+              showGuidance={showGuidance}
               note={
-                purchase.status === "ok"
+                showGuidance && purchase.status === "ok"
                   ? purchase.outcome.safeSpendCents >= 0
                     ? "In this simulation the cautious amount stays at or above zero after the purchase. That is a model estimate, not a guarantee."
                     : "In this simulation the cautious amount goes below zero. That is a model estimate, not a guarantee you will overdraw."
@@ -307,7 +588,8 @@ export function PlanView({
               title="If that paycheck arrives late"
               base={base}
               next={delay}
-              note="In this simulation the chance of running short is the share of modeled futures that go negative. It is not a promise that a paycheck will be late."
+              showGuidance={showGuidance}
+              note="This compares cash if payday moves. It does not estimate how likely a delay is."
             />
           </div>
         )}
@@ -349,6 +631,7 @@ export function PlanView({
                   title="If that bill used the new amount"
                   base={base}
                   next={bill}
+                  showGuidance={showGuidance}
                   note="In this simulation only that bill's amount changes. Other assumptions stay as they are."
                 />
               </>
@@ -399,6 +682,7 @@ export function PlanView({
                 title="If that amount leaves the account monthly"
                 base={base}
                 next={asideResult}
+                showGuidance={showGuidance}
                 note="The ending balance here is what would remain in this account, not a savings pile. In this simulation the difference is the cash-flow effect of moving the money out."
               />
             </div>
@@ -410,7 +694,7 @@ export function PlanView({
             <p className="text-sm text-muted">
               Snowball pays the smallest balance first. Avalanche (APR) pays the highest interest rate first. Minimum
               payments for debts you entered are already ordinary outflows on Home and Future. Extra payments and the
-              interest schedule here are not proof you can afford accelerating payoff.
+              interest schedule in the strategy comparison do not change the cash forecast.
             </p>
             {activeDebts.length === 0 ? (
               <p className="text-sm text-muted">No active debts are entered.</p>
@@ -455,110 +739,53 @@ export function PlanView({
                 )}
               </div>
             ) : null}
-            <ul className="divide-y divide-line">
-              {state.liabilities.map((debt) => (
-                <li key={debt.id} className="flex flex-wrap items-center justify-between gap-2 py-2 text-sm">
-                  <span>
-                    {debt.name} · owe {formatMoney(debt.balance_cents)} · {(debt.apr_basis_points / 100).toFixed(2)}% ·{" "}
-                    {debt.is_active === false ? "Archived" : debtMinimumLabel(debt)}
-                  </span>
-                  <div className="flex flex-wrap gap-2">
-                    <Button type="button" variant="quiet" onClick={() => setBalanceEdit({ id: debt.id, dollars: "" })}>
-                      Update balance for {debt.name}
-                    </Button>
-                    <Button type="button" variant="quiet" onClick={() => onEdit(removeLiability(state, debt.id))}>
-                      Remove {debt.name}
-                    </Button>
-                  </div>
-                  {balanceEdit?.id === debt.id && (
-                    <form
-                      className="flex w-full flex-wrap items-end gap-2"
-                      onSubmit={(event) => {
-                        event.preventDefault();
-                        const balance = dollarsToCents(Number(balanceEdit.dollars));
-                        const result = updateLiabilityBalance(state, debt.id, balance ?? NaN);
-                        if (!result.ok) {
-                          setDebtError(result.error);
-                          return;
-                        }
-                        setDebtError(null);
-                        setBalanceEdit(null);
-                        onEdit(result);
-                      }}
-                    >
-                      <label className="text-sm font-medium">
-                        Lender balance for {debt.name} ($)
-                        <input
-                          type="number" min={0} step="0.01" required
-                          className={`${fieldClass} mt-1`}
-                          value={balanceEdit.dollars}
-                          onChange={(event) => setBalanceEdit({ id: debt.id, dollars: event.target.value })}
-                        />
-                      </label>
-                      <Button type="submit" variant="quiet">Save balance</Button>
-                      <Button type="button" variant="quiet" onClick={() => setBalanceEdit(null)}>Cancel</Button>
-                    </form>
-                  )}
-                </li>
-              ))}
-            </ul>
-            <form onSubmit={submitDebt} className="grid gap-3 sm:grid-cols-2">
-              <label className="text-sm font-medium">
-                Debt name
-                <input className={`${fieldClass} mt-1`} value={debtName} onChange={(e) => setDebtName(e.target.value)} />
-              </label>
-              <label className="text-sm font-medium">
-                Amount still owed ($)
-                <input className={`${fieldClass} mt-1`} inputMode="decimal" value={debtBalance} onChange={(e) => setDebtBalance(e.target.value)} />
-              </label>
-              <label className="text-sm font-medium">
-                Interest rate (%)
-                <input className={`${fieldClass} mt-1`} inputMode="decimal" value={debtApr} onChange={(e) => setDebtApr(e.target.value)} placeholder="21.99" />
-              </label>
-              <label className="text-sm font-medium">
-                Minimum payment ($)
-                <input className={`${fieldClass} mt-1`} inputMode="decimal" value={debtMin} onChange={(e) => setDebtMin(e.target.value)} />
-              </label>
-              <label className="text-sm font-medium">
-                Bill for this debt (optional)
-                <select className={`${fieldClass} mt-1`} value={linkedPaymentId} onChange={(e) => setLinkedPaymentId(e.target.value)}>
-                  <option value="">No matching bill</option>
-                  {state.payments
-                    .filter((payment) => payment.recurrence === "Monthly" && payment.due_day)
-                    .filter((payment) => !(state.liabilities ?? []).some(
-                      (debt) => debt.linked_payment_id != null && String(debt.linked_payment_id) === String(payment.id)
-                    ))
-                    .map((payment) => (
-                      <option key={String(payment.id)} value={String(payment.id)}>
-                        {payment.name} · {formatMoney(payment.amount_cents)} · day {payment.due_day}
-                      </option>
-                    ))}
-                </select>
-              </label>
-              {!selectedPayment && (
-                <label className="text-sm font-medium">
-                  Usual payment day (1–31)
-                  <input
-                    className={`${fieldClass} mt-1`}
-                    type="number"
-                    min={1}
-                    max={31}
-                    value={debtDueDay}
-                    onChange={(e) => setDebtDueDay(e.target.value)}
-                  />
-                </label>
-              )}
-              {debtError && (
-                <p className="text-sm text-danger sm:col-span-2" role="alert">
-                  {debtError}
+            {hasOutstandingDebt && (
+              <section className="min-w-0 space-y-3 rounded-xl border border-line p-4">
+                <h3 className="font-semibold">Check a one-time extra payment</h3>
+                <p className="text-sm text-muted">
+                  See what happens to your cash if you pay more on a specific day, on top of your usual bills and debt
+                minimums. This is separate from the monthly payoff comparison. It doesn’t record a payment or
+                check what your lender will accept or change.
                 </p>
-              )}
-              <div>
-                <Button type="submit" variant="quiet">
-                  Add debt
-                </Button>
-              </div>
-            </form>
+                <form className="space-y-3" onSubmit={compareExtraPayment}>
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <label className="block min-w-0 text-sm font-medium">
+                      One-time extra payment ($)
+                      <input className={`${fieldClass} mt-1`} inputMode="decimal" value={paymentDollars}
+                        onChange={(event) => {
+                          setPaymentDollars(event.target.value);
+                          setPaymentPreview(null);
+                          setPaymentError(null);
+                        }}
+                      />
+                    </label>
+                    <label className="block min-w-0 text-sm font-medium">
+                      Date of extra payment
+                      <input className={`${fieldClass} mt-1`} type="date" value={paymentDate} min={asOf}
+                        max={addDaysIso(windowEnd, -1)} required onChange={(event) => {
+                          setPaymentDate(event.target.value);
+                          setPaymentPreview(null);
+                        }}
+                      />
+                    </label>
+                  </div>
+                  {paymentError && <p className="text-sm text-danger" role="alert">{paymentError}</p>}
+                  <Button type="submit">Compare with cash plan</Button>
+                </form>
+                <div aria-live="polite">
+                  {extraPayment && (
+                    <Compare
+                      title="If you make this extra payment"
+                      base={base}
+                      next={extraPayment}
+                      showGuidance={showGuidance}
+                      note="In the exact schedule this amount leaves on the date you chose. The other dated payments stay the same."
+                    />
+                  )}
+                </div>
+              </section>
+            )}
+            {debtManagement}
             <Explain term="interest">
               The interest rate helps estimate what you will owe in future months. If you already track the same
               payment as a bill, choose it above so that payment is counted once.

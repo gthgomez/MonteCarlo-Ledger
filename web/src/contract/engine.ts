@@ -422,7 +422,8 @@ function simulateOnce(
   horizon: number,
   windowEnd: Date,
   p: any,
-  rng: SplitMix64
+  rng: SplitMix64,
+  fixedDraftExpenseCategory?: string
 ): any {
   const scenario: InternalEvent[] = base.map((e) => ({ ...e }));
   const imin = p.income_variation_min;
@@ -432,6 +433,10 @@ function simulateOnce(
   const categoryRanges: Map<string, [number, number]> = p.expense_category_variation;
 
   for (const ev of scenario) {
+    // The fixed Web draft is present in this cash path but has no random draw.
+    // All shared contract scenarios still follow the canonical draw order below.
+    if (fixedDraftExpenseCategory !== undefined &&
+        ev.type === "expense" && ev.category === fixedDraftExpenseCategory) continue;
     if (ev.type === "income") {
       if (imin !== 0 || imax !== 0) {
         const pct = BigInt(rng.nextInt(imin, imax));
@@ -511,7 +516,7 @@ function validateSimulationParams(p: any): void {
   simInt(p, "reserve_cents", "INVALID_AMOUNT", 0, Number.MAX_SAFE_INTEGER);
 }
 
-export function runScenario(scenario: any): any {
+function runExpandedScenario(scenario: any, fixedDraftExpenseCategory?: string): any {
   const { events, asOf, horizon, windowEnd } = expand(scenario);
   const base = sortEvents(events);
   const start = BigInt(requireCents(scenario.starting_balance_cents, "starting_balance_cents"));
@@ -553,7 +558,7 @@ export function runScenario(scenario: any): any {
   let negativeRuns = 0;
 
   for (let r = 0; r < p.runs; r++) {
-    const outcome = simulateOnce(base, start, asOf, horizon, windowEnd, p, rng);
+    const outcome = simulateOnce(base, start, asOf, horizon, windowEnd, p, rng, fixedDraftExpenseCategory);
     endings.push(outcome.ending_balance_cents);
     minimums.push(outcome.minimum_balance_cents);
     if (outcome.first_negative_date !== null) {
@@ -583,6 +588,15 @@ export function runScenario(scenario: any): any {
   };
 
   return result;
+}
+
+export function runScenario(scenario: any): any {
+  return runExpandedScenario(scenario);
+}
+
+/** Web-local what-if only: keep one draft category fixed without shifting any bill or surprise draws. */
+export function runScenarioWithFixedDraftExpense(scenario: any, category: string): any {
+  return runExpandedScenario(scenario, category);
 }
 
 export function runScenarioSafe(scenario: any): any {

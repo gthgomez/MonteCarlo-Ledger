@@ -4,18 +4,22 @@ import test from "node:test";
 import { SAMPLE_LEDGER_STATE } from "../types";
 import { formatProbability } from "../money-format";
 import {
+  beyondWindowBillNotice,
   buildInsights,
   cashMinusEnteredDebt,
   categoryOverages,
   describePosition,
   evenSetAside,
+  formatCautiousSpend,
   recordedSpending,
   slicePlan,
   spendingDeltaNote,
+  spendingGuidanceIssue,
   spendingLastMonth,
   spendingThisMonth,
   transactionSumCents,
 } from "../present";
+import { addDaysIso } from "../dates";
 
 const AS_OF = "2026-11-10";
 
@@ -49,6 +53,169 @@ test("an empty window keeps the starting balance", () => {
   assert.equal(slice.events.length, 0);
   assert.equal(slice.plannedEndingCents, 345_000);
   assert.equal(slice.scheduledOutflowCents, 0);
+});
+
+test("missing bill dates withhold spending guidance even when another bill is scheduled", () => {
+  const state = {
+    payments: [
+      { id: "dated", recurrence: "Monthly" as const, name: "Dated bill", due_day: 15, amount_cents: 2000 },
+      { id: "undated", recurrence: "Monthly" as const, name: "Undated bill", amount_cents: 3000 },
+    ],
+    bill_occurrences: [],
+  };
+  const rows = [{
+    date: "2026-11-15", name: "Dated bill", type: "expense", amount_cents: -2000, balance_after_cents: 8000,
+  }];
+  assert.match(spendingGuidanceIssue(state, rows, AS_OF) ?? "", /missing a date/);
+  const complete = { ...state, payments: [state.payments[0]] };
+  assert.match(spendingGuidanceIssue(complete, [], AS_OF) ?? "", /in this plan window/);
+  assert.equal(spendingGuidanceIssue(complete, rows, AS_OF), null);
+});
+
+test("an unresolved past one-time bill withholds guidance but keeps the known schedule", () => {
+  const state = {
+    payments: [
+      {
+        id: "repair",
+        name: "Car repair",
+        amount_cents: 90_000,
+        recurrence: "One-time" as const,
+        due_date: "2026-11-09",
+      },
+      {
+        id: "subscription",
+        name: "Subscription",
+        amount_cents: 1_000,
+        recurrence: "Monthly" as const,
+        due_day: 15,
+      },
+    ],
+    bill_occurrences: [],
+  };
+  const rows = [{
+    date: "2026-11-15", name: "Subscription", type: "expense", amount_cents: -1_000, balance_after_cents: 99_000,
+  }];
+  const issue = spendingGuidanceIssue(state, rows, AS_OF);
+  assert.match(issue ?? "", /Car repair/);
+  assert.match(issue ?? "", /\$900\.00/);
+  assert.match(issue ?? "", /Nov 9, 2026 \(2026-11-09\)/);
+  assert.match(issue ?? "", /has no linked bill record/);
+  assert.match(issue ?? "", /not that no payment was made/);
+  assert.match(issue ?? "", /mark it paid if your current cash already reflects the payment/);
+  assert.match(issue ?? "", /record a new expense only if neither Money nor your current cash reflects it/);
+  // The in-window bill is still shown; only the cautious advice is withheld.
+  assert.deepEqual(rows.map((row) => row.amount_cents), [-1_000]);
+});
+
+test("paid or moved one-time slots do not withhold guidance", () => {
+  const base = {
+    payments: [{
+      id: "repair",
+      name: "Car repair",
+      amount_cents: 90_000,
+      recurrence: "One-time" as const,
+      due_date: "2026-11-09",
+    }],
+    bill_occurrences: [],
+  };
+  const rows = [{
+    date: "2026-11-15", name: "Subscription", type: "expense", amount_cents: -1_000, balance_after_cents: 99_000,
+  }];
+  const paid = {
+    ...base,
+    bill_occurrences: [{
+      id: "occ-paid", payment_id: "repair", due_date: "2026-11-09", paid: true,
+      transaction_id: null,
+    }],
+  };
+  assert.equal(spendingGuidanceIssue(paid, rows, AS_OF), null);
+  const moved = {
+    ...base,
+    bill_occurrences: [{
+      id: "occ-moved", payment_id: "repair", due_date: "2026-11-20",
+      original_due_date: "2026-11-09", paid: false, is_user_modified: true,
+    }],
+  };
+  assert.equal(spendingGuidanceIssue(moved, rows, AS_OF), null);
+  const movedThenPaid = {
+    payments: [{ ...base.payments[0], due_date: "2026-11-09" }],
+    bill_occurrences: [{
+      id: "occ-moved-paid", payment_id: "repair", due_date: "2026-11-09", original_due_date: "2026-11-05",
+      paid: true, is_user_modified: true,
+    }],
+  };
+  assert.equal(spendingGuidanceIssue(movedThenPaid, rows, AS_OF), null);
+});
+
+test("a one-time bill after the window is informational and does not withhold in-window guidance", () => {
+  const horizonDays = 30;
+  const windowEnd = addDaysIso(AS_OF, horizonDays);
+  const state = {
+    payments: [
+      { id: "in-window", name: "Subscription", amount_cents: 1_000, recurrence: "Monthly" as const, due_day: 15 },
+      { id: "far", name: "Car repair", amount_cents: 90_000, recurrence: "One-time" as const, due_date: windowEnd },
+    ],
+    bill_occurrences: [],
+  };
+  const rows = [{
+    date: "2026-11-15", name: "Subscription", type: "expense", amount_cents: -1_000, balance_after_cents: 99_000,
+  }];
+  assert.equal(spendingGuidanceIssue(state, rows, AS_OF), null);
+  const notice = beyondWindowBillNotice(state, AS_OF, horizonDays);
+  assert.match(notice ?? "", /Car repair/);
+  assert.match(notice ?? "", /\$900\.00/);
+  assert.match(notice ?? "", new RegExp(`${windowEnd}`));
+  assert.match(notice ?? "", /Extend the plan window under Advanced/);
+});
+
+test("the beyond-window notice uses half-open dates and respects paid and moved slots", () => {
+  const horizonDays = 30;
+  const windowEnd = addDaysIso(AS_OF, horizonDays);
+  const lastIncluded = addDaysIso(windowEnd, -1);
+  const payment = {
+    id: "repair", name: "Car repair", amount_cents: 90_000,
+    recurrence: "One-time" as const, due_date: windowEnd,
+  };
+  assert.equal(beyondWindowBillNotice({ payments: [{ ...payment, due_date: lastIncluded }], bill_occurrences: [] }, AS_OF, horizonDays), null);
+  assert.equal(
+    beyondWindowBillNotice({ payments: [payment], bill_occurrences: [
+      { id: "occ-paid", payment_id: "repair", due_date: windowEnd, paid: true },
+    ] }, AS_OF, horizonDays),
+    null
+  );
+  assert.equal(
+    beyondWindowBillNotice({ payments: [payment], bill_occurrences: [
+      { id: "occ-moved-in", payment_id: "repair", due_date: lastIncluded, original_due_date: windowEnd, paid: false, is_user_modified: true },
+    ] }, AS_OF, horizonDays),
+    null
+  );
+  const movedOut = beyondWindowBillNotice({ payments: [payment], bill_occurrences: [
+    { id: "occ-moved-out", payment_id: "repair", due_date: addDaysIso(windowEnd, 5), original_due_date: windowEnd, paid: false, is_user_modified: true },
+  ] }, AS_OF, horizonDays);
+  assert.match(movedOut ?? "", new RegExp(addDaysIso(windowEnd, 5)));
+  assert.doesNotMatch(movedOut ?? "", new RegExp(`\\(${windowEnd}\\)`));
+  const occurrenceOnly = { id: "occ-only", payment_id: "repair", due_date: windowEnd, paid: false };
+  assert.match(
+    beyondWindowBillNotice({ payments: [{ ...payment, due_date: null }], bill_occurrences: [occurrenceOnly] }, AS_OF, horizonDays) ?? "",
+    new RegExp(windowEnd)
+  );
+  assert.equal(
+    beyondWindowBillNotice({ payments: [payment], bill_occurrences: [
+      { ...occurrenceOnly, original_due_date: lastIncluded, is_user_modified: true, paid: true },
+    ] }, AS_OF, horizonDays),
+    null
+  );
+});
+
+test("recurring and past one-time bills are not reported as beyond-window obligations", () => {
+  const state = {
+    payments: [
+      { id: "far-monthly", name: "Insurance", amount_cents: 10_000, recurrence: "Monthly" as const, due_day: 1 },
+      { id: "past", name: "Old repair", amount_cents: 5_000, recurrence: "One-time" as const, due_date: "2026-11-09" },
+    ],
+    bill_occurrences: [],
+  };
+  assert.equal(beyondWindowBillNotice(state, AS_OF, 30), null);
 });
 
 test("recorded spending ignores future expenses and non-expense rows", () => {
@@ -114,7 +281,6 @@ test("position copy uses the figures it is given and does not call the median an
     plannedEndingCents: 113_000,
     windowDays: 30,
     safeSpendCents: 80_000,
-    difficultLowCents: 80_000,
     reserveCents: 0,
     quantileNum: 1,
     quantileDen: 10,
@@ -140,8 +306,7 @@ test("a negative cautious amount is not described as money you could spend", () 
     plannedEndingCents: -4_900,
     windowDays: 30,
     safeSpendCents: -4_000,
-    difficultLowCents: -4_000,
-    reserveCents: 0,
+    reserveCents: 10_000,
     quantileNum: 1,
     quantileDen: 10,
     runs: 100,
@@ -149,7 +314,31 @@ test("a negative cautious amount is not described as money you could spend", () 
     hasSchedule: true,
   });
   assert.match(copy.lead, /no cautious amount left to spend/);
+  assert.match(copy.lead, /short of your reserve by \$40\.00/);
+  assert.doesNotMatch(copy.lead, /the low point is -\$40/);
   assert.doesNotMatch(copy.lead, /you could spend/);
+});
+
+test("negative modeled cash with no reserve is a shortfall, not a reserve gap", () => {
+  const input = {
+    recordedBalanceCents: 100,
+    scheduledIncomeCents: 0,
+    scheduledBillCents: 5_000,
+    plannedEndingCents: -4_900,
+    windowDays: 30,
+    safeSpendCents: -4_900,
+    reserveCents: 0,
+    quantileNum: 1,
+    quantileDen: 10,
+    runs: 100,
+    isDemo: false,
+    hasSchedule: true,
+  };
+  assert.match(describePosition(input).lead, /the low point is -\$49\.00 \(below zero\)/);
+  assert.doesNotMatch(describePosition(input).lead, /short of your reserve/);
+  assert.doesNotMatch(describePosition({ ...input, safeSpendCents: null }).lead, /cautious|modeled/);
+  assert.equal(formatCautiousSpend(-4_900, 0), "None ($49.00 modeled cash shortfall)");
+  assert.equal(formatCautiousSpend(-4_900, 10_000), "None ($49.00 below reserve)");
 });
 
 test("custom quantile copy matches the same trough used for safe-to-spend", () => {
@@ -162,7 +351,6 @@ test("custom quantile copy matches the same trough used for safe-to-spend", () =
     plannedEndingCents: 100_000,
     windowDays: 30,
     safeSpendCents: trough - reserve,
-    difficultLowCents: trough,
     reserveCents: reserve,
     quantileNum: 1,
     quantileDen: 5,
@@ -194,6 +382,7 @@ test("insights do not invent a grocery comparison", () => {
     spendingNote: spendingDeltaNote(0, 7_500),
     overage: null,
     safeSpendCents: 1_000,
+    reserveCents: 0,
     overdraftPpm: 0,
     runs: 500,
     ledgerMatches: true,
@@ -205,7 +394,7 @@ test("insights do not invent a grocery comparison", () => {
   assert.doesNotMatch(text, /more than last month/);
 });
 
-test("overdue insight uses the supplied totals and stays out of the forward plan", () => {
+test("overdue insight says the plan counts recorded unpaid occurrences and flags missing ones", () => {
   const insights = buildInsights({
     asOf: AS_OF,
     isDemo: false,
@@ -219,6 +408,7 @@ test("overdue insight uses the supplied totals and stays out of the forward plan
     spendingNote: null,
     overage: null,
     safeSpendCents: 100,
+    reserveCents: 0,
     overdraftPpm: 0,
     runs: 10,
     ledgerMatches: true,
@@ -226,7 +416,8 @@ test("overdue insight uses the supplied totals and stays out of the forward plan
   const overdue = insights.find((item) => item.id === "overdue");
   assert.ok(overdue);
   assert.match(overdue.detail, /\$42\.00/);
-  assert.match(overdue.detail, /does not include them/);
+  assert.match(overdue.detail, /Recorded unpaid occurrences are counted today/);
+  assert.match(overdue.detail, /no linked bill record stays out until you review its payment status in Bills/);
 });
 
 test("even set-aside is integer division with a remainder, not a forecast", () => {

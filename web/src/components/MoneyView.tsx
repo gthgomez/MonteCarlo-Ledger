@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { formatDateLabel } from "@/lib/dates";
 import {
   addIncomeSchedule,
@@ -12,54 +12,91 @@ import {
 } from "@/lib/ledger-edits";
 import { formatMoney } from "@/lib/money-format";
 import { cashMinusEnteredDebt, enteredDebtCents, transactionSumCents } from "@/lib/present";
+import { type PersistenceResult } from "@/lib/sync-state";
 import { type IncomeItem, type LedgerState } from "@/lib/types";
 import { Button, Explain, fieldClass, Notice, Panel } from "./ui";
+
+const RECONCILE_UNAVAILABLE_MESSAGE =
+  "Reconcile was not submitted because the current cash summary and adjustment preview are unavailable.";
 
 export function MoneyView({
   state,
   asOf,
   startingBalanceCents,
   onEdit,
+  saving,
 }: {
   state: LedgerState;
   asOf: string;
-  startingBalanceCents: number;
-  onEdit: (result: EditResult) => void;
+  startingBalanceCents: number | null;
+  onEdit: (result: EditResult, draftKey?: string) => Promise<PersistenceResult>;
+  saving: boolean;
 }) {
   const [kind, setKind] = useState<"Expense" | "Income">("Expense");
   const [amount, setAmount] = useState("");
   const [category, setCategory] = useState("");
   const [description, setDescription] = useState("");
-  const [date, setDate] = useState(asOf);
+  const [dateInput, setDate] = useState<string | null>(null);
+  // An implicit date sent to a write stays visible while that write is queued or
+  // failed. A successful write releases it, so a fresh untouched form follows asOf.
+  const [pinnedDate, setPinnedDate] = useState<string | null>(null);
+  const date = dateInput ?? pinnedDate ?? asOf;
   const [formError, setFormError] = useState<string | null>(null);
 
   const [incomeName, setIncomeName] = useState("");
   const [incomeAmount, setIncomeAmount] = useState("");
   const [frequency, setFrequency] = useState<IncomeItem["frequency"]>("Bi-weekly");
-  const [payday, setPayday] = useState(asOf);
+  const [paydayInput, setPayday] = useState<string | null>(null);
+  const [pinnedPayday, setPinnedPayday] = useState<string | null>(null);
+  const payday = paydayInput ?? pinnedPayday ?? asOf;
   const [incomeError, setIncomeError] = useState<string | null>(null);
 
-  const [reconcile, setReconcile] = useState((startingBalanceCents / 100).toFixed(2));
+  const [reconcile, setReconcile] = useState(() =>
+    startingBalanceCents === null ? "" : (startingBalanceCents / 100).toFixed(2)
+  );
+  const [pinnedReconcileDate, setPinnedReconcileDate] = useState<string | null>(null);
+  const reconcileDate = pinnedReconcileDate ?? asOf;
   const [reconcileError, setReconcileError] = useState<string | null>(null);
 
   const sum = transactionSumCents(state.transactions);
   const matches = sum === state.current_balance_cents;
   const debt = enteredDebtCents(state.liabilities);
-  const net = cashMinusEnteredDebt(startingBalanceCents, state.liabilities);
+  const net = startingBalanceCents === null ? null : cashMinusEnteredDebt(startingBalanceCents, state.liabilities);
   const futureCount = state.transactions.filter((tx) => tx.date > asOf).length;
-  const reconcileCents = dollarsToCents(Number(reconcile));
+  const reconcileCents = reconcile.trim() === "" ? null : dollarsToCents(Number(reconcile));
+  // A pending/failed reconcile keeps its original date, but a pin never makes
+  // an unavailable or stale cash summary a valid basis for a preview.
+  const reconcileBaseCents =
+    startingBalanceCents === null || pinnedReconcileDate === null
+      ? startingBalanceCents
+      : transactionSumCents(state.transactions.filter((tx) => tx.date <= pinnedReconcileDate));
   const reconcileDiff =
-    reconcileCents === null ? null : reconcileCents - startingBalanceCents;
+    reconcileCents === null || reconcileBaseCents === null
+      ? null
+      : reconcileCents - reconcileBaseCents;
+  // Reconciliation changes the ledger by the difference between the typed
+  // balance and the checked cash basis. Without a forecast/current balance there
+  // is no verified basis, so the adjustment preview and submission are withheld.
+  const reconcilePreviewUnavailable = reconcileBaseCents === null;
 
-  function submitRecord(event: React.FormEvent) {
+  useEffect(() => {
+    if (!reconcilePreviewUnavailable) {
+      setReconcileError((current) => (current === RECONCILE_UNAVAILABLE_MESSAGE ? null : current));
+    }
+  }, [reconcilePreviewUnavailable]);
+
+  async function submitRecord(event: React.FormEvent) {
     event.preventDefault();
     const cents = dollarsToCents(Number(amount));
     if (cents === null || cents <= 0) {
       setFormError("Enter an amount greater than zero.");
       return;
     }
+    const submittedAmount = amount;
+    const submittedDescription = description;
+    const submittedDate = date;
     const result = recordCashflow(state, {
-      date,
+      date: submittedDate,
       kind,
       amountCents: cents,
       category,
@@ -70,62 +107,101 @@ export function MoneyView({
       return;
     }
     setFormError(null);
-    setAmount("");
-    setDescription("");
-    onEdit(result);
+    setPinnedDate(submittedDate);
+    const saved = await onEdit(result, "money:record");
+    if (!saved.ok) {
+      // Keep the submitted draft visible so the user can retry without retyping.
+      // The date pin also makes the retry reuse the date this attempt communicated.
+      setFormError(saved.error);
+      return;
+    }
+    setFormError(null);
+    setPinnedDate((current) => (current === submittedDate ? null : current));
+    // Clear only what was actually submitted. A value changed while the write
+    // was pending belongs to the next draft and must survive the previous save.
+    setAmount((current) => (current === submittedAmount ? "" : current));
+    setDescription((current) => (current === submittedDescription ? "" : current));
   }
 
-  function submitIncome(event: React.FormEvent) {
+  async function submitIncome(event: React.FormEvent) {
     event.preventDefault();
     const cents = dollarsToCents(Number(incomeAmount));
     if (cents === null) {
       setIncomeError("Enter the take-home amount.");
       return;
     }
+    const submittedName = incomeName;
+    const submittedPayday = payday;
     const result = addIncomeSchedule(state, {
       name: incomeName,
       amountCents: cents,
       frequency,
-      nextPayday: payday,
+      nextPayday: submittedPayday,
     });
     if (!result.ok) {
       setIncomeError(result.error);
       return;
     }
     setIncomeError(null);
-    setIncomeName("");
-    onEdit(result);
+    setPinnedPayday(submittedPayday);
+    const saved = await onEdit(result, "money:income");
+    if (!saved.ok) {
+      setIncomeError(saved.error);
+      return;
+    }
+    setIncomeError(null);
+    setPinnedPayday((current) => (current === submittedPayday ? null : current));
+    setIncomeName((current) => (current === submittedName ? "" : current));
   }
 
-  function submitReconcile(event: React.FormEvent) {
+  async function submitReconcile(event: React.FormEvent) {
     event.preventDefault();
+    if (reconcilePreviewUnavailable) {
+      // A difference computed from an unavailable basis could silently restore
+      // a stale balance. Refuse before parsing or building any write.
+      setReconcileError(RECONCILE_UNAVAILABLE_MESSAGE);
+      return;
+    }
     if (reconcileCents === null) {
       setReconcileError("Enter the balance you see, in dollars.");
       return;
     }
-    const result = reconcileBalance(state, reconcileCents, asOf);
+    const submittedDate = reconcileDate;
+    const result = reconcileBalance(state, reconcileCents, submittedDate);
     if (!result.ok) {
       setReconcileError(result.error);
       return;
     }
     setReconcileError(null);
-    onEdit(result);
+    setPinnedReconcileDate(submittedDate);
+    const saved = await onEdit(result, "money:reconcile");
+    if (!saved.ok) {
+      setReconcileError(saved.error);
+      return;
+    }
+    setReconcileError(null);
+    setPinnedReconcileDate((current) => (current === submittedDate ? null : current));
   }
 
   const rows = [...state.transactions].reverse();
 
   return (
-    <div className="space-y-6">
+    <fieldset disabled={saving} className="m-0 min-w-0 w-full space-y-6 border-0 p-0">
       <Panel
         title="What you have"
-        lede="This balance uses transactions dated today or earlier. Expected paychecks appear on their scheduled dates."
+        lede={startingBalanceCents === null
+          ? "The current cash summary is unavailable. Your recorded activity and open drafts are still available below."
+          : "This balance uses transactions dated today or earlier. Expected paychecks appear on their scheduled dates."}
       >
-        <p className="text-3xl font-semibold tabular-nums">{formatMoney(startingBalanceCents)}</p>
-        {matches ? (
+        {startingBalanceCents !== null && (
+          <p className="text-3xl font-semibold tabular-nums">{formatMoney(startingBalanceCents)}</p>
+        )}
+        {matches && startingBalanceCents !== null && (
           <p className="mt-2 text-sm text-muted">
             The ledger total of {formatMoney(state.current_balance_cents)} matches {state.transactions.length} recorded {state.transactions.length === 1 ? "transaction" : "transactions"}.
           </p>
-        ) : (
+        )}
+        {!matches && (
           <div className="mt-3">
             <Notice tone="danger" title="The balance and the transactions disagree">
               Recorded balance {formatMoney(state.current_balance_cents)}. Transaction sum{" "}
@@ -133,7 +209,7 @@ export function MoneyView({
             </Notice>
           </div>
         )}
-        {futureCount > 0 && (
+        {futureCount > 0 && startingBalanceCents !== null && (
           <p className="mt-3 text-sm text-muted">
             {futureCount} transaction{futureCount === 1 ? "" : "s"} dated after today {futureCount === 1 ? "is" : "are"} not
             treated as money already in hand. The plan starts from {formatMoney(startingBalanceCents)} and applies{" "}
@@ -173,7 +249,15 @@ export function MoneyView({
           </label>
           <label className="text-sm font-medium">
             Date
-            <input className={`${fieldClass} mt-1`} type="date" value={date} onChange={(e) => setDate(e.target.value)} />
+            <input
+              className={`${fieldClass} mt-1`}
+              type="date"
+              value={date}
+              onChange={(e) => {
+                setDate(e.target.value);
+                setPinnedDate(null);
+              }}
+            />
           </label>
           <label className="text-sm font-medium sm:col-span-2">
             Note
@@ -235,7 +319,15 @@ export function MoneyView({
           </label>
           <label className="text-sm font-medium">
             Next payday
-            <input className={`${fieldClass} mt-1`} type="date" value={payday} onChange={(e) => setPayday(e.target.value)} />
+            <input
+              className={`${fieldClass} mt-1`}
+              type="date"
+              value={payday}
+              onChange={(e) => {
+                setPayday(e.target.value);
+                setPinnedPayday(null);
+              }}
+            />
           </label>
           {incomeError && (
             <p className="text-sm text-danger sm:col-span-2" role="alert">
@@ -258,7 +350,7 @@ export function MoneyView({
               </div>
               <div className="flex items-center gap-3">
                 <span className="tabular-nums font-semibold">{formatMoney(income.amount_cents)}</span>
-                <Button type="button" variant="quiet" onClick={() => onEdit(removeIncome(state, income.id ?? ""))}>
+                <Button type="button" variant="quiet" onClick={() => void onEdit(removeIncome(state, income.id ?? ""))}>
                   Remove {income.name}
                 </Button>
               </div>
@@ -272,23 +364,39 @@ export function MoneyView({
         lede="If the cash you can actually use is different from this ledger, enter that balance. An adjustment is added so the transactions still add up. This does not contact a bank."
       >
         <form onSubmit={submitReconcile} className="max-w-md space-y-3">
+          {reconcilePreviewUnavailable && (
+            <Notice tone="warning" title="Balance match unavailable">
+              The current cash summary could not be checked, so no adjustment preview can be shown. Reconciliation is
+              disabled and your typed balance and date are kept. Nothing is submitted.
+            </Notice>
+          )}
           <label className="block text-sm font-medium">
             Balance you want recorded ($)
-            <input className={`${fieldClass} mt-1`} inputMode="decimal" value={reconcile} required onChange={(e) => setReconcile(e.target.value)} />
+            <input
+              className={`${fieldClass} mt-1`}
+              inputMode="decimal"
+              value={reconcile}
+              required
+              readOnly={reconcilePreviewUnavailable}
+              onChange={(e) => setReconcile(e.target.value)}
+            />
           </label>
-          {reconcileDiff !== null && reconcileDiff !== 0 && (
+          {reconcileDiff !== null && reconcileDiff !== 0 && Number.isSafeInteger(reconcileDiff) && (
             <p className="text-sm text-muted">
-              This will add an adjustment of {formatMoney(reconcileDiff)} dated {formatDateLabel(asOf)}.
+              This will add an adjustment of {formatMoney(reconcileDiff)} dated {formatDateLabel(reconcileDate)}.
             </p>
+          )}
+          {reconcileDiff === 0 && (
+            <p className="text-sm text-muted">This already matches the recorded balance. No adjustment will be added.</p>
           )}
           {reconcileError && (
             <p className="text-sm text-danger" role="alert">
               {reconcileError}
             </p>
           )}
-          <Button type="submit">Reconcile Ledger</Button>
+          <Button type="submit" disabled={reconcilePreviewUnavailable}>Reconcile Ledger</Button>
         </form>
       </Panel>
-    </div>
+    </fieldset>
   );
 }

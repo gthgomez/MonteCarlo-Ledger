@@ -11,24 +11,17 @@ const fixturePath = path.join(
   "cross-surface-household.json"
 );
 const doc = JSON.parse(fs.readFileSync(fixturePath, "utf8"));
-const evidenceDir = path.join(
-  __dirname,
-  "..",
-  "..",
-  "..",
-  "evidence",
-  "screenshots"
-);
-
 test.describe("cross-surface household rendered views", () => {
   test.use({ viewport: { width: 1280, height: 900 } });
 
   test("Home Money Budget Bills Plan Future show shared P10 and seed-bound figures", async ({
     page,
+    browser,
   }, testInfo) => {
     // Only run the desktop project for screenshots.
     test.skip(testInfo.project.name !== "desktop", "desktop screenshots only");
 
+    const evidenceDir = testInfo.outputPath("screenshots");
     fs.mkdirSync(evidenceDir, { recursive: true });
     await page.clock.install({ time: new Date(`${doc.as_of}T12:00:00.000Z`) });
     await page.addInitScript((ledger) => {
@@ -53,17 +46,24 @@ test.describe("cross-surface household rendered views", () => {
 
     const debtFreeLedger = JSON.parse(JSON.stringify(doc.ledger));
     delete debtFreeLedger.liabilities;
-    const debtFreePage = await page.context().newPage();
-    await debtFreePage.clock.install({ time: new Date(`${doc.as_of}T12:00:00.000Z`) });
-    await debtFreePage.addInitScript((ledger) => {
-      window.localStorage.setItem("montecarlo_ledger_state_v2", JSON.stringify(ledger));
-    }, debtFreeLedger);
-    await debtFreePage.goto("/");
-    await expect(debtFreePage.getByText("Safe to Spend (P10)")).toBeVisible();
-    await expect(debtFreePage.getByText("Calculation Failed")).toHaveCount(0);
-    const withoutDebt = await readCautiousAmount(debtFreePage);
-    expect(withoutDebt).toBeGreaterThan(withDebt);
-    await debtFreePage.close();
+    const debtFreeContext = await browser.newContext({
+      baseURL: testInfo.project.use.baseURL,
+      timezoneId: "UTC",
+    });
+    try {
+      const debtFreePage = await debtFreeContext.newPage();
+      await debtFreePage.clock.install({ time: new Date(`${doc.as_of}T12:00:00.000Z`) });
+      await debtFreePage.addInitScript((ledger) => {
+        window.localStorage.setItem("montecarlo_ledger_state_v2", JSON.stringify(ledger));
+      }, debtFreeLedger);
+      await debtFreePage.goto("/");
+      await expect(debtFreePage.getByText("Safe to Spend (P10)")).toBeVisible();
+      await expect(debtFreePage.getByText("Calculation Failed")).toHaveCount(0);
+      const withoutDebt = await readCautiousAmount(debtFreePage);
+      expect(withoutDebt).toBeGreaterThan(withDebt);
+    } finally {
+      await debtFreeContext.close();
+    }
     await page.screenshot({
       path: path.join(evidenceDir, "home.png"),
       fullPage: true,
@@ -192,11 +192,13 @@ test("move and record a generated bill without posting a duplicate", async ({ pa
   const firstBill = page.getByRole("listitem", { name: /^Internet due/ }).first();
   await firstBill.getByLabel(/^New date for Internet/).fill("2028-02-19");
   await firstBill.getByRole("button", { name: "Move", exact: true }).click();
-  await expect(firstBill.getByLabel(/^New date for Internet/)).toHaveValue("2028-02-19");
+  const movedBill = page.getByRole("listitem", { name: "Internet due Feb 19, 2028", exact: true });
+  // The draft input already displays the typed date; the row label only moves after the durable save.
+  await expect(movedBill).toBeVisible();
   await page.reload();
-  await expect(firstBill.getByLabel(/^New date for Internet/)).toHaveValue("2028-02-19");
-  await firstBill.getByRole("button", { name: "Mark paid" }).click();
-  await expect(firstBill.getByLabel(/^New date for Internet/)).not.toHaveValue("2028-02-19");
+  await expect(movedBill.getByLabel(/^New date for Internet/)).toHaveValue("2028-02-19");
+  await movedBill.getByRole("button", { name: "Mark paid" }).click();
+  await expect(movedBill).toHaveCount(0);
   await page.reload();
 
   const saved = await page.evaluate(() => JSON.parse(localStorage.getItem("montecarlo_ledger_state_v2") ?? "null"));

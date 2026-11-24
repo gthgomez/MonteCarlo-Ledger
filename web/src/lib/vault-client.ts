@@ -1,8 +1,10 @@
 import { decryptVault, deriveVaultKeys, encryptVault } from "./crypto";
+import { defaultLedgerLockManager, LEDGER_LOCK_NAME, LEDGER_STORAGE_KEY } from "./persistence";
 import { LedgerState } from "./types";
 import { parseLedgerState } from "./validate";
 import {
   SyncStorage,
+  VAULT_ID_STORAGE_KEY,
   commitSynchronizedState,
   defaultSyncStorage,
   localChangesSinceSync,
@@ -75,12 +77,33 @@ async function fetchMetadata(vaultId: string): Promise<VaultMetadata | null> {
 
 export interface PushOptions {
   storage?: SyncStorage | null;
+  /** The actual durable ledger shown in the initiating tab, not a reserialized snapshot. */
+  expectedLedgerRaw?: string | null;
 }
 
 export interface PushResult {
   revision: number;
   /** False when the server accepted the push but ancestry could not be persisted locally. */
   ancestryPersisted: boolean;
+  /**
+   * False when the upload succeeded but this browser could not record the vault
+   * selection. Only the vault id is remembered; the passphrase is never stored.
+   */
+  vaultIdPersisted: boolean;
+}
+
+interface StoredValue {
+  value: string | null;
+  readable: boolean;
+}
+
+function readStoredValue(storage: SyncStorage | null, key: string): StoredValue {
+  if (!storage) return { value: null, readable: false };
+  try {
+    return { value: storage.getItem(key), readable: true };
+  } catch {
+    return { value: null, readable: false };
+  }
 }
 
 export async function pushVault(
@@ -91,9 +114,82 @@ export async function pushVault(
 ): Promise<PushResult> {
   const storage =
     options.storage === undefined ? defaultSyncStorage() : options.storage;
+  const locks = options.expectedLedgerRaw === undefined ? null : defaultLedgerLockManager();
+  if (options.expectedLedgerRaw !== undefined && !locks) {
+    throw new VaultConflictError(
+      "This browser cannot check the saved ledger safely across tabs, so nothing was pushed."
+    );
+  }
+  const withLedgerLock = <T,>(readOrWrite: () => T): Promise<T> =>
+    locks ? locks.request(LEDGER_LOCK_NAME, { mode: "exclusive" }, readOrWrite) : Promise.resolve(readOrWrite());
+  // A tab must not borrow another tab's newer ancestry to upload its older displayed ledger.
+  // Capture the durable ledger, ancestry and current selection under the same lock that
+  // protects local restores, before any network waits.
+  const captured = await withLedgerLock(() => {
+    const ledger = readStoredValue(storage, LEDGER_STORAGE_KEY);
+    if (options.expectedLedgerRaw !== undefined &&
+        (!storage || !ledger.readable || ledger.value !== options.expectedLedgerRaw)) {
+      throw new VaultConflictError("The saved ledger changed in another tab. Reload and review it before pushing.");
+    }
+    const selected = readStoredValue(storage, VAULT_ID_STORAGE_KEY);
+    return {
+      record: readSyncRecord(vaultId, storage),
+      ledgerRaw: ledger.readable ? ledger.value : undefined,
+      selectedVaultId: selected.readable ? selected.value : undefined,
+    };
+  });
+
+  async function rememberPush(revision: number): Promise<PushResult> {
+    let ancestryPersisted = false;
+    let vaultIdPersisted = false;
+    try {
+      const recorded = await withLedgerLock(() => {
+        const latest = readSyncRecord(vaultId, storage);
+        // A pull in another tab may already have committed this revision or a later one.
+        const ancestry =
+          (latest !== null && latest.baseRevision >= revision) ||
+          commitSynchronizedState(vaultId, revision, state, storage);
+        if (!storage) return { ancestry, vaultIdPersisted: false };
+
+        const selected = readStoredValue(storage, VAULT_ID_STORAGE_KEY);
+        // Another tab already chose this same vault; nothing to write.
+        if (selected.readable && selected.value === vaultId) {
+          return { ancestry, vaultIdPersisted: true };
+        }
+        // A slower push must not replace a selection another tab made meanwhile,
+        // and it must not attach its id to a ledger this tab did not upload.
+        const ledger = readStoredValue(storage, LEDGER_STORAGE_KEY);
+        const selectionUnchanged =
+          captured.selectedVaultId !== undefined &&
+          selected.readable &&
+          selected.value === captured.selectedVaultId;
+        const ledgerUnchanged =
+          captured.ledgerRaw !== undefined &&
+          ledger.readable &&
+          ledger.value === captured.ledgerRaw;
+        if (!selectionUnchanged || !ledgerUnchanged) {
+          return { ancestry, vaultIdPersisted: false };
+        }
+        try {
+          storage.setItem(VAULT_ID_STORAGE_KEY, vaultId);
+          return {
+            ancestry,
+            vaultIdPersisted: storage.getItem(VAULT_ID_STORAGE_KEY) === vaultId,
+          };
+        } catch {
+          return { ancestry, vaultIdPersisted: false };
+        }
+      });
+      ancestryPersisted = recorded.ancestry;
+      vaultIdPersisted = recorded.vaultIdPersisted;
+    } catch {
+      // The upload succeeded even if local ancestry or the selection could not be recorded.
+    }
+    return { revision, ancestryPersisted, vaultIdPersisted };
+  }
+
   const metadata = await fetchMetadata(vaultId);
-  const record = readSyncRecord(vaultId, storage);
-  const plan = planPush(record, metadata !== null);
+  const plan = planPush(captured.record, metadata !== null);
   const plaintext = JSON.stringify(state);
 
   if (plan.mode === "conflict") {
@@ -130,18 +226,12 @@ export async function pushVault(
     }
     const data = await res.json();
     const revision = Number(data.revision ?? 1);
-    const ancestryPersisted = commitSynchronizedState(
-      vaultId,
-      revision,
-      state,
-      storage
-    );
-    return { revision, ancestryPersisted };
+    return rememberPush(revision);
   }
 
   // An existing vault: the only safe base is the revision this device synchronized with.
-  if (record === null) throw new VaultAncestryError();
-  if (metadata!.revision !== record.baseRevision) {
+  if (captured.record === null) throw new VaultAncestryError();
+  if (metadata!.revision !== captured.record.baseRevision) {
     // Do not substitute the server's latest revision: that is exactly how a stale
     // client overwrites changes it never observed.
     throw new VaultConflictError(
@@ -176,13 +266,7 @@ export async function pushVault(
   }
   const data = await res.json();
   const revision = Number(data.revision ?? plan.expectedRevision + 1);
-  const ancestryPersisted = commitSynchronizedState(
-    vaultId,
-    revision,
-    state,
-    storage
-  );
-  return { revision, ancestryPersisted };
+  return rememberPush(revision);
 }
 
 export interface PullOptions {

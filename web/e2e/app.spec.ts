@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { DEFAULT_ASSUMPTIONS } from "../src/lib/assumptions";
 import { LedgerState } from "../src/lib/types";
 import { SAMPLE_LEDGER_STATE } from "../src/lib/types";
 
@@ -136,6 +137,77 @@ test.describe("decision journeys", () => {
   });
 });
 
+test.describe("cash and uncertainty disclosures", () => {
+  test.use({ locale: "en-US", timezoneId: "UTC" });
+
+  test("a cash-only setup withholds advice but still shows the recorded balance", async ({ page }) => {
+    await page.goto("/");
+    await page.getByRole("button", { name: "Enter my own numbers" }).click();
+    await page.getByLabel("Money you have now ($)").fill("1000");
+    await page.getByRole("button", { name: "Save and show my plan" }).click();
+
+    const cash = page.getByRole("heading", { name: "Money available now" }).locator("..");
+    await expect(cash.getByText("$1,000.00", { exact: true })).toBeVisible();
+    await expect(page.getByText("Not enough information to suggest spending")).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Cautious amount to spend" })).toHaveCount(0);
+    await page.getByRole("button", { name: "Plan", exact: true }).click();
+    await expect(page.getByRole("rowheader", { name: "Ending balance if the schedule is exact" })).toBeVisible();
+    await expect(page.getByRole("rowheader", { name: "Chance of running short" })).toHaveCount(0);
+    await page.getByRole("button", { name: "Future", exact: true }).click();
+    await expect(page.getByText("Spending and risk estimates aren’t shown yet")).toBeVisible();
+    await expect(page.getByText("Possible futures")).toHaveCount(0);
+    await page.getByRole("button", { name: "Advanced", exact: true }).click();
+    await expect(page.getByLabel("Seed")).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Technical result" })).toHaveCount(0);
+  });
+
+  test("a debt extra is a one-time cash comparison, not a posted payment or overdraft claim", async ({ page }) => {
+    const asOf = "2026-11-10";
+    await page.clock.setFixedTime(new Date(`${asOf}T12:00:00Z`));
+    await page.addInitScript(({ ledger, assumptions }) => {
+      localStorage.setItem("montecarlo_ledger_state_v2", JSON.stringify(ledger));
+      localStorage.setItem("montecarlo_financial_assumptions", JSON.stringify(assumptions));
+    }, {
+      ledger: {
+        version: "2.2",
+        current_balance_cents: 100_000,
+        incomes: [],
+        payments: [
+          { id: "rent", name: "Rent", amount_cents: 60_000, recurrence: "Monthly", due_day: 11 },
+          { id: "loan-bill", name: "Loan bill", amount_cents: 20_000, recurrence: "Monthly", due_day: 12 },
+        ],
+        transactions: [{ id: 1, amount_cents: 100_000, type: "Adjustment", date: "2026-11-09" }],
+        bill_occurrences: [],
+        liabilities: [{
+          id: "loan", name: "Loan", balance_cents: 90_000, apr_basis_points: 0,
+          min_payment_cents: 20_000, due_day_of_month: 12, linked_payment_id: "loan-bill",
+        }],
+      },
+      assumptions: { ...DEFAULT_ASSUMPTIONS, horizonDays: 10, runs: 10, reserveCents: 10_000, surpriseProbabilityPpm: 0 },
+    });
+    await page.goto("/");
+    await expect(page.getByText("Known bills in the next 10 days total $800.00.", { exact: false })).toBeVisible();
+    const saved = await page.evaluate(() => localStorage.getItem("montecarlo_ledger_state_v2"));
+    await page.getByRole("button", { name: "Plan", exact: true }).click();
+    await page.getByRole("tab", { name: /How do I pay off debt/ }).click();
+    const amount = page.getByLabel("One-time extra payment ($)");
+    await amount.fill("150.005");
+    await page.getByRole("button", { name: "Compare with cash plan" }).click();
+    await expect(page.getByRole("alert").filter({ hasText: "at most two decimal places" })).toBeVisible();
+    await amount.fill("150");
+    await page.getByRole("button", { name: "Compare with cash plan" }).click();
+    await expect(page.getByRole("heading", { name: "If you make this extra payment" })).toBeVisible();
+    const table = page.getByRole("table", { name: "Current plan compared with this decision" });
+    const ending = table.getByRole("row", { name: /Ending balance/ }).getByRole("cell");
+    await expect(ending).toHaveText(["$200.00", "$50.00"]);
+    const cautious = table.getByRole("row", { name: /Cautious amount/ }).getByRole("cell");
+    await expect(cautious).toHaveText(["$100.00", "None ($50.00 below reserve)"]);
+    await expect(table.getByRole("row", { name: /Chance of running short/ }).getByRole("cell")).toHaveText(["0%", "0%"]);
+    await expect(page.getByText(/the other dated payments stay the same/i)).toBeVisible();
+    expect(await page.evaluate(() => localStorage.getItem("montecarlo_ledger_state_v2"))).toBe(saved);
+  });
+});
+
 test.describe("ledger editing", () => {
   test("adding a recurring bill updates the ledger and keeps a valid forecast", async ({ page }) => {
     await page.goto("/");
@@ -188,12 +260,50 @@ test.describe("local-first privacy", () => {
     });
 
     await page.goto("/");
-    await page.getByRole("button", { name: /Cloud Vault/ }).click();
-    await expect(page.getByText(/Cloud Vault & CLI Synchronization/)).toBeVisible();
-    await expect(page.getByText(/zero-knowledge end-to-end encryption/i)).toBeVisible();
+    const opener = page.getByRole("button", { name: /Cloud Vault/ });
+    await opener.focus();
+    await page.keyboard.press("Enter");
+    const dialog = page.getByRole("dialog", { name: "Cloud Vault & CLI Synchronization" });
+    await expect(dialog).toBeVisible();
+    await expect(dialog.getByRole("button", { name: "Close synchronization" })).toBeFocused();
+    await page.keyboard.press("Tab");
+    await expect(dialog.getByRole("button", { name: "Encrypted vault" })).toBeFocused();
+    await expect(page.getByText(/encrypts the ledger before sending it/i)).toBeVisible();
+    await expect(page.getByText(/Budget targets and forecast settings.*are not recovered from the vault/i)).toBeVisible();
+    await expect(page.getByLabel("Vault Secret Passphrase")).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(dialog).toHaveCount(0);
+    await expect(opener).toBeFocused();
     // Opening the optional sync surface must not by itself send the ledger anywhere.
     expect(vaultCalls).toEqual([]);
     await expect(page.getByText("Safe to Spend (P10)")).toBeVisible();
+  });
+
+  test("an already loaded plan can record spending offline and reload without the vault", async ({ page }) => {
+    const vaultCalls: string[] = [];
+    page.on("request", (request) => {
+      if (new URL(request.url()).pathname.startsWith("/api/vault")) vaultCalls.push(request.method());
+    });
+    await page.goto("/");
+    await page.getByRole("button", { name: "Enter my own numbers" }).click();
+    await page.getByLabel("Money you have now ($)").fill("250");
+    await page.getByRole("button", { name: "Save and show my plan" }).click();
+    await expect(page.getByText(/You have \$250\.00 recorded/)).toBeVisible();
+
+    await page.context().setOffline(true);
+    await page.getByRole("button", { name: "Money", exact: true }).click();
+    await page.getByRole("textbox", { name: "Amount ($)", exact: true }).fill("10.50");
+    await page.getByLabel("Category").fill("Offline groceries");
+    await page.getByRole("button", { name: "Record this" }).click();
+    const reconciled = page.getByText("The ledger total of $239.50 matches 2 recorded transactions.");
+    await expect(reconciled).toBeVisible();
+
+    // The app shell must be reachable for this reload; the vault is not used.
+    await page.context().setOffline(false);
+    await page.route("**/api/vault**", (route) => route.abort());
+    await page.reload();
+    await expect(reconciled).toBeVisible();
+    expect(vaultCalls).toEqual([]);
   });
 });
 
@@ -307,6 +417,10 @@ test.describe("beginner financial journey", () => {
       await otherTab.getByRole("button", { name: "Advanced", exact: true }).click();
       await otherTab.evaluate(({ key, legacy }) => localStorage.setItem(key, JSON.stringify(legacy)), { key, legacy });
       await expect(page.getByLabel(reserve)).toHaveValue("100.00");
+      // The seed above was injected from this tab, which does not receive its
+      // own storage event. Load the legacy bytes before explicitly editing them.
+      await otherTab.reload();
+      await expect(otherTab.getByLabel(reserve)).toHaveValue("100.00");
 
       const deliverQueuedEvent = () => page.evaluate(({ key, legacy }) => {
         window.dispatchEvent(new StorageEvent("storage", {
@@ -379,7 +493,9 @@ test.describe("beginner financial journey", () => {
     await expect(page.getByLabel("Reserve to subtract from the chosen low point ($)")).toHaveValue("125.00");
     expect(await page.evaluate(() => JSON.parse(localStorage.getItem("montecarlo_financial_assumptions") ?? "{}").schemaVersion)).toBeUndefined();
     await page.getByRole("button", { name: "Update results" }).click();
-    expect(await page.evaluate(() => JSON.parse(localStorage.getItem("montecarlo_financial_assumptions") ?? "{}").schemaVersion)).toBe(1);
+    await expect.poll(() => page.evaluate(() =>
+      JSON.parse(localStorage.getItem("montecarlo_financial_assumptions") ?? "{}").schemaVersion
+    )).toBe(1);
   });
 
   test("legacy startup cannot overwrite a newer explicit save in another tab", async ({ page }) => {
@@ -411,6 +527,7 @@ test.describe("beginner financial journey", () => {
     await otherTab.getByRole("button", { name: "Advanced", exact: true }).click();
     await otherTab.getByLabel("Reserve to subtract from the chosen low point ($)").fill("900");
     await otherTab.getByRole("button", { name: "Update results" }).click();
+    await expect(otherTab.getByLabel("Reserve to subtract from the chosen low point ($)")).toHaveValue("900.00");
     await page.evaluate(() => {
       const release = (window as Window & { __releaseLegacyWrite?: () => void }).__releaseLegacyWrite;
       release?.();

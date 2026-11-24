@@ -1,0 +1,278 @@
+{
+  "description": "W1 browser-acceptance household. Every amount below is an independently hand-derived integer cent value; dates are calendar days. The browser test enters these inputs through ordinary onboarding and form controls in a fresh context, never by injecting a ledger. With income, bill, and surprise variation at zero, all modeled low points equal the exact schedule, so the reserve-adjusted cautious amount is exactly the deterministic low minus the reserve. This fixture is not a replacement for the seeded parity fixtures.",
+  "as_of": "2026-03-10",
+  "clock_iso": "2026-03-10T12:00:00.000Z",
+  "timezone": "UTC",
+  "horizon_days": 90,
+  "window_end_exclusive": "2026-06-08",
+  "assumptions": {
+    "horizonDays": 90,
+    "runs": 500,
+    "seed": 7,
+    "quantile": "1/10",
+    "incomeVariationMin": 0,
+    "incomeVariationMax": 0,
+    "expenseVariationMin": 0,
+    "expenseVariationMax": 0,
+    "surpriseProbabilityPpm": 0,
+    "surpriseAmountMinCents": 2500,
+    "surpriseAmountMaxCents": 18000,
+    "surpriseIntervalDays": 14,
+    "reserveCents": 30000,
+    "zero_variance_note": "The unexpected-expense chance is 0%, and both income and bill ranges are 0..0. Each of the 500 modeled futures is therefore the exact schedule, so the 1/10 low is the deterministic low and the cautious amount is that low minus the $300.00 reserve."
+  },
+  "household": {
+    "opening_cash_cents": 234567,
+    "income": {
+      "name": "Synthetic Paycheck",
+      "amount_cents": 190000,
+      "frequency": "Monthly",
+      "next_payday": "2026-03-22"
+    },
+    "rent": {
+      "name": "Rent",
+      "amount_cents": 145000,
+      "due_day": 15,
+      "recurrence": "Monthly"
+    },
+    "car_payment": {
+      "name": "Car payment",
+      "amount_cents": 42000,
+      "due_day": 20,
+      "recurrence": "Monthly"
+    },
+    "linked_debt": {
+      "name": "Car loan",
+      "balance_cents": 600000,
+      "apr_basis_points": 0,
+      "min_payment_cents": 42000,
+      "kind": "installment",
+      "linked_payment_name": "Car payment",
+      "note": "The UI links the Car payment bill to this debt. The minimum is then covered by that bill's slots, so cash is reduced once, not twice."
+    }
+  },
+  "oracles": {
+    "after_onboarding_rent_only": {
+      "starting_balance_cents": 234567,
+      "events": [
+        { "date": "2026-03-15", "name": "Rent", "amount_cents": -145000, "running_balance_cents": 89567, "reason": "monthly rent due before the first paycheck" },
+        { "date": "2026-03-22", "name": "Synthetic Paycheck", "amount_cents": 190000, "running_balance_cents": 279567, "reason": "first scheduled receipt" },
+        { "date": "2026-04-15", "name": "Rent", "amount_cents": -145000, "running_balance_cents": 134567, "reason": "next monthly rent" },
+        { "date": "2026-04-22", "name": "Synthetic Paycheck", "amount_cents": 190000, "running_balance_cents": 324567, "reason": "next monthly receipt" },
+        { "date": "2026-05-15", "name": "Rent", "amount_cents": -145000, "running_balance_cents": 179567, "reason": "next monthly rent" },
+        { "date": "2026-05-22", "name": "Synthetic Paycheck", "amount_cents": 190000, "running_balance_cents": 369567, "reason": "last receipt inside the 90-day window" }
+      ],
+      "low_cents": 89567,
+      "low_date": "2026-03-15",
+      "low_date_label": "Mar 15, 2026",
+      "cautious_amount_cents": 59567,
+      "ending_balance_cents": 369567,
+      "next_30_days": {
+        "income_cents": 190000,
+        "outflow_cents": 145000,
+        "planned_ending_cents": 279567
+      },
+      "display": {
+        "money_available_now": "$2,345.67",
+        "cautious_amount": "$595.67",
+        "low": "$895.67",
+        "ending": "$3,695.67"
+      }
+    },
+    "after_car_payment_and_linked_debt": {
+      "starting_balance_cents": 234567,
+      "events": [
+        { "date": "2026-03-15", "name": "Rent", "amount_cents": -145000, "running_balance_cents": 89567, "reason": "rent on its original slot" },
+        { "date": "2026-03-20", "name": "Car payment", "amount_cents": -42000, "running_balance_cents": 47567, "reason": "linked bill slot; the debt minimum adds no second outflow" },
+        { "date": "2026-03-22", "name": "Synthetic Paycheck", "amount_cents": 190000, "running_balance_cents": 237567, "reason": "paycheck arrives after both obligations" },
+        { "date": "2026-04-15", "name": "Rent", "amount_cents": -145000, "running_balance_cents": 92567, "reason": "next monthly rent" },
+        { "date": "2026-04-20", "name": "Car payment", "amount_cents": -42000, "running_balance_cents": 50567, "reason": "next linked car bill" },
+        { "date": "2026-04-22", "name": "Synthetic Paycheck", "amount_cents": 190000, "running_balance_cents": 240567, "reason": "next monthly receipt" },
+        { "date": "2026-05-15", "name": "Rent", "amount_cents": -145000, "running_balance_cents": 95567, "reason": "next monthly rent" },
+        { "date": "2026-05-20", "name": "Car payment", "amount_cents": -42000, "running_balance_cents": 53567, "reason": "next linked car bill" },
+        { "date": "2026-05-22", "name": "Synthetic Paycheck", "amount_cents": 190000, "running_balance_cents": 243567, "reason": "last receipt inside the window" }
+      ],
+      "low_cents": 47567,
+      "low_date": "2026-03-20",
+      "low_date_label": "Mar 20, 2026",
+      "cautious_amount_cents": 17567,
+      "ending_balance_cents": 243567,
+      "next_30_days": {
+        "income_cents": 190000,
+        "outflow_cents": 187000,
+        "outflow_note": "Rent $1,450 + Car payment $420, not $2,290; the linked debt minimum is already covered by the bill.",
+        "planned_ending_cents": 237567
+      },
+      "display": {
+        "money_available_now": "$2,345.67",
+        "cautious_amount": "$175.67",
+        "low": "$475.67",
+        "ending": "$2,435.67"
+      }
+    },
+    "purchase_650_on_2026-03-12": {
+      "amount_cents": 65000,
+      "date": "2026-03-12",
+      "no_ledger_write": "This comparison is evaluated in memory only. The stored ledger string must be unchanged.",
+      "current_plan": {
+        "cautious_amount_cents": 17567,
+        "chance_of_running_short": "0%",
+        "low_cents": 47567,
+        "ending_cents": 243567
+      },
+      "this_decision": {
+        "cautious_amount_cents": -47433,
+        "chance_of_running_short": "100%",
+        "low_cents": -17433,
+        "low_date": "2026-03-20",
+        "ending_cents": 178567,
+        "derivation": "Every later exact-schedule balance drops by 65000 cents. The low becomes 47567 - 65000 = -17433; the cautious amount becomes -17433 - 30000 = -47433; the ending becomes 243567 - 65000 = 178567."
+      },
+      "display": {
+        "current_cautious": "$175.67",
+        "decision_cautious": "None ($474.33 below reserve)",
+        "current_low": "$475.67",
+        "decision_low": "-$174.33",
+        "current_ending": "$2,435.67",
+        "decision_ending": "$1,785.67"
+      }
+    },
+    "after_move_rent_to_2026-03-24": {
+      "starting_balance_cents": 234567,
+      "events": [
+        { "date": "2026-03-20", "name": "Car payment", "amount_cents": -42000, "running_balance_cents": 192567, "reason": "car bill fires before the paycheck" },
+        { "date": "2026-03-22", "name": "Synthetic Paycheck", "amount_cents": 190000, "running_balance_cents": 382567, "reason": "first receipt" },
+        { "date": "2026-03-24", "name": "Rent", "amount_cents": -145000, "running_balance_cents": 237567, "reason": "moved rent follows its new date, not 2026-03-15" },
+        { "date": "2026-04-15", "name": "Rent", "amount_cents": -145000, "running_balance_cents": 92567, "reason": "next monthly rent" },
+        { "date": "2026-04-20", "name": "Car payment", "amount_cents": -42000, "running_balance_cents": 50567, "reason": "new first low" },
+        { "date": "2026-04-22", "name": "Synthetic Paycheck", "amount_cents": 190000, "running_balance_cents": 240567, "reason": "next receipt" },
+        { "date": "2026-05-15", "name": "Rent", "amount_cents": -145000, "running_balance_cents": 95567, "reason": "next monthly rent" },
+        { "date": "2026-05-20", "name": "Car payment", "amount_cents": -42000, "running_balance_cents": 53567, "reason": "next car bill" },
+        { "date": "2026-05-22", "name": "Synthetic Paycheck", "amount_cents": 190000, "running_balance_cents": 243567, "reason": "last receipt inside the window" }
+      ],
+      "occurrence": {
+        "payment_id": "pmt-1",
+        "due_date": "2026-03-24",
+        "original_due_date": "2026-03-15",
+        "is_user_modified": true,
+        "paid": false
+      },
+      "low_cents": 50567,
+      "low_date": "2026-04-20",
+      "low_date_label": "Apr 20, 2026",
+      "cautious_amount_cents": 20567,
+      "ending_balance_cents": 243567,
+      "next_30_days": {
+        "income_cents": 190000,
+        "outflow_cents": 187000,
+        "planned_ending_cents": 237567
+      },
+      "display": {
+        "cautious_amount": "$205.67",
+        "low": "$505.67",
+        "ending": "$2,435.67"
+      },
+      "late_payday_3_days": {
+        "delay_days": 3,
+        "delayed_first_payday": "2026-03-25",
+        "no_ledger_write": "The Plan tab comparison is in memory only. The stored ledger string must be unchanged.",
+        "events": [
+          { "date": "2026-03-20", "name": "Car payment", "amount_cents": -42000, "running_balance_cents": 192567, "reason": "car bill still fires before the delayed receipt" },
+          { "date": "2026-03-24", "name": "Rent", "amount_cents": -145000, "running_balance_cents": 47567, "reason": "moved rent now lands before the delayed paycheck; this is the exact low" },
+          { "date": "2026-03-25", "name": "Synthetic Paycheck", "amount_cents": 190000, "running_balance_cents": 237567, "reason": "first receipt moved three days later" },
+          { "date": "2026-04-15", "name": "Rent", "amount_cents": -145000, "running_balance_cents": 92567, "reason": "next monthly rent" },
+          { "date": "2026-04-20", "name": "Car payment", "amount_cents": -42000, "running_balance_cents": 50567, "reason": "next car bill" },
+          { "date": "2026-04-22", "name": "Synthetic Paycheck", "amount_cents": 190000, "running_balance_cents": 240567, "reason": "next receipt" },
+          { "date": "2026-05-15", "name": "Rent", "amount_cents": -145000, "running_balance_cents": 95567, "reason": "next monthly rent" },
+          { "date": "2026-05-20", "name": "Car payment", "amount_cents": -42000, "running_balance_cents": 53567, "reason": "next car bill" },
+          { "date": "2026-05-22", "name": "Synthetic Paycheck", "amount_cents": 190000, "running_balance_cents": 243567, "reason": "last receipt inside the window" }
+        ],
+        "current_plan": {
+          "cautious_cents": 20567,
+          "chance_of_running_short": "0%",
+          "low_cents": 50567,
+          "low_date": "2026-04-20",
+          "ending_cents": 243567,
+          "display": {
+            "cautious": "$205.67",
+            "chance": "0%",
+            "low": "$505.67",
+            "ending": "$2,435.67"
+          }
+        },
+        "this_decision": {
+          "cautious_cents": 17567,
+          "chance_of_running_short": "0%",
+          "low_cents": 47567,
+          "low_date": "2026-03-24",
+          "ending_cents": 243567,
+          "display": {
+            "cautious": "$175.67",
+            "chance": "0%",
+            "low": "$475.67",
+            "ending": "$2,435.67"
+          }
+        },
+        "derivation": "Normal moved plan: car leaves 192567 on Mar 20, the Mar 22 paycheck arrives, and the Apr 20 car bill produces the 50567 low. With the first receipt delayed to Mar 25, Mar 24 rent lands on 192567 - 145000 = 47567, which is the new exact low on Mar 24. The ending is still 243567 because only the order of the same events changed. Reserve-adjusted amounts are 47567 - 30000 = 17567 delayed versus 50567 - 30000 = 20567 normal; both are positive, so both modeled shortfall shares remain 0%."
+      }
+    },
+    "after_marking_moved_rent_paid": {
+      "recorded_balance_cents": 89567,
+      "transaction": {
+        "amount_cents": -145000,
+        "type": "Expense",
+        "category": "Bills",
+        "date": "2026-03-10",
+        "description": "Rent"
+      },
+      "transaction_note": "Mark paid records the expense today (the fixed as-of date) while the occurrence keeps its moved due date.",
+      "events": [
+        { "date": "2026-03-20", "name": "Car payment", "amount_cents": -42000, "running_balance_cents": 47567, "reason": "the paid rent slot is no longer forecast" },
+        { "date": "2026-03-22", "name": "Synthetic Paycheck", "amount_cents": 190000, "running_balance_cents": 237567, "reason": "first receipt" },
+        { "date": "2026-04-15", "name": "Rent", "amount_cents": -145000, "running_balance_cents": 92567, "reason": "next monthly rent" },
+        { "date": "2026-04-20", "name": "Car payment", "amount_cents": -42000, "running_balance_cents": 50567, "reason": "next car bill" },
+        { "date": "2026-04-22", "name": "Synthetic Paycheck", "amount_cents": 190000, "running_balance_cents": 240567, "reason": "next receipt" },
+        { "date": "2026-05-15", "name": "Rent", "amount_cents": -145000, "running_balance_cents": 95567, "reason": "next monthly rent" },
+        { "date": "2026-05-20", "name": "Car payment", "amount_cents": -42000, "running_balance_cents": 53567, "reason": "next car bill" },
+        { "date": "2026-05-22", "name": "Synthetic Paycheck", "amount_cents": 190000, "running_balance_cents": 243567, "reason": "last receipt inside the window" }
+      ],
+      "occurrence": {
+        "due_date": "2026-03-24",
+        "original_due_date": "2026-03-15",
+        "paid": true
+      },
+      "low_cents": 47567,
+      "low_date": "2026-03-20",
+      "low_date_label": "Mar 20, 2026",
+      "cautious_amount_cents": 17567,
+      "ending_balance_cents": 243567,
+      "next_30_days": {
+        "income_cents": 190000,
+        "outflow_cents": 42000,
+        "outflow_note": "Only the car payment remains; the paid rent slot is not forecast.",
+        "planned_ending_cents": 237567
+      },
+      "display": {
+        "money_available_now": "$895.67",
+        "cautious_amount": "$175.67",
+        "low": "$475.67",
+        "ending": "$2,435.67"
+      }
+    }
+  },
+  "expected_saved_ledger": {
+    "version": "2.2",
+    "current_balance_cents": 89567,
+    "transaction_count": 2,
+    "liability_count": 1,
+    "rent_payment_id": "pmt-1",
+    "car_payment_id": "pmt-2",
+    "linked_liability": {
+      "name": "Car loan",
+      "linked_payment_id": "pmt-2",
+      "due_day_of_month": 20,
+      "min_payment_cents": 42000,
+      "balance_cents": 600000
+    }
+  }
+}

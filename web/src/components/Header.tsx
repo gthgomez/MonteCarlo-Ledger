@@ -10,9 +10,11 @@ interface HeaderProps {
   vaultId?: string;
   onOpenSync: () => void;
   onResetDemo: () => void;
-  onExportJson: () => void;
+  onExportJson?: () => void;
   section: Section;
   onNavigate: (section: Section) => void;
+  /** A ledger write is pending; navigation and replacement stay disabled until it settles. */
+  isSaving?: boolean;
 }
 
 export function Header({
@@ -25,35 +27,41 @@ export function Header({
   onExportJson,
   section,
   onNavigate,
+  isSaving = false,
 }: HeaderProps) {
   const themeLabel = theme === null ? "Theme" : theme === "dark" ? "Use light theme" : "Use dark theme";
   return (
-    <header className="sticky top-0 z-30 border-b border-line bg-surface">
+    <header aria-busy={isSaving || undefined} className="sticky top-0 z-30 border-b border-line bg-surface">
       <div className="mx-auto flex max-w-5xl flex-wrap items-center justify-between gap-3 px-4 py-3">
         <div className="min-w-0">
           <p className="text-lg font-semibold tracking-tight text-ink">MonteCarlo</p>
           <p className="text-sm text-muted">A plan for your money</p>
         </div>
         <div className="flex flex-wrap gap-2">
+          {/* Keep Sync focusable so the dialog can return focus after cancelling a queued restore. */}
           <button
             type="button"
             onClick={onOpenSync}
+            aria-disabled={isSaving || undefined}
             aria-label={isSynced && vaultId ? `Cloud Vault ${vaultId}` : "Cloud Vault"}
-            className="inline-flex min-h-11 items-center rounded-lg border border-line bg-inset px-3 text-sm font-semibold text-ink"
+            className="inline-flex min-h-11 items-center rounded-lg border border-line bg-inset px-3 text-sm font-semibold text-ink aria-disabled:opacity-50"
           >
             Sync
           </button>
-          <button
-            type="button"
-            onClick={onExportJson}
-            className="inline-flex min-h-11 items-center rounded-lg border border-line bg-inset px-3 text-sm font-semibold text-ink"
-          >
-            Export
-          </button>
+          {onExportJson && (
+            <button
+              type="button"
+              onClick={onExportJson}
+              className="inline-flex min-h-11 items-center rounded-lg border border-line bg-inset px-3 text-sm font-semibold text-ink"
+            >
+              Export
+            </button>
+          )}
           <button
             type="button"
             onClick={onResetDemo}
-            className="inline-flex min-h-11 items-center rounded-lg border border-line bg-inset px-3 text-sm font-semibold text-ink"
+            disabled={isSaving}
+            className="inline-flex min-h-11 items-center rounded-lg border border-line bg-inset px-3 text-sm font-semibold text-ink disabled:opacity-50"
           >
             Use sample
           </button>
@@ -76,8 +84,9 @@ export function Header({
                 key={item}
                 type="button"
                 aria-current={selected ? "page" : undefined}
+                disabled={isSaving}
                 onClick={() => onNavigate(item)}
-                className={`min-h-11 shrink-0 rounded-lg px-3 text-sm font-semibold ${
+                className={`min-h-11 shrink-0 rounded-lg px-3 text-sm font-semibold disabled:opacity-50 ${
                   selected ? "bg-accent text-on-accent" : "text-ink hover:bg-inset"
                 }`}
               >
