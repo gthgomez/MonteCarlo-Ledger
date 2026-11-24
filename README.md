@@ -3,7 +3,7 @@
 Monte Carlo Ledger is a local-first finance project focused on a more useful question than
 "what is my current balance?":
 
-> How much can I safely spend before my next paycheck, and how likely is that answer to hold up?
+> How much can I spend while keeping my reserve through the plan window, and how fragile is that plan under my assumptions?
 
 The project combines a ledger-first SQLite core, a deterministic cash-flow timeline, and a bounded
 Monte Carlo risk model. The result is a CLI and local API that feel practical to use while still
@@ -189,8 +189,9 @@ Imagine this setup:
 - a few expected but irregular expenses
 
 Monte Carlo Ledger builds the upcoming timeline, projects the balance path, finds the lowest point
-before the next income event, and then asks a second question: "what if reality is a little worse
-than the plan?" That is the point of the Monte Carlo layer.
+across the selected plan window, and then asks a second question: "what if reality is a little
+worse than the plan?" That is the point of the Monte Carlo layer. The result is a whole-window
+estimate, not an amount that is guaranteed until the next paycheck.
 
 ## Quality Gates
 

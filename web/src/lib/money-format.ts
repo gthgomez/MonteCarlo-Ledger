@@ -18,6 +18,8 @@ export function formatProbability(ppm: number): string {
   const percent = ppm / 10_000;
   if (percent === 0) return "0%";
   if (percent > 0 && percent < 0.1) return "under 0.1%";
+  if (percent >= 99.9 && percent < 100) return "over 99.9%";
+  if (percent >= 100) return "100%";
   const rounded = Math.round(percent * 10) / 10;
   if (Number.isInteger(rounded)) return `${rounded.toFixed(0)}%`;
   return `${rounded.toFixed(1)}%`;

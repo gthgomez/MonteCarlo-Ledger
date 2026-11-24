@@ -249,6 +249,11 @@ export function AdvancedView({
               : "No forecast is using these settings right now."}
         </p>
         <p className="mt-3 text-sm text-muted">
+          {assumptions.runs < 30 && (
+            <Notice tone="warning" title="Too few modeled futures">
+              Fewer than 30 futures cannot support a meaningful 10th or 90th percentile. Use at least 30 for a tail estimate.
+            </Notice>
+          )}
           This screen limits modeled futures to {UI_MAX_RUNS} so the page stays responsive. The engine can run more,
           but those extra runs are not offered here. A higher rank makes the cautious amount less cautious.
         </p>

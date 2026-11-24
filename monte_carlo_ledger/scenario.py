@@ -382,6 +382,18 @@ def build_scenario(
             liabilities, ledger["payments"], start, window_end, ledger["occurrences"]
         )
     )
+    # Canonicalize same-day ties by stable, surface-independent fields. The engine's
+    # input-order tie-breaker must not depend on SQL/array order: otherwise the same
+    # ledger could assign seeded bill/income draws differently on Web/Python.
+    events.sort(
+        key=lambda event: (
+            event["date"],
+            0 if event["type"] == "income" else 2 if event["type"] == "adjustment" else 1,
+            event.get("name") or "",
+            event["amount_cents"],
+            event.get("category") or "",
+        )
+    )
     starting_balance = ledger["starting_balance_cents"]
     scenario: Dict[str, Any] = {
         "contract_version": CONTRACT_VERSION,

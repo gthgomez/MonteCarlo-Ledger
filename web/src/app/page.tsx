@@ -43,6 +43,7 @@ import {
   transactionSumCents,
 } from "@/lib/present";
 import { evaluateLedger } from "@/lib/scenarios";
+import { projectedDebtMinimums } from "@/lib/scenario-builder";
 import { SECTION_LABEL, SECTION_QUESTION, sectionFromHash, type Section } from "@/lib/sections";
 import { PersistenceResult, VAULT_ID_STORAGE_KEY } from "@/lib/sync-state";
 import { SAMPLE_LEDGER_STATE, type LedgerState } from "@/lib/types";
@@ -323,6 +324,10 @@ export default function Home() {
   }, [showReadSettings]);
 
   const asOf = useFinancialDate();
+  const debtMinimums = useMemo(
+    () => projectedDebtMinimums(state, asOf, assumptions.horizonDays),
+    [state, asOf, assumptions.horizonDays]
+  );
 
   const settingsRecoveryMissing = settingsRecovery.status === "missing";
   const evaluation = useMemo(
@@ -832,20 +837,23 @@ export default function Home() {
     const { outcome, rows } = forecast;
     const previewDays = Math.min(30, assumptions.horizonDays);
     const slice = slicePlan(rows, asOf, previewDays, outcome.startingBalanceCents);
+    // The lead describes the same horizon that produced the cautious amount. A
+    // 30-day preview must never make a 90-day conclusion say "nothing scheduled".
+    const fullSlice = slicePlan(rows, asOf, assumptions.horizonDays, outcome.startingBalanceCents);
     const safeSpendCents = showGuidance ? outcome.safeSpendCents : null;
     const copy = describePosition({
       recordedBalanceCents: outcome.startingBalanceCents,
-      scheduledIncomeCents: slice.scheduledIncomeCents,
-      scheduledBillCents: slice.scheduledOutflowCents,
-      plannedEndingCents: slice.plannedEndingCents,
-      windowDays: previewDays,
+      scheduledIncomeCents: fullSlice.scheduledIncomeCents,
+      scheduledBillCents: fullSlice.scheduledOutflowCents,
+      plannedEndingCents: fullSlice.plannedEndingCents,
+      windowDays: assumptions.horizonDays,
       safeSpendCents,
       reserveCents: outcome.reserveCents,
       quantileNum: outcome.quantileNum,
       quantileDen: outcome.quantileDen,
       runs: outcome.runs,
       isDemo: usingDemo,
-      hasSchedule: slice.events.length > 0,
+      hasSchedule: fullSlice.events.length > 0,
     });
     const spendingNote =
       currentSpend.totalCents === 0 && previousSpend.totalCents === 0
@@ -862,7 +870,26 @@ export default function Home() {
       overdueCents: overdue.total_cents,
       overdueEarliest: overdue.earliest_date,
       firstNegativeDate: outcome.firstNegativeDate,
-      nextBill: rows.find((row) => row.amount_cents < 0) ?? null,
+      nextBill: (() => {
+        const keys = new Set(
+          debtMinimums.map((minimum) => `${minimum.date}|${minimum.name}|${minimum.amount_cents}`)
+        );
+        return rows.find(
+          (row) =>
+            row.amount_cents < 0 &&
+            !keys.has(`${row.date}|${row.name}|${row.amount_cents}`)
+        ) ?? null;
+      })(),
+      nextDebtMinimum: (() => {
+        const keys = new Set(
+          debtMinimums.map((minimum) => `${minimum.date}|${minimum.name}|${minimum.amount_cents}`)
+        );
+        return rows.find(
+          (row) =>
+            row.amount_cents < 0 &&
+            keys.has(`${row.date}|${row.name}|${row.amount_cents}`)
+        ) ?? null;
+      })(),
       spendingNote,
       overage: categoryOverages(currentSpend.byCategory, targets.categories)[0] ?? null,
       safeSpendCents,
@@ -886,6 +913,8 @@ export default function Home() {
       assumptionsChanged,
       horizonDays: assumptions.horizonDays,
       reserveCents: assumptions.reserveCents,
+      quantileNum: assumptions.quantileNum,
+      quantileDen: assumptions.quantileDen,
       runs: outcome.runs,
     };
   }
@@ -1033,6 +1062,7 @@ export default function Home() {
                 horizonDays={assumptions.horizonDays}
                 assumptions={assumptions}
                 overdue={overdue}
+                debtMinimums={debtMinimums}
                 onEdit={onEdit}
                 onDiscardDraft={discardFailedDraft}
               />

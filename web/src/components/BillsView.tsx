@@ -20,6 +20,7 @@ import { type PlanSlice } from "@/lib/present";
 import {
   paymentOccurrenceKey,
   projectBillPayments,
+  type ProjectedDebtMinimum,
   unresolvedPastOneTimeSlots,
 } from "@/lib/scenario-builder";
 import type { PersistenceResult } from "@/lib/sync-state";
@@ -71,6 +72,7 @@ export function BillsView({
   horizonDays,
   assumptions,
   overdue,
+  debtMinimums,
   onEdit,
   onDiscardDraft,
 }: {
@@ -80,6 +82,7 @@ export function BillsView({
   horizonDays: number;
   assumptions: Assumptions;
   overdue: OverdueAssessment;
+  debtMinimums: ProjectedDebtMinimum[];
   onEdit: (result: EditResult, draftKey?: string) => Promise<PersistenceResult>;
   onDiscardDraft: (draftKey: string) => void;
 }) {
@@ -125,8 +128,26 @@ export function BillsView({
     ),
     [state, asOf]
   );
-  const upcoming = slice?.events.filter((event) => event.amount_cents < 0);
-  const hasDebtMinimum = upcoming?.some((event) => event.category === "debt-minimum") ?? false;
+  const upcoming = useMemo(() => {
+    const events = (slice?.events ?? []).filter((event) => event.amount_cents < 0);
+    // Remove exactly as many rows as the debt projection accounts for. Matching on
+    // date/name/amount keeps two independently entered obligations from collapsing.
+    const remaining = new Map<string, number>();
+    const keyOf = (date: string, name: string, amount: number) => `${date}|${name}|${amount}`;
+    for (const minimum of debtMinimums) {
+      const key = keyOf(minimum.date, minimum.name, minimum.amount_cents);
+      remaining.set(key, (remaining.get(key) ?? 0) + 1);
+    }
+    return events.filter((event) => {
+      const key = keyOf(event.date, event.name, event.amount_cents);
+      const count = remaining.get(key) ?? 0;
+      if (count === 0) return true;
+      if (count === 1) remaining.delete(key);
+      else remaining.set(key, count - 1);
+      return false;
+    });
+  }, [slice, debtMinimums]);
+  const hasDebtMinimum = debtMinimums.length > 0;
   // The fallback list is only for drafts whose slot is no longer projected. It
   // deliberately does not add cash events, expose Mark paid, or widen a window.
   const projectedRowKeys = new Set(
@@ -318,12 +339,6 @@ export function BillsView({
         title="Payments coming up"
         lede={`These are bills and required debt minimums on the schedule for the next ${horizonDays} days. Nothing here has been marked paid.`}
       >
-        {hasDebtMinimum && (
-          <p className="mb-3 text-sm text-muted">
-            A debt minimum comes from the balance, minimum payment, and due day recorded in Plan, not from a bill in
-            this section. To change it, update the debt in Plan. A debt with no due day is assumed to be due on the 1st.
-          </p>
-        )}
         {billsVary ? (
           <p className="mb-3 text-sm text-muted">
             Advanced assumptions allow bill amounts to vary, so modeled futures can differ from these figures. The
@@ -341,8 +356,7 @@ export function BillsView({
                 <div>
                   <p className="font-medium">{event.name}</p>
                   <p className="text-muted">
-                    {formatDateLabel(event.date)} · {relativeDay(asOf, event.date)} ·{" "}
-                    {event.category === "debt-minimum" ? "required debt minimum from Plan" : "amount you entered"}
+                    {formatDateLabel(event.date)} · {relativeDay(asOf, event.date)} · amount you entered
                   </p>
                 </div>
                 <div className="text-left sm:text-right">
@@ -357,6 +371,29 @@ export function BillsView({
           </ul>
         )}
       </Panel>}
+
+      {hasDebtMinimum && (
+        <Panel
+          title="Required debt minimums"
+          lede="These amounts come from the balance, minimum payment, and due day recorded in Plan. They are not bills entered in this section, and changing a bill here does not change them."
+        >
+          <ul className="divide-y divide-line">
+            {debtMinimums.map((minimum, index) => (
+              <li key={`${minimum.liability_id}-${minimum.date}-${index}`} className="grid gap-1 py-3 text-sm sm:grid-cols-[1fr_auto]">
+                <div>
+                  <p className="font-medium">{minimum.name}</p>
+                  <p className="text-muted">
+                    {formatDateLabel(minimum.date)} · {relativeDay(asOf, minimum.date)} · required debt minimum
+                    {minimum.due_day_of_month === null ? " (no due day set; assumed the 1st)" : ` · due day ${minimum.due_day_of_month}`}
+                  </p>
+                </div>
+                <p className="tabular-nums font-semibold sm:text-right">{formatMoney(-minimum.amount_cents)}</p>
+              </li>
+            ))}
+          </ul>
+          <p className="mt-3 text-sm text-muted">Update the debt in Plan. A debt with no due day is assumed to be due on the 1st.</p>
+        </Panel>
+      )}
 
       <Panel title="Recurring bills" lede="Add a payment you make regularly. Deleting it removes it from the plan. It does not cancel a payment at a bank.">
         <form onSubmit={submit} className="grid gap-3 sm:grid-cols-2">

@@ -287,8 +287,8 @@ def simulate_purchase(
 ) -> Dict[str, Any]:
     """Compare baseline vs a one-time purchase on ``purchase_date``.
 
-    Expense variation is forced off so the only difference between the two runs is
-    the purchase itself (the purchase event consumes no RNG draws).
+    The purchase is fixed and consumes no RNG draw; other bills keep the caller's
+    expense variation. This matches the Web what-if and isolates the decision.
     """
     _require_positive_int(amount_cents, "amount_cents")
     if amount_cents > MAX_AMOUNT_CENTS:
@@ -307,10 +307,7 @@ def simulate_purchase(
             f"purchase_date {purchase_date} is outside "
             f"[{as_of}, {(window_end).isoformat()})",
         )
-    overrides = dict(sim or {})
-    overrides.setdefault("expense_variation_min", 0)
-    overrides.setdefault("expense_variation_max", 0)
-    params = _sim(overrides)
+    params = _sim(dict(sim or {}))
     view = _view_for(as_of, horizon_days)
 
     baseline = run_scenario(_build(as_of, horizon_days, dict(params), ledger=view))
@@ -320,6 +317,9 @@ def simulate_purchase(
         "amount_cents": -amount_cents,
         "type": "expense",
         "name": "Planned purchase",
+        # The amount and date are the decision variables. Keeping other bill
+        # variation intact and consuming no draw matches the Web what-if.
+        "fixed": True,
     })
     with_purchase = run_scenario(with_purchase_scenario)
     return _attach_ledger(

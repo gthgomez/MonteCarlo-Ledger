@@ -28,6 +28,9 @@ test("probability text does not round a tiny chance to 0.0%", () => {
   assert.equal(formatProbability(50), "under 0.1%");
   assert.equal(formatProbability(150_000), "15%");
   assert.equal(formatProbability(5_000), "0.5%");
+  assert.equal(formatProbability(999_500), "over 99.9%");
+  assert.equal(formatProbability(999_999), "over 99.9%");
+  assert.equal(formatProbability(1_000_000), "100%");
 });
 
 test("plan slice uses contract rows and does not invent events", () => {

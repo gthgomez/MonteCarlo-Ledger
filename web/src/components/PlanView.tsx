@@ -2,7 +2,7 @@
 
 import React, { useMemo, useState } from "react";
 import { amortize } from "@/contract/debt";
-import { type Assumptions } from "@/lib/assumptions";
+import { cautiousAmountHeading, type Assumptions } from "@/lib/assumptions";
 import { addDaysIso } from "@/lib/dates";
 import {
   addInstallmentDebt,
@@ -80,7 +80,7 @@ function Compare({
   const compared = next.outcome;
   const rows = [
     ...(showGuidance ? [
-      ["Cautious amount to spend", formatCautiousSpend(base.safeSpendCents, base.reserveCents), formatCautiousSpend(compared.safeSpendCents, compared.reserveCents)],
+      [cautiousAmountHeading(base.quantileNum, base.quantileDen), formatCautiousSpend(base.safeSpendCents, base.reserveCents), formatCautiousSpend(compared.safeSpendCents, compared.reserveCents)],
       ["Chance of running short", formatProbability(base.overdraftPpm), formatProbability(compared.overdraftPpm)],
     ] : []),
     ["Lowest point if the schedule is exact", formatMoney(base.projectedLowCents), formatMoney(compared.projectedLowCents)],

@@ -217,7 +217,8 @@ def expand(scenario: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], date, int, d
         events.append(
             {"date": d, "amount": ev["amount_cents"], "type": ev["type"],
              "sequence": seq, "order": index, "name": ev.get("name", ""),
-             "category": ev.get("category")}
+             "category": ev.get("category"),
+             **({"fixed": True} if ev.get("fixed") is True else {})}
         )
         order = index + 1
 
@@ -385,6 +386,8 @@ def _simulate_once(
     emin, emax = p["expense_variation_min"], p["expense_variation_max"]
     category_ranges: Dict[str, Tuple[int, int]] = p["expense_category_variation"]
     for ev in scenario:
+        if ev.get("fixed"):
+            continue
         if ev["type"] == "income":
             if imin != 0 or imax != 0:
                 pct = rng.next_int(imin, imax)

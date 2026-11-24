@@ -68,6 +68,14 @@ export function nextIncomeDate(income: IncomeItem, asOf: string): string {
   return current;
 }
 
+export interface ProjectedDebtMinimum {
+  liability_id: string;
+  name: string;
+  date: string;
+  amount_cents: number;
+  due_day_of_month: number | null;
+}
+
 export interface ProjectedBillSlot {
   payment: PaymentItem;
   slotDate: string;
@@ -140,7 +148,12 @@ export function firstOneTimeBillOutsideWindow(state: BillInputs, windowEnd: stri
 }
 
 /** One occurrence model for cash events and editable bill rows. */
-export function projectBillPayments(state: LedgerState, asOf: string, windowEnd: string) {
+export function projectBillPayments(
+  state: LedgerState,
+  asOf: string,
+  windowEnd: string,
+  fixedPaymentIds?: ReadonlySet<string>
+) {
   const events: { date: string; amount_cents: number; type: "expense"; name: string }[] = [];
   const slots: ProjectedBillSlot[] = [];
   const paymentById = new Map(state.payments.map((p) => [String(p.id), p] as const));
@@ -185,6 +198,7 @@ export function projectBillPayments(state: LedgerState, asOf: string, windowEnd:
               amount_cents: -pmt.amount_cents,
               type: "expense",
               name: pmt.name,
+              ...(fixedPaymentIds?.has(String(pmt.id)) ? { fixed: true } : {}),
             });
           }
         }
@@ -204,6 +218,7 @@ export function projectBillPayments(state: LedgerState, asOf: string, windowEnd:
               amount_cents: -pmt.amount_cents,
               type: "expense",
               name: pmt.name,
+              ...(fixedPaymentIds?.has(String(pmt.id)) ? { fixed: true } : {}),
             });
           }
         }
@@ -230,7 +245,8 @@ export function buildScenarioFromLedger(
   state: LedgerState,
   asOf: string,
   horizonDays: number = 90,
-  includeSimulation?: any
+  includeSimulation?: any,
+  options?: { fixedPaymentIds?: ReadonlySet<string> }
 ): any {
   const paymentIds = new Set(state.payments.map((payment) => String(payment.id)));
   const ownedPayments = new Set<string>();
@@ -278,7 +294,7 @@ export function buildScenarioFromLedger(
     }
   }
 
-  const bills = projectBillPayments(state, asOf, windowEnd);
+  const bills = projectBillPayments(state, asOf, windowEnd, options?.fixedPaymentIds);
   events.push(...bills.events);
 
   // 3. Future-dated posted transactions are events, not opening cash.
@@ -300,6 +316,21 @@ export function buildScenarioFromLedger(
   events.push(...liabilityMinPaymentEvents(
     state.liabilities ?? [], state.payments, state.bill_occurrences, state.transactions, bills.generated, asOf, windowEnd,
   ));
+
+  // Canonicalize same-day ties by stable, surface-independent fields. The engine's
+  // input-order tie-breaker must not depend on an array/DB order: otherwise the
+  // same ledger could assign seeded bill/income draws differently on Web/Python.
+  events.sort((left, right) => {
+    const byDate = left.date.localeCompare(right.date);
+    if (byDate !== 0) return byDate;
+    const leftRank = left.type === "income" ? 0 : left.type === "adjustment" ? 2 : 1;
+    const rightRank = right.type === "income" ? 0 : right.type === "adjustment" ? 2 : 1;
+    if (leftRank !== rightRank) return leftRank - rightRank;
+    const byName = String(left.name).localeCompare(String(right.name));
+    if (byName !== 0) return byName;
+    if (left.amount_cents !== right.amount_cents) return left.amount_cents - right.amount_cents;
+    return String(left.category ?? "").localeCompare(String(right.category ?? ""));
+  });
 
   const futureOutflow = state.transactions
     .filter((tx) => tx.date > asOf)
@@ -402,7 +433,8 @@ function liabilityMinPaymentEvents(
   transactions: { id?: number | string; amount_cents: number }[],
   generatedSlots: ReadonlySet<string>,
   asOf: string,
-  windowEnd: string
+  windowEnd: string,
+  onEvent?: (detail: ProjectedDebtMinimum) => void
 ): any[] {
   const paymentById = new Map(payments.map((payment) => [String(payment.id), payment] as const));
   const occurrenceSlots = new Map<string, Map<string, typeof occurrences[number]>>();
@@ -493,17 +525,60 @@ function liabilityMinPaymentEvents(
         const shortfall = Math.max(0, amount - coveredCents);
         const principalReduction = paidCoverage ? shortfall : amount;
         if (eventDate < windowEnd && shortfall > 0) {
-          events.push({ date: eventDate, amount_cents: -shortfall, type: "expense", name, category: "debt-minimum" });
+          events.push({ date: eventDate, amount_cents: -shortfall, type: "expense", name });
+          onEvent?.({
+            liability_id: String(liability.id),
+            name,
+            date: eventDate,
+            amount_cents: -shortfall,
+            due_day_of_month: liability.due_day_of_month ?? null,
+          });
         }
         if (eventDate < windowEnd) remainingBalance -= principalReduction;
         continue;
       }
       if (eventDate < windowEnd) {
-        events.push({ date: eventDate, amount_cents: -amount, type: "expense", name, category: "debt-minimum" });
+        events.push({ date: eventDate, amount_cents: -amount, type: "expense", name });
+        onEvent?.({
+          liability_id: String(liability.id),
+          name,
+          date: eventDate,
+          amount_cents: -amount,
+          due_day_of_month: liability.due_day_of_month ?? null,
+        });
         remainingBalance -= amount;
       }
       if (`${curY}-${String(actualM).padStart(2, "0")}-01` >= windowEnd) break;
     }
   }
   return events;
+}
+
+/**
+ * The same debt-minimum cash events the forecast includes, exposed for honest
+ * presentation. This calls the one projection routine; it is not a second model.
+ */
+export function projectedDebtMinimums(
+  state: LedgerState,
+  asOf: string,
+  horizonDays: number
+): ProjectedDebtMinimum[] {
+  const windowEnd = addDays(asOf, horizonDays);
+  const bills = projectBillPayments(state, asOf, windowEnd);
+  const details: ProjectedDebtMinimum[] = [];
+  liabilityMinPaymentEvents(
+    state.liabilities ?? [],
+    state.payments,
+    state.bill_occurrences,
+    state.transactions,
+    bills.generated,
+    asOf,
+    windowEnd,
+    (detail) => details.push(detail)
+  );
+  return details.sort(
+    (left, right) =>
+      left.date.localeCompare(right.date) ||
+      left.liability_id.localeCompare(right.liability_id)
+  );
 }

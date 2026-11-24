@@ -11,7 +11,6 @@ export interface TimelineLike {
   type: string;
   amount_cents: number;
   balance_after_cents: number;
-  category?: string;
 }
 
 /** When to withhold modeled spending advice while still showing the known schedule. */
@@ -275,11 +274,11 @@ export function describePosition(input: {
     input.safeSpendCents === null
       ? ""
       : input.safeSpendCents >= 0
-        ? ` The cautious amount you could spend is ${formatMoney(input.safeSpendCents)}.`
+        ? ` The ${input.quantileNum === 1 && input.quantileDen === 10 ? "cautious amount" : `rank ${input.quantileNum}/${input.quantileDen} amount`} you could spend over the ${input.windowDays}-day plan is ${formatMoney(input.safeSpendCents)}.`
         : input.reserveCents > 0
           ? ` In the ${rank} of modeled outcomes, you are short of your reserve by ${formatMoney(-input.safeSpendCents)}, so there is no cautious amount left to spend.`
           : ` In the ${rank} of modeled outcomes, the low point is ${formatMoney(input.safeSpendCents)} (below zero), so there is no cautious amount left to spend.`;
-  let caution = `The cautious amount is the ${rank} of the lowest balances in ${input.runs} modeled futures, minus a reserve of ${formatMoney(input.reserveCents)}. It is an estimate from the assumptions in Advanced, not a guarantee and not your bank balance.`;
+  let caution = `The amount is the ${rank} of the lowest balances in ${input.runs} modeled futures, minus a reserve of ${formatMoney(input.reserveCents)}. About ${Math.round((input.quantileNum / input.quantileDen) * 100)}% of modeled low points are at or below it; spending it would leave those futures at or below your reserve. It is an estimate from the assumptions in Advanced, not a guarantee and not your bank balance.`;
   if (input.reserveCents === 0 && input.safeSpendCents !== null) {
     caution += ` With no reserve set, it matches that modeled low point.`;
   }
@@ -312,6 +311,7 @@ export function buildInsights(input: {
   overdueEarliest: string | null;
   firstNegativeDate: string | null;
   nextBill: TimelineLike | null;
+  nextDebtMinimum?: TimelineLike | null;
   spendingNote: string | null;
   overage: CategoryOverage | null;
   safeSpendCents: number | null;
@@ -360,19 +360,21 @@ export function buildInsights(input: {
     });
   }
   if (input.nextBill && input.nextBill.amount_cents < 0) {
-    const isDebtMinimum = input.nextBill.category === "debt-minimum";
     insights.push({
-      id: isDebtMinimum ? "next-debt-minimum" : "next-bill",
+      id: "next-bill",
       tone: "info",
-      title: isDebtMinimum
-        ? `${input.nextBill.name} minimum payment is due ${relativeDay(input.asOf, input.nextBill.date)}`
-        : `${input.nextBill.name} is due ${relativeDay(input.asOf, input.nextBill.date)}`,
-      detail: isDebtMinimum
-        ? `${formatMoney(-input.nextBill.amount_cents)} on ${input.nextBill.date}, based on the balance and minimum in Plan. It is already included in the plan. Change the debt there, not in Bills.`
-        : `${formatMoney(-input.nextBill.amount_cents)} on ${input.nextBill.date}. This bill is already included in the plan. Recording it as paid is a separate step.`,
-      action: isDebtMinimum
-        ? { label: "Review debt", section: "plan" }
-        : { label: "See bills", section: "bills" },
+      title: `${input.nextBill.name} is due ${relativeDay(input.asOf, input.nextBill.date)}`,
+      detail: `${formatMoney(-input.nextBill.amount_cents)} on ${input.nextBill.date}. This bill is already included in the plan. Recording it as paid is a separate step.`,
+      action: { label: "See bills", section: "bills" },
+    });
+  }
+  if (input.nextDebtMinimum && input.nextDebtMinimum.amount_cents < 0) {
+    insights.push({
+      id: "next-debt-minimum",
+      tone: "info",
+      title: `${input.nextDebtMinimum.name} minimum payment is due ${relativeDay(input.asOf, input.nextDebtMinimum.date)}`,
+      detail: `${formatMoney(-input.nextDebtMinimum.amount_cents)} on ${input.nextDebtMinimum.date}, based on the balance and minimum in Plan. It is already included in the plan. Change the debt there, not in Bills.`,
+      action: { label: "Review debt", section: "plan" },
     });
   }
   if (input.spendingNote) {
@@ -424,7 +426,7 @@ export function buildInsights(input: {
       id: "model-clear",
       tone: "ok",
       title: "None of these modeled futures went negative",
-      detail: `That is ${input.runs} futures under the current assumptions. It is not a guarantee. Income and surprise expenses only move inside the ranges in Advanced.`,
+      detail: `That is ${input.runs} modeled ${input.runs === 1 ? "future" : "futures"} under the current assumptions. It is not a guarantee. Income, bills, and surprise expenses only move inside the ranges in Advanced.`,
       action: { label: "Check assumptions", section: "advanced" },
     });
   }

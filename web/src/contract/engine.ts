@@ -1,6 +1,7 @@
 /**
  * Pure, clock-free reference engine for MonteCarlo Contract 1.0 - 2.0.
- * Bit-for-bit conformant with Python reference engine.
+ * Conformant with the Python reference engine inside the Web safe-integer domain
+ * (|cents| <= 2^53-1). Python additionally supports the full signed int64 range.
  */
 
 import { amortize, validateLiabilities } from "./debt";
@@ -232,6 +233,8 @@ export interface InternalEvent {
   order: number;
   name: string;
   category?: string;
+  /** Web-local what-if flag: this event is not varied or charged a random draw. */
+  fixed?: boolean;
 }
 
 export function expand(scenario: any): {
@@ -272,6 +275,7 @@ export function expand(scenario: any): {
       order: index,
       name: ev.name ?? "",
       category: ev.category,
+      ...(ev.fixed === true ? { fixed: true } : {}),
     });
     order = index + 1;
   }
@@ -353,8 +357,6 @@ export interface TimelineRow {
   sequence: number;
   amount_cents: number;
   balance_after_cents: number;
-  /** Presentation-only source tag; never part of the contract result. */
-  category?: string;
 }
 
 /**
@@ -375,7 +377,6 @@ export function timelineRows(scenario: any): TimelineRow[] {
       sequence: ev.sequence,
       amount_cents: toSafeNumber(ev.amount),
       balance_after_cents: toSafeNumber(balance),
-      ...(ev.category === undefined ? {} : { category: ev.category }),
     });
   }
   return rows;
@@ -425,8 +426,7 @@ function simulateOnce(
   horizon: number,
   windowEnd: Date,
   p: any,
-  rng: SplitMix64,
-  fixedDraftExpenseCategory?: string
+  rng: SplitMix64
 ): any {
   const scenario: InternalEvent[] = base.map((e) => ({ ...e }));
   const imin = p.income_variation_min;
@@ -436,10 +436,9 @@ function simulateOnce(
   const categoryRanges: Map<string, [number, number]> = p.expense_category_variation;
 
   for (const ev of scenario) {
-    // The fixed Web draft is present in this cash path but has no random draw.
-    // All shared contract scenarios still follow the canonical draw order below.
-    if (fixedDraftExpenseCategory !== undefined &&
-        ev.type === "expense" && ev.category === fixedDraftExpenseCategory) continue;
+    // Web-local what-if rows carry a fixed amount. They are present in this cash
+    // path but consume no draw, so other bills and surprises keep their sequence.
+    if (ev.fixed) continue;
     if (ev.type === "income") {
       if (imin !== 0 || imax !== 0) {
         const pct = BigInt(rng.nextInt(imin, imax));
@@ -519,7 +518,7 @@ function validateSimulationParams(p: any): void {
   simInt(p, "reserve_cents", "INVALID_AMOUNT", 0, Number.MAX_SAFE_INTEGER);
 }
 
-function runExpandedScenario(scenario: any, fixedDraftExpenseCategory?: string): any {
+function runExpandedScenario(scenario: any): any {
   const { events, asOf, horizon, windowEnd } = expand(scenario);
   const base = sortEvents(events);
   const start = BigInt(requireCents(scenario.starting_balance_cents, "starting_balance_cents"));
@@ -561,7 +560,7 @@ function runExpandedScenario(scenario: any, fixedDraftExpenseCategory?: string):
   let negativeRuns = 0;
 
   for (let r = 0; r < p.runs; r++) {
-    const outcome = simulateOnce(base, start, asOf, horizon, windowEnd, p, rng, fixedDraftExpenseCategory);
+    const outcome = simulateOnce(base, start, asOf, horizon, windowEnd, p, rng);
     endings.push(outcome.ending_balance_cents);
     minimums.push(outcome.minimum_balance_cents);
     if (outcome.first_negative_date !== null) {
@@ -595,11 +594,6 @@ function runExpandedScenario(scenario: any, fixedDraftExpenseCategory?: string):
 
 export function runScenario(scenario: any): any {
   return runExpandedScenario(scenario);
-}
-
-/** Web-local what-if only: keep one draft category fixed without shifting any bill or surprise draws. */
-export function runScenarioWithFixedDraftExpense(scenario: any, category: string): any {
-  return runExpandedScenario(scenario, category);
 }
 
 export function runScenarioSafe(scenario: any): any {

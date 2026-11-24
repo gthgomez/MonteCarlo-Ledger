@@ -86,8 +86,8 @@ console.log(JSON.stringify({
     projected_low_cents: result.forecast.minimum_balance_cents,
     projected_low_date: result.forecast.minimum_balance_date,
     ending_balance_cents: result.forecast.ending_balance_cents,
-    debt_months_to_payoff: result.debt.months_to_payoff,
-    debt_total_interest_cents: result.debt.total_interest_cents,
+    debt_months_to_payoff: result.debt?.months_to_payoff ?? null,
+    debt_total_interest_cents: result.debt?.total_interest_cents ?? null,
     starting_balance_cents: scenario.starting_balance_cents,
     cash_minus_entered_debt_cents: net,
     recorded_spend_this_month_cents: spend.totalCents,
@@ -491,3 +491,164 @@ def test_identical_bills_and_debt_across_persisted_adapters(tmp_path, monkeypatc
         assert result["forecast"]["ending_balance_cents"] == expected_low
         assert result["risk"]["minimum_balance_p10_cents"] == expected_low
         assert result["risk"]["safe_to_spend_cents"] == expected_low - 10_000
+
+
+def test_same_day_bills_and_income_use_one_canonical_order(tmp_path, monkeypatch):
+    """The same ledger must assign seeded draws identically on Web and Python.
+
+    The inputs deliberately list Z before A and use nonzero bill/income variation,
+    so an adapter-order tie-break changes the risk block even though cash totals are
+    unchanged.
+    """
+    snapshot = {
+        "version": "2.2",
+        "updated_at": "2026-12-20T00:00:00Z",
+        "current_balance_cents": 100_000,
+        "incomes": [
+            {"id": "inc-z", "name": "Z Income", "amount_cents": 100_000, "frequency": "Monthly", "last_payday": "2026-12-01", "next_payday": "2027-01-01"},
+            {"id": "inc-a", "name": "A Income", "amount_cents": 200_000, "frequency": "Monthly", "last_payday": "2026-12-01", "next_payday": "2027-01-01"},
+        ],
+        "payments": [
+            {"id": "pmt-z", "name": "Z Bill", "amount_cents": 10_000, "recurrence": "Monthly", "due_day": 1},
+            {"id": "pmt-a", "name": "A Bill", "amount_cents": 30_000, "recurrence": "Monthly", "due_day": 1},
+        ],
+        "transactions": [
+            {"id": "tx-open", "amount_cents": 100_000, "type": "Adjustment", "date": "2026-12-20"}
+        ],
+        "bill_occurrences": [],
+        "liabilities": [],
+    }
+    simulation = {
+        "runs": 500,
+        "seed": 7,
+        "quantile_num": 1,
+        "quantile_den": 10,
+        "income_variation_min": -50,
+        "income_variation_max": 50,
+        "expense_variation_min": -50,
+        "expense_variation_max": 50,
+        "surprise_probability_ppm": 0,
+        "surprise_amount_min": 0,
+        "surprise_amount_max": 0,
+        "surprise_check_interval_days": 14,
+        "reserve_cents": 0,
+    }
+    doc = {
+        "ledger": snapshot,
+        "as_of": "2026-12-20",
+        "horizon_days": 40,
+        "simulation": simulation,
+    }
+    _, web = _web_scenario_and_result(doc)
+
+    monkeypatch.setattr(db_manager, "DB_PATH", str(tmp_path / "same-day.db"))
+    db_manager.init_db()
+    sync.restore_ledger_snapshot(snapshot)
+    built = scenario_mod.build_scenario(
+        "2026-12-20", 40, include_simulation=simulation, read_only=True
+    )
+    python = run_scenario(built)
+
+    for field in (
+        "safe_to_spend_cents",
+        "negative_balance_probability_ppm",
+        "minimum_balance_p10_cents",
+        "minimum_balance_p50_cents",
+        "minimum_balance_p90_cents",
+        "ending_balance_p10_cents",
+        "ending_balance_p50_cents",
+        "ending_balance_p90_cents",
+    ):
+        assert python["risk"][field] == web["result"]["risk"][field], field
+
+
+def test_purchase_comparison_is_fixed_and_matches_web(tmp_path, monkeypatch):
+    """A hypothetical purchase must not be varied or consume another bill's draw."""
+    snapshot = {
+        "version": "2.2",
+        "updated_at": "2026-12-01T00:00:00Z",
+        "current_balance_cents": 100_000,
+        "incomes": [],
+        "payments": [
+            {"id": "pmt-bill", "name": "Bill", "amount_cents": 10_000, "recurrence": "Monthly", "due_day": 15}
+        ],
+        "transactions": [
+            {"id": "tx-open", "amount_cents": 100_000, "type": "Adjustment", "date": "2026-12-01"}
+        ],
+        "bill_occurrences": [],
+        "liabilities": [],
+    }
+    sim = {
+        "runs": 200,
+        "seed": 7,
+        "quantile_num": 1,
+        "quantile_den": 10,
+        "income_variation_min": 0,
+        "income_variation_max": 0,
+        "expense_variation_min": -10,
+        "expense_variation_max": 10,
+        "surprise_probability_ppm": 0,
+        "surprise_amount_min": 0,
+        "surprise_amount_max": 0,
+        "surprise_check_interval_days": 14,
+        "reserve_cents": 0,
+    }
+    doc = {
+        "ledger": snapshot,
+        "as_of": "2026-12-01",
+        "horizon_days": 60,
+        "simulation": sim,
+        "purchase_cents": 25_000,
+        "purchase_date": "2026-12-20",
+    }
+    script = r"""
+import { evaluatePurchase } from "./web/dist-test/lib/scenarios.js";
+import { parseLedgerState } from "./web/dist-test/lib/validate.js";
+import fs from "fs";
+const doc = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+const parsed = parseLedgerState(doc.ledger);
+if (!parsed.ok) { console.error(parsed.error); process.exit(2); }
+const s = doc.simulation;
+const assumptions = {
+  horizonDays: doc.horizon_days, runs: s.runs, seed: s.seed,
+  quantileNum: s.quantile_num, quantileDen: s.quantile_den,
+  incomeVariationMin: s.income_variation_min, incomeVariationMax: s.income_variation_max,
+  expenseVariationMin: s.expense_variation_min, expenseVariationMax: s.expense_variation_max,
+  surpriseProbabilityPpm: s.surprise_probability_ppm,
+  surpriseAmountMin: s.surprise_amount_min, surpriseAmountMax: s.surprise_amount_max,
+  surpriseIntervalDays: s.surprise_check_interval_days, reserveCents: s.reserve_cents,
+};
+const result = evaluatePurchase(parsed.state, doc.as_of, assumptions, doc.purchase_cents, doc.purchase_date);
+console.log(JSON.stringify(result));
+"""
+    with tempfile.TemporaryDirectory() as directory:
+        scenario_path = Path(directory) / "purchase.json"
+        scenario_path.write_text(json.dumps(doc), encoding="utf-8")
+        proc = subprocess.run(
+            ["node", "--input-type=module", "-e", script, str(scenario_path)],
+            cwd=str(REPO_ROOT), capture_output=True, text=True,
+        )
+        assert proc.returncode == 0, proc.stderr
+        web = json.loads(proc.stdout)
+    assert web["status"] == "ok", web
+
+    monkeypatch.setattr(db_manager, "DB_PATH", str(tmp_path / "purchase.db"))
+    db_manager.init_db()
+    sync.restore_ledger_snapshot(snapshot)
+    from monte_carlo_ledger import decisions
+
+    python = decisions.simulate_purchase(
+        25_000, "2026-12-20", "2026-12-01", 60, sim
+    )["with_purchase"]
+    mapping = {
+        "safe_to_spend_cents": "safeSpendCents",
+        "negative_balance_probability_ppm": "overdraftPpm",
+        "minimum_balance_p10_cents": "minimumBalanceP10Cents",
+        "minimum_balance_p50_cents": "minimumBalanceP50Cents",
+        "minimum_balance_p90_cents": "minimumBalanceP90Cents",
+        "ending_balance_p10_cents": "endingBalanceP10Cents",
+        "ending_balance_p50_cents": "endingBalanceP50Cents",
+        "ending_balance_p90_cents": "endingBalanceP90Cents",
+    }
+    for python_field, web_field in mapping.items():
+        assert python["risk"][python_field] == web["outcome"][web_field], python_field

@@ -449,7 +449,7 @@ test.describe("W2 Web → Python → fresh Web recovery", () => {
           page.getByText(/On Apr 5, 2028, inside the 90-day plan\./)
         ).toBeVisible();
         await expect(
-          page.getByText(/Scheduled income in that window is \$1,000\.00\./)
+          page.getByText(/Scheduled income in that window is \$3,000\.00\./)
         ).toBeVisible();
 
         // Preferences really exist on the original browser and must not migrate.
