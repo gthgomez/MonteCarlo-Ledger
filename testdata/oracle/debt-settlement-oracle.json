@@ -1,0 +1,337 @@
+{
+  "description": "Independent hand-derived cash oracles for debt and bill settlement. Each expected event date and signed cent value was calculated from the schedule on paper, not produced by either engine. Zero income/expense variation and zero surprise probability make every modeled outcome identical to the deterministic schedule.",
+  "simulation": {
+    "runs": 20,
+    "seed": 42,
+    "quantile_num": 1,
+    "quantile_den": 10,
+    "income_variation_min": 0,
+    "income_variation_max": 0,
+    "expense_variation_min": 0,
+    "expense_variation_max": 0,
+    "surprise_probability_ppm": 0,
+    "surprise_amount_min": 0,
+    "surprise_amount_max": 0,
+    "surprise_check_interval_days": 14,
+    "reserve_cents": 0
+  },
+  "cases": [
+    {
+      "id": "unlinked-minimum-500-300",
+      "description": "Historical omission case: $500.00 available, one required $300.00 debt minimum, no income. One payment leaves $200.00, not $500.00.",
+      "as_of": "2026-03-01",
+      "horizon_days": 20,
+      "snapshot": {
+        "version": "2.2",
+        "updated_at": "2026-03-01T00:00:00Z",
+        "current_balance_cents": 50000,
+        "incomes": [],
+        "payments": [],
+        "transactions": [
+          { "id": "tx-open", "amount_cents": 50000, "type": "Adjustment", "date": "2026-03-01", "description": "Opening cash" }
+        ],
+        "bill_occurrences": [],
+        "liabilities": [
+          { "id": "debt-card", "name": "Card", "balance_cents": 100000, "apr_basis_points": 0, "min_payment_cents": 30000, "kind": "installment", "due_day_of_month": 10 }
+        ]
+      },
+      "expected": {
+        "cash_events": [["2026-03-10", -30000, "Card"]],
+        "safe_to_spend_cents": 20000,
+        "minimum_balance_cents": 20000,
+        "ending_balance_cents": 20000,
+        "negative_balance_probability_ppm": 0
+      }
+    },
+    {
+      "id": "linked-mismatched-due-days",
+      "description": "Duplicate-deduction case: the linked bill pays the card on the 15th while the debt's stale stored due day is the 20th. Cash falls by $300.00 once, not twice.",
+      "as_of": "2026-03-01",
+      "horizon_days": 20,
+      "snapshot": {
+        "version": "2.2",
+        "updated_at": "2026-03-01T00:00:00Z",
+        "current_balance_cents": 50000,
+        "incomes": [],
+        "payments": [
+          { "id": "pmt-card", "name": "Card bill", "amount_cents": 30000, "recurrence": "Monthly", "due_day": 15, "is_auto_withdraw": true }
+        ],
+        "transactions": [
+          { "id": "tx-open", "amount_cents": 50000, "type": "Adjustment", "date": "2026-03-01", "description": "Opening cash" }
+        ],
+        "bill_occurrences": [],
+        "liabilities": [
+          { "id": "debt-card", "name": "Card", "balance_cents": 100000, "apr_basis_points": 0, "min_payment_cents": 30000, "kind": "installment", "due_day_of_month": 20, "linked_payment_id": "pmt-card" }
+        ]
+      },
+      "expected": {
+        "cash_events": [["2026-03-15", -30000, "Card bill"]],
+        "safe_to_spend_cents": 20000,
+        "minimum_balance_cents": 20000,
+        "ending_balance_cents": 20000,
+        "negative_balance_probability_ppm": 0
+      }
+    },
+    {
+      "id": "linked-minimum-above-bill",
+      "description": "A $200.00 bill covers part of a $300.00 minimum. The remaining $100.00 is charged once on the bill's date.",
+      "as_of": "2026-03-01",
+      "horizon_days": 20,
+      "snapshot": {
+        "version": "2.2",
+        "updated_at": "2026-03-01T00:00:00Z",
+        "current_balance_cents": 50000,
+        "incomes": [],
+        "payments": [
+          { "id": "pmt-card", "name": "Card bill", "amount_cents": 20000, "recurrence": "Monthly", "due_day": 15, "is_auto_withdraw": true }
+        ],
+        "transactions": [
+          { "id": "tx-open", "amount_cents": 50000, "type": "Adjustment", "date": "2026-03-01", "description": "Opening cash" }
+        ],
+        "bill_occurrences": [],
+        "liabilities": [
+          { "id": "debt-card", "name": "Card", "balance_cents": 100000, "apr_basis_points": 0, "min_payment_cents": 30000, "kind": "installment", "due_day_of_month": 20, "linked_payment_id": "pmt-card" }
+        ]
+      },
+      "expected": {
+        "cash_events": [["2026-03-15", -20000, "Card bill"], ["2026-03-15", -10000, "Card"]],
+        "safe_to_spend_cents": 20000,
+        "minimum_balance_cents": 20000,
+        "ending_balance_cents": 20000,
+        "negative_balance_probability_ppm": 0
+      }
+    },
+    {
+      "id": "linked-bill-above-minimum",
+      "description": "A $400.00 linked bill exceeds the $300.00 minimum. Only the bill's $400.00 leaves cash.",
+      "as_of": "2026-03-01",
+      "horizon_days": 20,
+      "snapshot": {
+        "version": "2.2",
+        "updated_at": "2026-03-01T00:00:00Z",
+        "current_balance_cents": 50000,
+        "incomes": [],
+        "payments": [
+          { "id": "pmt-card", "name": "Card bill", "amount_cents": 40000, "recurrence": "Monthly", "due_day": 15, "is_auto_withdraw": true }
+        ],
+        "transactions": [
+          { "id": "tx-open", "amount_cents": 50000, "type": "Adjustment", "date": "2026-03-01", "description": "Opening cash" }
+        ],
+        "bill_occurrences": [],
+        "liabilities": [
+          { "id": "debt-card", "name": "Card", "balance_cents": 100000, "apr_basis_points": 0, "min_payment_cents": 30000, "kind": "installment", "due_day_of_month": 20, "linked_payment_id": "pmt-card" }
+        ]
+      },
+      "expected": {
+        "cash_events": [["2026-03-15", -40000, "Card bill"]],
+        "safe_to_spend_cents": 10000,
+        "minimum_balance_cents": 10000,
+        "ending_balance_cents": 10000,
+        "negative_balance_probability_ppm": 0
+      }
+    },
+    {
+      "id": "paid-linked-bill-already-in-cash",
+      "description": "The February bill was paid and is already reflected in cash. No February or March cash event is added inside the window.",
+      "as_of": "2026-02-20",
+      "horizon_days": 20,
+      "snapshot": {
+        "version": "2.2",
+        "updated_at": "2026-02-20T00:00:00Z",
+        "current_balance_cents": 50000,
+        "incomes": [],
+        "payments": [
+          { "id": "pmt-card", "name": "Card bill", "amount_cents": 40000, "recurrence": "Monthly", "due_day": 15, "is_auto_withdraw": true }
+        ],
+        "transactions": [
+          { "id": "tx-open", "amount_cents": 90000, "type": "Adjustment", "date": "2026-02-01", "description": "Opening cash" },
+          { "id": "tx-pay", "amount_cents": -40000, "type": "Expense", "date": "2026-02-15", "description": "Card bill" }
+        ],
+        "bill_occurrences": [
+          { "id": "occ-feb", "payment_id": "pmt-card", "due_date": "2026-02-15", "paid": true, "transaction_id": "tx-pay" }
+        ],
+        "liabilities": [
+          { "id": "debt-card", "name": "Card", "balance_cents": 100000, "apr_basis_points": 0, "min_payment_cents": 30000, "kind": "installment", "due_day_of_month": 15, "linked_payment_id": "pmt-card" }
+        ]
+      },
+      "expected": {
+        "cash_events": [],
+        "safe_to_spend_cents": 50000,
+        "minimum_balance_cents": 50000,
+        "ending_balance_cents": 50000,
+        "negative_balance_probability_ppm": 0
+      }
+    },
+    {
+      "id": "identical-independent-debts",
+      "description": "Two independently identified debts with the same name and amount are both obligations. A name-equality heuristic would hide one.",
+      "as_of": "2026-03-01",
+      "horizon_days": 20,
+      "snapshot": {
+        "version": "2.2",
+        "updated_at": "2026-03-01T00:00:00Z",
+        "current_balance_cents": 50000,
+        "incomes": [],
+        "payments": [],
+        "transactions": [
+          { "id": "tx-open", "amount_cents": 50000, "type": "Adjustment", "date": "2026-03-01", "description": "Opening cash" }
+        ],
+        "bill_occurrences": [],
+        "liabilities": [
+          { "id": "debt-a", "name": "Card", "balance_cents": 100000, "apr_basis_points": 0, "min_payment_cents": 30000, "kind": "installment", "due_day_of_month": 10 },
+          { "id": "debt-b", "name": "Card", "balance_cents": 100000, "apr_basis_points": 0, "min_payment_cents": 30000, "kind": "installment", "due_day_of_month": 10 }
+        ]
+      },
+      "expected": {
+        "cash_events": [["2026-03-10", -30000, "Card"], ["2026-03-10", -30000, "Card"]],
+        "safe_to_spend_cents": -10000,
+        "minimum_balance_cents": -10000,
+        "ending_balance_cents": -10000,
+        "negative_balance_probability_ppm": 1000000
+      }
+    },
+    {
+      "id": "inactive-debt-excluded",
+      "description": "An archived debt stays stored but contributes no cash obligation.",
+      "as_of": "2026-03-01",
+      "horizon_days": 20,
+      "snapshot": {
+        "version": "2.2",
+        "updated_at": "2026-03-01T00:00:00Z",
+        "current_balance_cents": 50000,
+        "incomes": [],
+        "payments": [],
+        "transactions": [
+          { "id": "tx-open", "amount_cents": 50000, "type": "Adjustment", "date": "2026-03-01", "description": "Opening cash" }
+        ],
+        "bill_occurrences": [],
+        "liabilities": [
+          { "id": "debt-active", "name": "Active card", "balance_cents": 100000, "apr_basis_points": 0, "min_payment_cents": 30000, "kind": "installment", "due_day_of_month": 10 },
+          { "id": "debt-archived", "name": "Archived card", "balance_cents": 100000, "apr_basis_points": 0, "min_payment_cents": 50000, "kind": "installment", "due_day_of_month": 10, "is_active": false }
+        ]
+      },
+      "expected": {
+        "cash_events": [["2026-03-10", -30000, "Active card"]],
+        "safe_to_spend_cents": 20000,
+        "minimum_balance_cents": 20000,
+        "ending_balance_cents": 20000,
+        "negative_balance_probability_ppm": 0
+      }
+    },
+    {
+      "id": "one-time-link-covers-one-month",
+      "description": "A one-time bill on April 15 covers the April debt minimum. March still has its own $300.00 minimum, so the 60-day window has two payments.",
+      "as_of": "2026-03-01",
+      "horizon_days": 60,
+      "snapshot": {
+        "version": "2.2",
+        "updated_at": "2026-03-01T00:00:00Z",
+        "current_balance_cents": 50000,
+        "incomes": [],
+        "payments": [
+          { "id": "pmt-card", "name": "Card bill", "amount_cents": 30000, "recurrence": "One-time", "due_date": "2026-04-15", "is_auto_withdraw": true }
+        ],
+        "transactions": [
+          { "id": "tx-open", "amount_cents": 50000, "type": "Adjustment", "date": "2026-03-01", "description": "Opening cash" }
+        ],
+        "bill_occurrences": [],
+        "liabilities": [
+          { "id": "debt-card", "name": "Card", "balance_cents": 100000, "apr_basis_points": 0, "min_payment_cents": 30000, "kind": "installment", "due_day_of_month": 20, "linked_payment_id": "pmt-card" }
+        ]
+      },
+      "expected": {
+        "cash_events": [["2026-03-20", -30000, "Card"], ["2026-04-15", -30000, "Card bill"]],
+        "safe_to_spend_cents": -10000,
+        "minimum_balance_cents": -10000,
+        "ending_balance_cents": -10000,
+        "negative_balance_probability_ppm": 1000000
+      }
+    },
+    {
+      "id": "moved-linked-bill-settles-original-slot",
+      "description": "Rent-like bill moved from March 15 to March 22 keeps its original slot for debt coverage and charges cash once on the new date.",
+      "as_of": "2026-03-01",
+      "horizon_days": 30,
+      "snapshot": {
+        "version": "2.2",
+        "updated_at": "2026-03-01T00:00:00Z",
+        "current_balance_cents": 50000,
+        "incomes": [],
+        "payments": [
+          { "id": "pmt-card", "name": "Card bill", "amount_cents": 30000, "recurrence": "Monthly", "due_day": 15, "is_auto_withdraw": true }
+        ],
+        "transactions": [
+          { "id": "tx-open", "amount_cents": 50000, "type": "Adjustment", "date": "2026-03-01", "description": "Opening cash" }
+        ],
+        "bill_occurrences": [
+          { "id": "occ-mar", "payment_id": "pmt-card", "due_date": "2026-03-22", "original_due_date": "2026-03-15", "paid": false, "is_user_modified": true }
+        ],
+        "liabilities": [
+          { "id": "debt-card", "name": "Card", "balance_cents": 100000, "apr_basis_points": 0, "min_payment_cents": 30000, "kind": "installment", "due_day_of_month": 15, "linked_payment_id": "pmt-card" }
+        ]
+      },
+      "expected": {
+        "cash_events": [["2026-03-22", -30000, "Card bill"]],
+        "safe_to_spend_cents": 20000,
+        "minimum_balance_cents": 20000,
+        "ending_balance_cents": 20000,
+        "negative_balance_probability_ppm": 0
+      }
+    },
+    {
+      "id": "minimum-capped-at-entered-balance",
+      "description": "The entered balance is below the contractual minimum. Only the remaining $100.00 can be paid.",
+      "as_of": "2026-03-01",
+      "horizon_days": 20,
+      "snapshot": {
+        "version": "2.2",
+        "updated_at": "2026-03-01T00:00:00Z",
+        "current_balance_cents": 50000,
+        "incomes": [],
+        "payments": [],
+        "transactions": [
+          { "id": "tx-open", "amount_cents": 50000, "type": "Adjustment", "date": "2026-03-01", "description": "Opening cash" }
+        ],
+        "bill_occurrences": [],
+        "liabilities": [
+          { "id": "debt-small", "name": "Small card", "balance_cents": 10000, "apr_basis_points": 0, "min_payment_cents": 30000, "kind": "installment", "due_day_of_month": 10 }
+        ]
+      },
+      "expected": {
+        "cash_events": [["2026-03-10", -10000, "Small card"]],
+        "safe_to_spend_cents": 40000,
+        "minimum_balance_cents": 40000,
+        "ending_balance_cents": 40000,
+        "negative_balance_probability_ppm": 0
+      }
+    },
+    {
+      "id": "reserve-exceeds-cash-low",
+      "description": "A $400.00 reserve against a $200.00 low produces a $200.00 reserve gap, not a positive spending amount.",
+      "as_of": "2026-03-01",
+      "horizon_days": 20,
+      "simulation_overrides": { "reserve_cents": 40000 },
+      "snapshot": {
+        "version": "2.2",
+        "updated_at": "2026-03-01T00:00:00Z",
+        "current_balance_cents": 50000,
+        "incomes": [],
+        "payments": [],
+        "transactions": [
+          { "id": "tx-open", "amount_cents": 50000, "type": "Adjustment", "date": "2026-03-01", "description": "Opening cash" }
+        ],
+        "bill_occurrences": [],
+        "liabilities": [
+          { "id": "debt-card", "name": "Card", "balance_cents": 100000, "apr_basis_points": 0, "min_payment_cents": 30000, "kind": "installment", "due_day_of_month": 10 }
+        ]
+      },
+      "expected": {
+        "cash_events": [["2026-03-10", -30000, "Card"]],
+        "safe_to_spend_cents": -20000,
+        "minimum_balance_cents": 20000,
+        "ending_balance_cents": 20000,
+        "negative_balance_probability_ppm": 0
+      }
+    }
+  ]
+}

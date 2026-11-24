@@ -188,6 +188,29 @@ def _planning_minimum_payment_cents(
     return min(max(percent, floor), balance)
 
 
+def _linked_payment_slot(payment: Any, year: int, month: int) -> Optional[date]:
+    """The date a linked bill pays its debt in one calendar month.
+
+    A link means the bill is the debt payment, so the bill's recurrence owns the
+    slot even when the debt's stored due day differs. A one-time bill occupies
+    only its own month; other months fall back to the debt's due day.
+    """
+    recurrence = getattr(payment, "recurrence", None)
+    if recurrence == "Monthly":
+        day = getattr(payment, "due_day", None)
+        if day is None:
+            return None
+        last_day = calendar.monthrange(year, month)[1]
+        return date(year, month, min(int(day), last_day))
+    if recurrence == "One-time":
+        due_date = getattr(payment, "due_date", None)
+        if not due_date:
+            return None
+        parsed = date.fromisoformat(due_date)
+        return parsed if (parsed.year, parsed.month) == (year, month) else None
+    return None
+
+
 def _liability_min_payment_events(
     liabilities: List[Dict[str, Any]],
     payments: List[Any],
@@ -253,7 +276,15 @@ def _liability_min_payment_events(
                 break
             last_day = calendar.monthrange(cursor_year, cursor_month)[1]
             day = min(due_day, last_day)
-            due = date(cursor_year, cursor_month, day)
+            fallback_due = date(cursor_year, cursor_month, day)
+            linked_due = (
+                _linked_payment_slot(payment, cursor_year, cursor_month)
+                if payment is not None
+                else None
+            )
+            # The linked bill owns this debt's slot for the month. Using the debt's
+            # stored due day here would charge a second minimum when the two differ.
+            due = linked_due or fallback_due
             # If this month's due day has passed, the minimum is still an outstanding
             # obligation. Put it at the start of the forecast window so it reduces
             # current available cash instead of disappearing until next month.
@@ -265,6 +296,14 @@ def _liability_min_payment_events(
                 if payment is not None:
                     slot = (payment.id, due.isoformat())
                     occurrence = occurrences_by_slot.get(slot)
+                    if occurrence is None and getattr(payment, "recurrence", None) == "Monthly":
+                        # A changed due day leaves the occurrence on its original
+                        # slot. The month still identifies the same payment.
+                        for (owner, stored_slot), row in occurrences_by_slot.items():
+                            stored = row.get("original_due_date") or stored_slot
+                            if owner == payment.id and stored[:7] == due.strftime("%Y-%m"):
+                                occurrence = row
+                                break
                     if slot in scheduled_slots or occurrence is not None:
                         # The bill adapter includes overdue unpaid rows at as_of.
                         if occurrence is not None and occurrence["paid"]:

@@ -50,6 +50,31 @@ CLI/API `risk` / `safe-to-spend` / `overdraft` commands.
 - These are simulated estimates from a bounded variance model, **not guarantees and not worst
   cases**.
 
+## Linked bills and debt minimums
+
+Sources: `scenario.py` (`_linked_payment_slot`, `_liability_min_payment_events`) and the Web
+adapter `web/src/lib/scenario-builder.ts`.
+
+- A liability's `linked_payment_id` means that bill is the debt payment. The bill's own recurrence
+  date owns the monthly cash slot, even when the liability's stored `due_day_of_month` differs or
+  was edited later. The debt's due day is only a fallback for a month a one-time link does not
+  occupy.
+- The bill is charged once at its scheduled or moved date. If the bill is smaller than the
+  minimum, only the shortfall is added, on the bill's date. If the bill is larger, no minimum is
+  added.
+- A paid occurrence covers only the amount recorded for that slot; cash already reflected in the
+  starting balance is not debited again. An archived debt (`is_active: false`) contributes no
+  minimum.
+- A one-time link covers one month. The recurring minimum still applies in other months.
+- Two debts that share a name or amount remain independent obligations identified by `id`.
+
+## Horizon semantics
+
+Every projection is for the half-open window `[as_of, as_of + horizon_days)`. The result is a
+whole-window low point, not a "until next payday" figure. Surfaces must name the actual horizon
+(for example, "90-day plan") and must not present a 30-, 60-, or 90-day result as the amount
+available before the next paycheck.
+
 ## Non-normative product heuristics
 
 Contract 1.x defines no daily-pacing concept. The terminal's "daily pacing" guidance

@@ -337,6 +337,31 @@ export function planningMinimumPaymentCents(
   return Math.min(Math.max(percent, floor), balance);
 }
 
+/**
+ * The date a linked bill is scheduled to pay its debt in one calendar month.
+ *
+ * A link is the user's statement that this bill pays this debt. The bill's own
+ * recurrence therefore defines the slot, even when the debt's stored due day was
+ * edited later or came from another client. Returns null for a one-time link in
+ * a month it does not occupy, so that month falls back to the debt's own due day.
+ */
+function linkedPaymentSlot(
+  payment: PaymentItem,
+  year: number,
+  month: number
+): string | null {
+  if (payment.recurrence === "Monthly" && payment.due_day) {
+    const maxD = new Date(Date.UTC(year, month, 0)).getUTCDate();
+    const day = Math.min(payment.due_day, maxD);
+    return `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+  }
+  if (payment.recurrence === "One-time" && payment.due_date) {
+    const [dueYear, dueMonth] = payment.due_date.split("-").map(Number);
+    return dueYear === year && dueMonth === month ? payment.due_date : null;
+  }
+  return null;
+}
+
 function liabilityMinPaymentEvents(
   liabilities: LiabilityItem[],
   payments: PaymentItem[],
@@ -407,14 +432,30 @@ function liabilityMinPaymentEvents(
       const amount = planningMinimumPaymentCents(liability, remainingBalance);
       if (amount <= 0) break;
       const d = Math.min(dueDay, maxD);
-      const dueIso = `${curY}-${String(actualM).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+      const fallbackDueIso = `${curY}-${String(actualM).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+      // The linked bill owns this debt's slot for the month. Using the debt's stored
+      // due day here would charge a second minimum whenever the two dates differ.
+      const dueIso = linkedPayment
+        ? linkedPaymentSlot(linkedPayment, curY, actualM) ?? fallbackDueIso
+        : fallbackDueIso;
       // A minimum whose due day passed earlier this month is still owed. Project it
       // at the start of the window so today's available-cash estimate includes it.
       const eventDate = dueIso < asOf ? asOf : dueIso;
       let coveredCents = 0;
       if (linkedPayment) {
         const slots = occurrenceSlots.get(String(liability.linked_payment_id));
-        const occurrence = slots?.get(dueIso);
+        let occurrence = slots?.get(dueIso);
+        // A past edit can change the bill's due day while an occurrence keeps the
+        // original slot. The month still identifies the same scheduled payment.
+        if (!occurrence && linkedPayment.recurrence === "Monthly" && slots) {
+          const month = dueIso.slice(0, 7);
+          for (const candidate of slots.values()) {
+            if ((candidate.original_due_date || candidate.due_date).slice(0, 7) === month) {
+              occurrence = candidate;
+              break;
+            }
+          }
+        }
         const occurrenceAmount = occurrence?.paid && occurrence.transaction_id != null
           ? Math.abs(transactionById.get(String(occurrence.transaction_id))?.amount_cents ?? linkedPayment.amount_cents)
           : linkedPayment.amount_cents;
