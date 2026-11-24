@@ -48,7 +48,7 @@ export class VaultAncestryError extends VaultConflictError {
   }
 }
 
-interface VaultMetadata {
+export interface VaultMetadata {
   kdf_salt_b64: string;
   revision: number;
 }
@@ -62,7 +62,7 @@ async function readError(res: Response): Promise<string> {
   }
 }
 
-async function fetchMetadata(vaultId: string): Promise<VaultMetadata | null> {
+export async function fetchMetadata(vaultId: string): Promise<VaultMetadata | null> {
   const res = await fetch(`/api/vault/${encodeURIComponent(vaultId)}/metadata`, {
     method: "GET",
     cache: "no-store",

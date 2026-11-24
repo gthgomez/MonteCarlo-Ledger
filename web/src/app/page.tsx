@@ -19,8 +19,16 @@ import {
   saveAssumptions,
   type AssumptionsLoadResult,
 } from "@/lib/assumptions-persistence";
-import { EMPTY_TARGETS, loadBudgetTargets, saveBudgetTargets, type BudgetTargets } from "@/lib/budget-targets";
+import {
+  BUDGET_TARGETS_KEY,
+  EMPTY_TARGETS,
+  loadBudgetTargets,
+  saveBudgetTargets,
+  type BudgetTargets,
+} from "@/lib/budget-targets";
+import { serializeSettingsProfile, type SettingsProfile } from "@/lib/settings-profile";
 import { type EditResult } from "@/lib/ledger-edits";
+import { formatMoney } from "@/lib/money-format";
 import { LEDGER_STORAGE_KEY, saveLedgerChange, type LedgerChangeOptions } from "@/lib/persistence";
 import {
   beyondWindowBillNotice,
@@ -88,6 +96,18 @@ const LEDGER_RECOVERY_REQUIRED =
 
 type LedgerFreshness = "current" | "changed" | "unreadable" | "indeterminate";
 
+/**
+ * After a pull, the ledger may be newer than the browser's financial settings.
+ * A missing or unreadable portable profile must withhold spending guidance until
+ * the person reviews the settings; default assumptions are never substituted
+ * silently for a recovered plan.
+ */
+type SettingsRecovery =
+  | { status: "none" }
+  | { status: "missing"; message: string }
+  | { status: "applied"; message: string }
+  | { status: "kept"; message: string };
+
 interface SettingsView {
   values: Assumptions;
   /** Exact bytes underlying this view, including an explicitly displayed invalid record. */
@@ -120,6 +140,9 @@ export default function Home() {
   });
   const { values: assumptions, problem: assumptionsProblem } = settings;
   const [assumptionsWarning, setAssumptionsWarning] = useState<string | null>(null);
+  /** True only when this browser has explicitly saved decision-critical settings. */
+  const [hasSavedDecisionSettings, setHasSavedDecisionSettings] = useState(false);
+  const [settingsRecovery, setSettingsRecovery] = useState<SettingsRecovery>({ status: "none" });
   const [storedRaw, setStoredRaw] = useState<string | null>(null);
   // Storage events and the write completion handler need the latest adopted
   // snapshot even before React renders the corresponding state.
@@ -180,7 +203,9 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
-    showReadSettings(loadAssumptions(browserStorage()));
+    const loadedSettings = loadAssumptions(browserStorage());
+    showReadSettings(loadedSettings);
+    setHasSavedDecisionSettings(loadedSettings.ok && loadedSettings.raw !== null);
 
     try {
       const saved = localStorage.getItem(LEDGER_STORAGE_KEY);
@@ -265,7 +290,9 @@ export default function Home() {
       if (event.key !== ASSUMPTIONS_STORAGE_KEY && event.key !== null) return;
       // Storage events may be delivered out of order; the durable key is the source of truth,
       // not the event's historical newValue payload.
-      showReadSettings(loadAssumptions(browserStorage()), true);
+      const loaded = loadAssumptions(browserStorage());
+      showReadSettings(loaded, true);
+      setHasSavedDecisionSettings(loaded.ok && loaded.raw !== null);
     }
 
     window.addEventListener("storage", receiveAssumptions);
@@ -274,9 +301,12 @@ export default function Home() {
 
   const asOf = useFinancialDate();
 
+  const settingsRecoveryMissing = settingsRecovery.status === "missing";
   const evaluation = useMemo(
-    () => assumptionsProblem || ledgerFreshness !== "current" ? null : evaluateLedger(state, asOf, assumptions),
-    [state, asOf, assumptions, assumptionsProblem, ledgerFreshness]
+    () => assumptionsProblem || ledgerFreshness !== "current" || settingsRecoveryMissing
+      ? null
+      : evaluateLedger(state, asOf, assumptions),
+    [state, asOf, assumptions, assumptionsProblem, ledgerFreshness, settingsRecoveryMissing]
   );
 
   function recordDraftOutcome(draftKey: string | undefined, failed: boolean) {
@@ -445,6 +475,16 @@ export default function Home() {
       const saved = await saveAssumptions(browserStorage(), nextAssumptions, settings.expectedRaw);
       if (saved.ok) {
         showReadSettings(parseSavedAssumptions(saved.raw));
+        setHasSavedDecisionSettings(true);
+        // An explicit save is a deliberate choice; it resolves the post-restore
+        // "settings were not recovered" block without pretending they came from
+        // the vault.
+        if (settingsRecovery.status === "missing") {
+          setSettingsRecovery({
+            status: "applied",
+            message: "Financial settings were saved in this browser after recovery.",
+          });
+        }
         return null;
       }
       if (saved.reason === "conflict") {
@@ -474,6 +514,27 @@ export default function Home() {
       settingsWriteInFlightRef.current = false;
       setIsSavingSettings(false);
     }
+  }
+
+  /**
+   * Apply settings recovered from the portable vault profile. The ledger was
+   * already replaced, so this is the step that makes the recovered decision
+   * inputs match the recovered records. A failed save leaves the guidance gate
+   * closed; it never falls back to defaults silently.
+   */
+  async function handleApplyRecoveredSettings(profile: SettingsProfile): Promise<string | null> {
+    const settingsError = await handleApplyAssumptions(profile.assumptions, true);
+    if (settingsError) return settingsError;
+    const savedTargets = saveBudgetTargets(browserStorage(), profile.budgetTargets);
+    if (!savedTargets.ok) {
+      setTargetWarning(savedTargets.error);
+      // Budget targets do not change the spending calculation. Keep the recovered
+      // decision settings usable and surface the target failure separately.
+    } else {
+      setTargets(profile.budgetTargets);
+      setTargetWarning(null);
+    }
+    return null;
   }
 
   function readSavedSettings() {
@@ -542,6 +603,15 @@ export default function Home() {
     setTargets(next);
     setTargetWarning(null);
     return null;
+  }
+
+  let portableSettings: SettingsProfile | null = null;
+  if (!assumptionsProblem) {
+    try {
+      portableSettings = serializeSettingsProfile(assumptions, targets);
+    } catch {
+      portableSettings = null;
+    }
   }
 
   // Keep the live region mounted so pending saves are announced when they start.
@@ -816,6 +886,49 @@ export default function Home() {
         {saveWarning && <Notice tone="warning" title="Not saved">{saveWarning}</Notice>}
         {!assumptionsProblem && assumptionsWarning && <Notice tone="warning" title="Financial settings">{assumptionsWarning}</Notice>}
         {ledgerProblem}
+        {settingsRecovery.status === "missing" && (
+          <section className="space-y-3 rounded-2xl border border-warning bg-warning-soft p-4">
+            <h1 className="text-lg font-semibold">Financial settings were not recovered</h1>
+            <p className="text-sm" role="alert">{settingsRecovery.message}</p>
+            <p className="text-sm text-muted">
+              No spending recommendation or risk estimate is shown while the plan window and reserve are unknown.
+              The current browser values are a {assumptions.horizonDays}-day window with a{" "}
+              {formatMoney(assumptions.reserveCents)} reserve. They may not be the settings used with this ledger.
+            </p>
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                disabled={savesPending}
+                onClick={() => void handleApplyAssumptions(assumptions, true)}
+                className="inline-flex min-h-11 items-center rounded-lg bg-accent px-3 text-sm font-semibold text-on-accent"
+              >
+                Use the settings shown now
+              </button>
+              <button
+                type="button"
+                disabled={savesPending}
+                onClick={() => navigate("advanced")}
+                className="inline-flex min-h-11 items-center rounded-lg border border-line bg-surface px-3 text-sm font-semibold"
+              >
+                Review plan window and reserve
+              </button>
+              <button
+                type="button"
+                disabled={savesPending}
+                onClick={openSync}
+                className="inline-flex min-h-11 items-center rounded-lg border border-line bg-surface px-3 text-sm font-semibold"
+              >
+                Try another vault
+              </button>
+            </div>
+          </section>
+        )}
+        {settingsRecovery.status === "applied" && (
+          <Notice tone="info" title="Financial settings recovered">{settingsRecovery.message}</Notice>
+        )}
+        {settingsRecovery.status === "kept" && (
+          <Notice tone="warning" title="Vault financial settings not used">{settingsRecovery.message}</Notice>
+        )}
         {forecastProblem}
         {isForecastSection && guidanceIssue && (
           <Notice tone="warning" title="Not enough information to suggest spending">{guidanceIssue}</Notice>
@@ -914,6 +1027,10 @@ export default function Home() {
         currentStoredRaw={storedRaw}
         onApplyState={handleApplyState}
         currentVaultId={currentVaultId}
+        settingsProfile={portableSettings}
+        hasSavedDecisionSettings={hasSavedDecisionSettings}
+        onApplyRecoveredSettings={handleApplyRecoveredSettings}
+        onSettingsRecovery={setSettingsRecovery}
         onVaultSelected={setCurrentVaultId}
       />
     </div>

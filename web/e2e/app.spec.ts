@@ -269,7 +269,7 @@ test.describe("local-first privacy", () => {
     await page.keyboard.press("Tab");
     await expect(dialog.getByRole("button", { name: "Encrypted vault" })).toBeFocused();
     await expect(page.getByText(/encrypts the ledger before sending it/i)).toBeVisible();
-    await expect(page.getByText(/Budget targets and forecast settings.*are not recovered from the vault/i)).toBeVisible();
+    await expect(page.getByText(/A vault created by an older client may have no settings profile/i)).toBeVisible();
     await expect(page.getByLabel("Vault Secret Passphrase")).toBeVisible();
     await page.keyboard.press("Escape");
     await expect(dialog).toHaveCount(0);
