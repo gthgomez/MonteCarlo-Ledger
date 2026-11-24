@@ -193,7 +193,7 @@ test("a first-time household survives onboarding, a linked debt, a decision, a m
   await expect(dayStat(page, "Planned balance afterward")).toHaveText("$2,375.67");
   await expect(
     page.getByText(
-      "You have $2,345.67 recorded. Known bills and required debt payments in the next 90 days total $5,610.00. Scheduled income in that window is $5,700.00. If that schedule happens exactly as entered, the balance would be $2,435.67. The cautious amount you could spend over the 90-day plan is $175.67."
+      "You have $2,345.67 recorded. Known bills in the next 90 days total $5,610.00. Scheduled income in that window is $5,700.00. If that schedule happens exactly as entered, the balance would be $2,435.67. The cautious amount you could spend over the 90-day plan is $175.67."
     )
   ).toBeVisible();
 
