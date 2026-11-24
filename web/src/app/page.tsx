@@ -43,7 +43,7 @@ import {
   transactionSumCents,
 } from "@/lib/present";
 import { evaluateLedger } from "@/lib/scenarios";
-import { SECTION_QUESTION, sectionFromHash, type Section } from "@/lib/sections";
+import { SECTION_LABEL, SECTION_QUESTION, sectionFromHash, type Section } from "@/lib/sections";
 import { PersistenceResult, VAULT_ID_STORAGE_KEY } from "@/lib/sync-state";
 import { SAMPLE_LEDGER_STATE, type LedgerState } from "@/lib/types";
 import { computeOverdueObligations } from "@/lib/overdue";
@@ -51,6 +51,11 @@ import { useFinancialDate } from "@/lib/use-financial-date";
 import { parseLedgerState } from "@/lib/validate";
 
 const THEME_KEY = "mc-theme";
+/**
+ * Demo provenance must survive a reload. Otherwise editing a sample row saves it
+ * as if it were the person's own ledger and the "not your finances" label vanishes.
+ */
+const DEMO_MODE_KEY = "montecarlo_demo_mode_v1";
 
 /**
  * A second submission in the same tab must fail immediately instead of queuing
@@ -125,6 +130,23 @@ function browserStorage(): Storage | null {
     return window.localStorage;
   } catch {
     return null;
+  }
+}
+
+function readDemoMarker(): boolean {
+  try {
+    return window.localStorage.getItem(DEMO_MODE_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function writeDemoMarker(active: boolean): void {
+  try {
+    if (active) window.localStorage.setItem(DEMO_MODE_KEY, "1");
+    else window.localStorage.removeItem(DEMO_MODE_KEY);
+  } catch {
+    // The visible in-memory label still applies; storage failure must not hide it.
   }
 }
 
@@ -229,9 +251,10 @@ export default function Home() {
           return;
         }
         setState(validated.state);
-        setUsingDemo(false);
+        setUsingDemo(readDemoMarker());
       } else {
         setUsingDemo(true);
+        writeDemoMarker(true);
       }
       const savedVault = localStorage.getItem(VAULT_ID_STORAGE_KEY);
       if (savedVault) setCurrentVaultId(savedVault);
@@ -350,6 +373,7 @@ export default function Home() {
     setSection(next);
     const url = `${window.location.pathname}${window.location.search}#${next}`;
     window.history.replaceState(null, "", url);
+    requestAnimationFrame(() => document.getElementById("content")?.focus({ preventScroll: true }));
   }
 
   function reloadLedger() {
@@ -387,6 +411,7 @@ export default function Home() {
     setStoredRaw(raw);
     setState(nextState);
     setUsingDemo(demo);
+    writeDemoMarker(demo);
     setSaveWarning(null);
   }
 
@@ -431,7 +456,9 @@ export default function Home() {
     const saved = await runLedgerWrite(async () => {
       setSaveWarning(null);
       const result = await saveLedgerChange(nextState, { expectedRaw: storedRaw });
-      if (result.ok) showSavedLedger(nextState);
+      // Editing sample rows does not turn them into the person's finances. The
+      // demo marker and label stay until an explicit replacement/onboarding.
+      if (result.ok) showSavedLedger(nextState, usingDemo);
       return result;
     });
     if (!saved.ok && !saved.indeterminate) {
@@ -880,10 +907,27 @@ export default function Home() {
         onNavigate={navigate}
         isSaving={savesPending}
       />
-      <main id="content" className="mx-auto w-full min-w-0 max-w-5xl flex-1 space-y-4 px-4 py-6">
+      <main id="content" tabIndex={-1} className="mx-auto w-full min-w-0 max-w-5xl flex-1 space-y-4 px-4 py-6 outline-none">
+        <p className="sr-only" role="status" aria-live="polite">Showing the {SECTION_LABEL[section]} section.</p>
         <p className="text-sm text-muted">{SECTION_QUESTION[section]}</p>
         {savingNotice}
         {saveWarning && <Notice tone="warning" title="Not saved">{saveWarning}</Notice>}
+        {usingDemo && section !== "home" && (
+          <Notice tone="warning" title="Sample data — not your finances">
+            This section is still showing the sample household. Edits here stay labelled as sample data until you
+            enter your own numbers.
+            <div className="mt-3">
+              <button
+                type="button"
+                disabled={savesPending}
+                onClick={() => navigate("home")}
+                className="inline-flex min-h-11 items-center rounded-lg bg-accent px-3 text-sm font-semibold text-on-accent disabled:opacity-50"
+              >
+                Enter my own numbers
+              </button>
+            </div>
+          </Notice>
+        )}
         {!assumptionsProblem && assumptionsWarning && <Notice tone="warning" title="Financial settings">{assumptionsWarning}</Notice>}
         {ledgerProblem}
         {settingsRecovery.status === "missing" && (
@@ -950,6 +994,12 @@ export default function Home() {
                   return { ok: false, error: "A ledger already exists here. Add new entries in Money or Bills without replacing it." };
                 }
                 const saved = await handleUpdateState(nextState);
+                if (saved.ok) {
+                  // The starter ledger replaces the sample; only now is this the
+                  // person's own plan and no longer demo data.
+                  setUsingDemo(false);
+                  writeDemoMarker(false);
+                }
                 recordDraftOutcome(HOME_ONBOARDING_DRAFT_KEY, !saved.ok);
                 return saved;
               }}
@@ -1027,6 +1077,7 @@ export default function Home() {
         currentStoredRaw={storedRaw}
         onApplyState={handleApplyState}
         currentVaultId={currentVaultId}
+        usingDemo={usingDemo}
         settingsProfile={portableSettings}
         hasSavedDecisionSettings={hasSavedDecisionSettings}
         onApplyRecoveredSettings={handleApplyRecoveredSettings}

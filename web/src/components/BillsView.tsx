@@ -126,6 +126,7 @@ export function BillsView({
     [state, asOf]
   );
   const upcoming = slice?.events.filter((event) => event.amount_cents < 0);
+  const hasDebtMinimum = upcoming?.some((event) => event.category === "debt-minimum") ?? false;
   // The fallback list is only for drafts whose slot is no longer projected. It
   // deliberately does not add cash events, expose Mark paid, or widen a window.
   const projectedRowKeys = new Set(
@@ -315,8 +316,14 @@ export function BillsView({
       )}
       {upcoming && <Panel
         title="Payments coming up"
-        lede={`These are bills already on the schedule for the next ${horizonDays} days. An amount is the figure you entered. Nothing here has been marked paid.`}
+        lede={`These are bills and required debt minimums on the schedule for the next ${horizonDays} days. Nothing here has been marked paid.`}
       >
+        {hasDebtMinimum && (
+          <p className="mb-3 text-sm text-muted">
+            A debt minimum comes from the balance, minimum payment, and due day recorded in Plan, not from a bill in
+            this section. To change it, update the debt in Plan. A debt with no due day is assumed to be due on the 1st.
+          </p>
+        )}
         {billsVary ? (
           <p className="mb-3 text-sm text-muted">
             Advanced assumptions allow bill amounts to vary, so modeled futures can differ from these figures. The
@@ -334,7 +341,8 @@ export function BillsView({
                 <div>
                   <p className="font-medium">{event.name}</p>
                   <p className="text-muted">
-                    {formatDateLabel(event.date)} · {relativeDay(asOf, event.date)} · amount you entered
+                    {formatDateLabel(event.date)} · {relativeDay(asOf, event.date)} ·{" "}
+                    {event.category === "debt-minimum" ? "required debt minimum from Plan" : "amount you entered"}
                   </p>
                 </div>
                 <div className="text-left sm:text-right">

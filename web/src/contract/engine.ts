@@ -353,6 +353,8 @@ export interface TimelineRow {
   sequence: number;
   amount_cents: number;
   balance_after_cents: number;
+  /** Presentation-only source tag; never part of the contract result. */
+  category?: string;
 }
 
 /**
@@ -373,6 +375,7 @@ export function timelineRows(scenario: any): TimelineRow[] {
       sequence: ev.sequence,
       amount_cents: toSafeNumber(ev.amount),
       balance_after_cents: toSafeNumber(balance),
+      ...(ev.category === undefined ? {} : { category: ev.category }),
     });
   }
   return rows;

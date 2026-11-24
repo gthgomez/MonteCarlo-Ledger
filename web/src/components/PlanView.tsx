@@ -365,7 +365,15 @@ export function PlanView({
           <li key={debt.id} className="flex flex-wrap items-center justify-between gap-2 py-2 text-sm">
             <span>
               {debt.name} · owe {formatMoney(debt.balance_cents)} · {(debt.apr_basis_points / 100).toFixed(2)}%
-              {debt.is_active === false ? " · Archived" : base === null ? null : ` · ${debtMinimumLabel(debt)}`}
+              {debt.is_active === false
+                ? " · Archived"
+                : base === null
+                  ? null
+                  : ` · ${debtMinimumLabel(debt)}${
+                      debt.due_day_of_month
+                        ? ` · due day ${debt.due_day_of_month}`
+                        : " · due day not set (plan assumes the 1st)"
+                    }`}
             </span>
             <div className="flex flex-wrap gap-2">
               <Button type="button" variant="quiet" onClick={() => openBalanceEditor(debt)}>

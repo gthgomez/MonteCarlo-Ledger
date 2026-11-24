@@ -11,6 +11,7 @@ export interface TimelineLike {
   type: string;
   amount_cents: number;
   balance_after_cents: number;
+  category?: string;
 }
 
 /** When to withhold modeled spending advice while still showing the known schedule. */
@@ -359,12 +360,19 @@ export function buildInsights(input: {
     });
   }
   if (input.nextBill && input.nextBill.amount_cents < 0) {
+    const isDebtMinimum = input.nextBill.category === "debt-minimum";
     insights.push({
-      id: "next-bill",
+      id: isDebtMinimum ? "next-debt-minimum" : "next-bill",
       tone: "info",
-      title: `${input.nextBill.name} is due ${relativeDay(input.asOf, input.nextBill.date)}`,
-      detail: `${formatMoney(-input.nextBill.amount_cents)} on ${input.nextBill.date}. This bill is already included in the plan. Recording it as paid is a separate step.`,
-      action: { label: "See bills", section: "bills" },
+      title: isDebtMinimum
+        ? `${input.nextBill.name} minimum payment is due ${relativeDay(input.asOf, input.nextBill.date)}`
+        : `${input.nextBill.name} is due ${relativeDay(input.asOf, input.nextBill.date)}`,
+      detail: isDebtMinimum
+        ? `${formatMoney(-input.nextBill.amount_cents)} on ${input.nextBill.date}, based on the balance and minimum in Plan. It is already included in the plan. Change the debt there, not in Bills.`
+        : `${formatMoney(-input.nextBill.amount_cents)} on ${input.nextBill.date}. This bill is already included in the plan. Recording it as paid is a separate step.`,
+      action: isDebtMinimum
+        ? { label: "Review debt", section: "plan" }
+        : { label: "See bills", section: "bills" },
     });
   }
   if (input.spendingNote) {

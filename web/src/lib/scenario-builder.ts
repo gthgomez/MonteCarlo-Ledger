@@ -1,5 +1,5 @@
 import { checkedAdd, roundHalfAway, toSafeNumber } from "../contract/money";
-import { LedgerState, LiabilityItem, PaymentItem } from "./types";
+import { IncomeItem, LedgerState, LiabilityItem, PaymentItem } from "./types";
 
 function addDays(iso: string, days: number): string {
   const [y, m, d] = iso.split("-").map(Number);
@@ -39,6 +39,33 @@ function getNextDate(iso: string, frequency: string, anchorDay?: number): string
       return "9999-12-31";
   }
   return date.toISOString().split("T")[0];
+}
+
+/**
+ * The income date the plan actually uses on or after `asOf`.
+ *
+ * A stored next payday may already be in the past (the app does not rewrite the
+ * ledger just because a date passed). Showing that stale date as "next" is false;
+ * advance the same anchored recurrence the forecast uses.
+ */
+export function nextIncomeDate(income: IncomeItem, asOf: string): string {
+  if (income.next_payday >= asOf) return income.next_payday;
+  if (income.frequency === "One-time") return income.next_payday;
+  const lastAnchorDay = Number(income.last_payday.split("-")[2]);
+  const nextDay = Number(income.next_payday.split("-")[2]);
+  const [ny, nm] = income.next_payday.split("-").map(Number);
+  const lastOfNextMonth = new Date(Date.UTC(ny, nm, 0)).getUTCDate();
+  const incomeAnchorDay =
+    nextDay === Math.min(lastAnchorDay, lastOfNextMonth) ? lastAnchorDay : nextDay;
+  let current = income.next_payday;
+  let guard = 0;
+  while (current < asOf && guard < 10_000) {
+    const next = getNextDate(current, income.frequency, incomeAnchorDay);
+    if (next <= current) break;
+    current = next;
+    guard += 1;
+  }
+  return current;
 }
 
 export interface ProjectedBillSlot {
@@ -466,13 +493,13 @@ function liabilityMinPaymentEvents(
         const shortfall = Math.max(0, amount - coveredCents);
         const principalReduction = paidCoverage ? shortfall : amount;
         if (eventDate < windowEnd && shortfall > 0) {
-          events.push({ date: eventDate, amount_cents: -shortfall, type: "expense", name });
+          events.push({ date: eventDate, amount_cents: -shortfall, type: "expense", name, category: "debt-minimum" });
         }
         if (eventDate < windowEnd) remainingBalance -= principalReduction;
         continue;
       }
       if (eventDate < windowEnd) {
-        events.push({ date: eventDate, amount_cents: -amount, type: "expense", name });
+        events.push({ date: eventDate, amount_cents: -amount, type: "expense", name, category: "debt-minimum" });
         remainingBalance -= amount;
       }
       if (`${curY}-${String(actualM).padStart(2, "0")}-01` >= windowEnd) break;

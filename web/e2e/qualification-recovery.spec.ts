@@ -767,10 +767,16 @@ test.describe("W2 Web → Python → fresh Web recovery", () => {
           });
           expect(restoredPaymentIds.has(String(restoredCarDebt.linked_payment_id))).toBe(true);
 
-          // Shared snapshot data came back; browser-local preferences did not.
+          // Shared records and portable financial settings came back; the theme
+          // preference stayed local to the first browser.
           expect(await readStorage(secondPage, THEME_STORAGE_KEY)).toBeNull();
-          expect(await readStorage(secondPage, ASSUMPTIONS_STORAGE_KEY)).toBeNull();
-          expect(await readStorage(secondPage, BUDGET_STORAGE_KEY)).toBeNull();
+          expect(JSON.parse((await readStorage(secondPage, ASSUMPTIONS_STORAGE_KEY)) ?? "null")).toMatchObject({
+            schemaVersion: 1,
+            values: { reserveCents: 52_500 },
+          });
+          expect(JSON.parse((await readStorage(secondPage, BUDGET_STORAGE_KEY)) ?? "null")).toMatchObject({
+            monthlyLimitCents: 20_000,
+          });
           await expect(
             secondPage.getByRole("button", { name: "Use dark theme" })
           ).toBeVisible();

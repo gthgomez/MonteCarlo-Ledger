@@ -34,6 +34,8 @@ interface SyncModalProps {
     options: LedgerChangeOptions
   ) => Promise<PersistenceResult>;
   currentVaultId?: string;
+  /** Sample data must never be uploaded as if it were the person's ledger. */
+  usingDemo: boolean;
   /** The settings that a push should send with the ledger, or null when invalid. */
   settingsProfile: SettingsProfile | null;
   /** True only when this browser already holds explicitly saved decision settings. */
@@ -96,6 +98,7 @@ export function SyncModal({
   currentStoredRaw,
   onApplyState,
   currentVaultId,
+  usingDemo,
   settingsProfile,
   hasSavedDecisionSettings,
   onApplyRecoveredSettings,
@@ -210,6 +213,16 @@ export function SyncModal({
 
   const handlePushToCloud = async () => {
     if (recoveryRequired || activeOperationRef.current) return;
+    if (usingDemo) {
+      const proceed = window.confirm(
+        "This is sample data, not your finances. If you push it, another device will recover it as a real ledger.\n\nEnter your own numbers from Home first unless you are deliberately testing the vault. Push the sample anyway?"
+      );
+      if (!proceed) {
+        setErrorMessage(null);
+        setStatusMessage("Push cancelled. Sample data was not sent.");
+        return;
+      }
+    }
     if (!vaultId.trim() || !passphrase.trim()) {
       setStatusMessage(null);
       setErrorMessage("Please enter both Vault ID and Passphrase.");
@@ -517,7 +530,7 @@ export function SyncModal({
         <div className="mb-4 flex flex-wrap gap-2 border-b border-line text-sm">
           <button
             onClick={() => setTab("cloud")}
-            className={`pb-2 px-3 font-semibold border-b-2 transition ${
+            className={`min-h-11 pb-2 px-3 font-semibold border-b-2 transition ${
               tab === "cloud"
                 ? "border-accent text-accent"
                 : "border-transparent text-muted hover:text-ink"
@@ -527,7 +540,7 @@ export function SyncModal({
           </button>
           <button
             onClick={() => setTab("cli")}
-            className={`pb-2 px-3 font-semibold border-b-2 transition ${
+            className={`min-h-11 pb-2 px-3 font-semibold border-b-2 transition ${
               tab === "cli"
                 ? "border-accent text-accent"
                 : "border-transparent text-muted hover:text-ink"
@@ -537,7 +550,7 @@ export function SyncModal({
           </button>
           <button
             onClick={() => setTab("file")}
-            className={`pb-2 px-3 font-semibold border-b-2 transition ${
+            className={`min-h-11 pb-2 px-3 font-semibold border-b-2 transition ${
               tab === "file"
                 ? "border-accent text-accent"
                 : "border-transparent text-muted hover:text-ink"
@@ -597,6 +610,7 @@ export function SyncModal({
               Python and Android ledgers remain readable without it.
             </p>
             <p className="text-muted">
+              Sample data cannot be pushed as your ledger. Enter your own numbers from Home first.
               After a successful push this browser remembers the Vault ID, but never the passphrase.
               Before clearing browser data or moving to another device, record the Vault ID and
               passphrase separately in a safe place outside this browser. You need both to pull the
@@ -612,7 +626,7 @@ export function SyncModal({
                 value={vaultId}
                 disabled={isLoading}
                 onChange={(e) => changeVaultTarget(() => setVaultId(e.target.value))}
-                className="w-full px-3 py-2 rounded-lg bg-inset border border-line text-ink focus:outline-none focus:border-accent"
+                className="min-h-11 w-full px-3 py-2 rounded-lg bg-inset border border-line text-ink focus:outline-none focus:border-accent"
               />
             </div>
 
@@ -627,7 +641,7 @@ export function SyncModal({
                 value={passphrase}
                 disabled={isLoading}
                 onChange={(e) => changeVaultTarget(() => setPassphrase(e.target.value))}
-                className="w-full px-3 py-2 rounded-lg bg-inset border border-line text-ink focus:outline-none focus:border-accent"
+                className="min-h-11 w-full px-3 py-2 rounded-lg bg-inset border border-line text-ink focus:outline-none focus:border-accent"
               />
             </div>
 
@@ -635,7 +649,7 @@ export function SyncModal({
               <button
                 onClick={handlePushToCloud}
                 disabled={isLoading || recoveryRequired}
-                className="flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-accent hover:opacity-90 disabled:opacity-50 text-on-accent font-semibold transition"
+                className="flex min-h-11 items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-accent hover:opacity-90 disabled:opacity-50 text-on-accent font-semibold transition"
               >
                 <Upload className="w-3.5 h-3.5" />
                 <span>{activeOperation === "push" ? "Encrypting..." : "Push (Upload)"}</span>
@@ -644,7 +658,7 @@ export function SyncModal({
               <button
                 onClick={handlePullFromCloud}
                 disabled={isLoading || recoveryRequired}
-                className="flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-inset hover:bg-surface disabled:opacity-50 text-ink font-semibold border border-line transition"
+                className="flex min-h-11 items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-inset hover:bg-surface disabled:opacity-50 text-ink font-semibold border border-line transition"
               >
                 <Download className="w-3.5 h-3.5" />
                 <span>{activeOperation === "pull" ? "Decrypting..." : "Pull (Download)"}</span>

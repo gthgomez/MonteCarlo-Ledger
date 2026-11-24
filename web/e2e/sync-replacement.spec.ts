@@ -49,6 +49,8 @@ async function fillVaultForm(page: Page, vaultId: string): Promise<void> {
 async function createSyntheticVault(page: Page, vaultId: string): Promise<void> {
   await openSync(page);
   await fillVaultForm(page, vaultId);
+  // A demo push explicitly confirms that the sample is not the person's ledger.
+  page.once("dialog", (dialog) => dialog.accept());
   await page.getByRole("button", { name: "Push (Upload)" }).click();
   await expect(
     page.getByText(/Successfully pushed encrypted snapshot to Cloud Vault \(rev 1\)!/)

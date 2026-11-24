@@ -12,6 +12,7 @@ import {
 } from "@/lib/ledger-edits";
 import { formatMoney } from "@/lib/money-format";
 import { cashMinusEnteredDebt, enteredDebtCents, transactionSumCents } from "@/lib/present";
+import { nextIncomeDate } from "@/lib/scenario-builder";
 import { type PersistenceResult } from "@/lib/sync-state";
 import { type IncomeItem, type LedgerState } from "@/lib/types";
 import { Button, Explain, fieldClass, Notice, Panel } from "./ui";
@@ -340,12 +341,20 @@ export function MoneyView({
         </form>
         <ul className="mt-4 divide-y divide-line">
           {state.incomes.length === 0 && <li className="py-3 text-sm text-muted">No paycheck is scheduled.</li>}
-          {state.incomes.map((income) => (
+          {state.incomes.map((income) => {
+            const nextDate = nextIncomeDate(income, asOf);
+            const oneTimePast = income.frequency === "One-time" && income.next_payday < asOf;
+            return (
             <li key={String(income.id)} className="flex flex-wrap items-center justify-between gap-3 py-3 text-sm">
               <div>
                 <p className="font-medium">{income.name}</p>
                 <p className="text-muted">
-                  {income.frequency} · next {formatDateLabel(income.next_payday)}
+                  {income.frequency} ·{" "}
+                  {oneTimePast
+                    ? `scheduled ${formatDateLabel(income.next_payday)} (past; no future occurrence)`
+                    : nextDate !== income.next_payday
+                      ? `next ${formatDateLabel(nextDate)} (entered date ${formatDateLabel(income.next_payday)} has passed)`
+                      : `next ${formatDateLabel(income.next_payday)}`}
                 </p>
               </div>
               <div className="flex items-center gap-3">
@@ -355,7 +364,8 @@ export function MoneyView({
                 </Button>
               </div>
             </li>
-          ))}
+            );
+          })}
         </ul>
       </Panel>
 
