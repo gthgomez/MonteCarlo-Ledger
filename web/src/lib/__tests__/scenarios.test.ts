@@ -255,8 +255,8 @@ test("an extra debt payment is frozen against bill variance but the linked minim
   assert.equal(result.status, "ok");
   if (result.status !== "ok") return;
   assert.deepEqual(result.rows.map(({ date, amount_cents }) => [date, amount_cents]), [
-    [AS_OF, -10_000],
     [AS_OF, -98_000],
+    [AS_OF, -10_000],
   ]);
   assert.equal(result.outcome.projectedLowCents, -8_000);
   assert.equal(result.outcome.safeSpendCents, -3_000);
@@ -265,29 +265,110 @@ test("an extra debt payment is frozen against bill variance but the linked minim
   assert.deepEqual(ledger, saved);
 });
 
-test("the extra-payment category override does not change the purchase caller", () => {
+test("a hypothetical purchase stays fixed and consumes no bill draw", () => {
   const ledger = emptyLedger(100_000);
-  ledger.version = "2.2";
   ledger.payments = [
-    { id: "loan-bill", name: "Loan bill", amount_cents: 10_000, recurrence: "Monthly", due_day: 10 },
+    { id: "bill-a", name: "A bill", amount_cents: 10_000, recurrence: "Monthly", due_day: 10 },
+    { id: "bill-b", name: "B bill", amount_cents: 20_000, recurrence: "Monthly", due_day: 20 },
   ];
-  ledger.liabilities = [{
-    id: "loan", name: "Loan", balance_cents: 10_000, apr_basis_points: 0,
-    min_payment_cents: 10_000, due_day_of_month: 10, linked_payment_id: "loan-bill",
-  }];
   const assumptions = {
     ...DEFAULT_ASSUMPTIONS,
-    horizonDays: 30,
-    runs: 10,
+    horizonDays: 60,
+    runs: 200,
+    seed: 7,
     expenseVariationMin: -50,
-    expenseVariationMax: -50,
+    expenseVariationMax: 50,
     surpriseProbabilityPpm: 0,
     reserveCents: 0,
   };
-  const purchase = evaluatePurchase(ledger, AS_OF, assumptions, 98_000, AS_OF);
+  const baseline = evaluateLedger(ledger, AS_OF, assumptions);
+  assert.equal(baseline.status, "ok");
+  if (baseline.status !== "ok") return;
+  const amount = 10_000;
+  const purchase = evaluatePurchase(ledger, AS_OF, assumptions, amount, AS_OF);
   assert.equal(purchase.status, "ok");
   if (purchase.status !== "ok") return;
-  // A purchase is ordinary spending, so the -50% bill variance still applies to it.
-  assert.equal(purchase.outcome.projectedLowCents, -8_000);
-  assert.equal(purchase.outcome.safeSpendCents, 46_000);
+
+  // The decision amount must not be scaled by bill variance, and the other bills'
+  // draws must be identical, so every modeled trough moves by exactly the amount.
+  assert.equal(purchase.outcome.projectedLowCents, baseline.outcome.projectedLowCents - amount);
+  assert.equal(purchase.outcome.safeSpendCents, baseline.outcome.safeSpendCents - amount);
+  assert.equal(purchase.outcome.minimumBalanceP10Cents, baseline.outcome.minimumBalanceP10Cents - amount);
+  assert.equal(purchase.outcome.overdraftPpm, baseline.outcome.overdraftPpm);
+});
+
+test("a monthly set-aside stays fixed under bill variation", () => {
+  const ledger = emptyLedger(100_000);
+  const assumptions = {
+    ...DEFAULT_ASSUMPTIONS,
+    horizonDays: 30,
+    runs: 50,
+    seed: 3,
+    expenseVariationMin: -50,
+    expenseVariationMax: 50,
+    surpriseProbabilityPpm: 0,
+    reserveCents: 0,
+  };
+  const aside = evaluateMonthlySetAside(ledger, AS_OF, assumptions, 25_000);
+  assert.equal(aside.status, "ok");
+  if (aside.status !== "ok") return;
+  assert.equal(aside.outcome.safeSpendCents, 75_000);
+  assert.equal(aside.outcome.projectedLowCents, 75_000);
+  assert.deepEqual(
+    aside.rows.filter((row) => row.name === "Amount set aside").map((row) => row.amount_cents),
+    [-25_000]
+  );
+});
+
+test("a coincidental category name cannot freeze an existing future expense", () => {
+  const ledger = emptyLedger(100_000);
+  ledger.current_balance_cents = 100_000;
+  ledger.transactions = [
+    { id: "tx-open", amount_cents: 110_000, type: "Adjustment", date: AS_OF, category: "Adjustment" },
+    {
+      id: "tx-existing",
+      amount_cents: -10_000,
+      type: "Expense",
+      date: "2027-01-10",
+      category: "extra-debt-payment",
+      description: "Existing future expense",
+    },
+  ];
+  const assumptions = {
+    ...DEFAULT_ASSUMPTIONS,
+    horizonDays: 60,
+    runs: 200,
+    seed: 9,
+    expenseVariationMin: -50,
+    expenseVariationMax: 50,
+    surpriseProbabilityPpm: 0,
+    reserveCents: 0,
+  };
+  const baseline = evaluateLedger(ledger, AS_OF, assumptions);
+  assert.equal(baseline.status, "ok");
+  if (baseline.status !== "ok") return;
+  const extra = evaluateExtraDebtPayment(ledger, AS_OF, assumptions, 5_000, AS_OF);
+  assert.equal(extra.status, "ok");
+  if (extra.status !== "ok") return;
+  // Only the fixed extra payment moves every modeled trough; the existing
+  // same-category expense keeps its normal seeded variation.
+  assert.equal(extra.outcome.projectedLowCents, baseline.outcome.projectedLowCents - 5_000);
+  assert.equal(extra.outcome.minimumBalanceP10Cents, baseline.outcome.minimumBalanceP10Cents - 5_000);
+});
+
+test("public scenarios reject an adapter-private fixed field", () => {
+  assert.throws(
+    () =>
+      runScenario({
+        contract_version: "2.0",
+        scenario_id: "fixed-field",
+        as_of: AS_OF,
+        starting_balance_cents: 100_000,
+        horizon_days: 30,
+        events: [
+          { date: AS_OF, amount_cents: -10_000, type: "expense", name: "Rent", fixed: true },
+        ],
+      }),
+    /fixed is not a contract event field/
+  );
 });

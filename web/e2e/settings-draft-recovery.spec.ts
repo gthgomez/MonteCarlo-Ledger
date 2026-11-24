@@ -649,3 +649,35 @@ test.describe("reconciliation preview availability", () => {
     await sibling.close();
   });
 });
+
+test("a held financial-settings lock keeps the editor pending and prevents navigation", async ({ page }) => {
+  await page.goto("/");
+  await page.getByRole("button", { name: "Advanced", exact: true }).click();
+  await page.evaluate((name) => new Promise<void>((acquired) => {
+    const harness = window as Window & { releaseTestSettingsLock?: () => void };
+    const hold = new Promise<void>((release) => { harness.releaseTestSettingsLock = release; });
+    void navigator.locks.request(name, () => {
+      acquired();
+      return hold;
+    });
+  }), "montecarlo-financial-settings-write");
+
+  await page.getByLabel(RESERVE_LABEL).fill("400");
+  await page.getByRole("button", { name: "Update results" }).click();
+  await expect(page.getByText("Saving financial settings", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Home", exact: true })).toBeDisabled();
+
+  // The queued write is not submitted twice and the editor stays on this section.
+  await page.getByRole("button", { name: "Home", exact: true }).click({ force: true });
+  await expect(page.getByRole("status").filter({ hasText: "Saving financial settings" })).toBeVisible();
+
+  await page.evaluate(() => {
+    const harness = window as Window & { releaseTestSettingsLock?: () => void };
+    harness.releaseTestSettingsLock?.();
+  });
+  await expect.poll(async () => page.evaluate((key) => {
+    const raw = localStorage.getItem(key);
+    return raw === null ? null : JSON.parse(raw).values?.reserveCents;
+  }, ASSUMPTIONS_STORAGE_KEY)).toBe(40000);
+  await expect(page.getByText(APPLIED_STATUS)).toBeVisible();
+});

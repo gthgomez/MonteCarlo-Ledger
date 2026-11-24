@@ -1,8 +1,8 @@
-import { runScenario, runScenarioWithFixedDraftExpense, timelineRows, type TimelineRow } from "../contract/engine";
+import { runScenario, runScenarioWithFixedEvents, timelineRows, type TimelineRow } from "../contract/engine";
 import { ContractError } from "../contract/money";
 import { Assumptions, assumptionError, toSimulationConfig } from "./assumptions";
 import { addDaysIso, isIsoDate } from "./dates";
-import { buildScenarioFromLedger } from "./scenario-builder";
+import { buildScenarioFromLedger, fixedEventOrders, sortScenarioEvents } from "./scenario-builder";
 import { LedgerState } from "./types";
 
 export interface ModelOutcome {
@@ -67,11 +67,15 @@ function outcomeFrom(raw: any, assumptions: Assumptions, scenario: any): ModelOu
   };
 }
 
-function runBuilt(scenario: any, assumptions: Assumptions, fixedDraftExpenseCategory?: string): EvalResult {
+function runBuilt(
+  scenario: any,
+  assumptions: Assumptions,
+  fixedOrders?: ReadonlySet<number>
+): EvalResult {
   try {
-    const raw = fixedDraftExpenseCategory === undefined
+    const raw = fixedOrders === undefined
       ? runScenario(scenario)
-      : runScenarioWithFixedDraftExpense(scenario, fixedDraftExpenseCategory);
+      : runScenarioWithFixedEvents(scenario, fixedOrders);
     if (!raw.risk || !raw.forecast) {
       return fail("UNKNOWN_ERROR", "The engine returned a result without a forecast.");
     }
@@ -109,9 +113,6 @@ export function evaluatePurchase(
   return evaluateDatedOutflow(state, asOf, assumptions, amountCents, date, "Simulated Purchase");
 }
 
-/** Private marker for the extra outflow; it is never posted or persisted. */
-const EXTRA_DEBT_PAYMENT_CATEGORY = "extra-debt-payment";
-
 /** Adds just the proposed cash outflow. It does not rewrite a liability or its future minimums. */
 export function evaluateExtraDebtPayment(
   state: LedgerState,
@@ -120,7 +121,7 @@ export function evaluateExtraDebtPayment(
   amountCents: number,
   date: string
 ): EvalResult {
-  return evaluateDatedOutflow(state, asOf, assumptions, amountCents, date, "Extra debt payment", EXTRA_DEBT_PAYMENT_CATEGORY);
+  return evaluateDatedOutflow(state, asOf, assumptions, amountCents, date, "Extra debt payment");
 }
 
 function evaluateDatedOutflow(
@@ -129,8 +130,7 @@ function evaluateDatedOutflow(
   assumptions: Assumptions,
   amountCents: number,
   date: string,
-  name: string,
-  fixedCategory?: string
+  name: string
 ): EvalResult {
   const problem = assumptionError(assumptions);
   if (problem) return fail("INVALID_ASSUMPTIONS", problem);
@@ -150,14 +150,17 @@ function evaluateDatedOutflow(
       assumptions.horizonDays,
       toSimulationConfig(assumptions)
     );
-    scenario.events.push({
+    const fixedEvent = {
       date,
       amount_cents: -amountCents,
       type: "expense",
       name,
-      ...(fixedCategory === undefined ? {} : { category: fixedCategory }),
-    });
-    return runBuilt(scenario, assumptions, fixedCategory);
+    };
+    scenario.events.push(fixedEvent);
+    sortScenarioEvents(scenario.events);
+    // A hypothetical amount is the decision variable. Varying it (or letting
+    // it consume a bill draw) would change the question being asked.
+    return runBuilt(scenario, assumptions, new Set([scenario.events.indexOf(fixedEvent)]));
   } catch (err) {
     return fromThrown(err);
   }
@@ -227,15 +230,19 @@ export function evaluateMonthlySetAside(
   assumptions: Assumptions,
   amountCents: number
 ): EvalResult {
+  const problem = assumptionError(assumptions);
+  if (problem) return fail("INVALID_ASSUMPTIONS", problem);
+  if (!isIsoDate(asOf)) return fail("INVALID_DATE", asOf);
   if (!Number.isInteger(amountCents) || amountCents <= 0) {
     return fail("INVALID_AMOUNT", "The amount set aside must be positive integer cents.");
   }
   const next = JSON.parse(JSON.stringify(state)) as LedgerState;
   const dueDay = Number(asOf.split("-")[2]);
+  const hypotheticalId = "hypothetical-set-aside";
   next.payments = [
     ...next.payments,
     {
-      id: "hypothetical-set-aside",
+      id: hypotheticalId,
       name: "Amount set aside",
       amount_cents: amountCents,
       due_day: dueDay,
@@ -243,5 +250,16 @@ export function evaluateMonthlySetAside(
       is_auto_withdraw: false,
     },
   ];
-  return evaluateLedger(next, asOf, assumptions);
+  try {
+    const scenario = buildScenarioFromLedger(
+      next,
+      asOf,
+      assumptions.horizonDays,
+      toSimulationConfig(assumptions),
+      { fixedPaymentIds: new Set([hypotheticalId]) }
+    );
+    return runBuilt(scenario, assumptions, fixedEventOrders(scenario));
+  } catch (err) {
+    return fromThrown(err);
+  }
 }

@@ -50,6 +50,22 @@ CLI/API `risk` / `safe-to-spend` / `overdraft` commands.
 - These are simulated estimates from a bounded variance model, **not guarantees and not worst
   cases**.
 
+## Same-day adapter order
+
+Web and Python adapters sort explicit events by date, type (income, expense, adjustment), name using
+Unicode code-point order, signed cents, and category before handing them to the contract. The engine
+keeps its documented input-order tie-breaker, but both adapters provide the same stable,
+locale-independent input order. This prevents the same ledger from assigning seeded bill or income
+draws differently on the two surfaces. A presentation label is never written into an event category.
+
+## Hypothetical outflows
+
+A purchase, monthly set-aside, or extra debt payment is identified to the adapter as a fixed event
+for the what-if run. It is included in the cash path at the user's exact amount and date, consumes
+no random draw, and leaves other bills, income, and surprise draws unchanged. The Python decision
+layer uses the same fixed-event entry point. `fixed` is not a scenario field: public scenarios that
+contain it are rejected as schema-invalid. This is a comparison, not a ledger write.
+
 ## Linked bills and debt minimums
 
 Sources: `scenario.py` (`_linked_payment_slot`, `_liability_min_payment_events`) and the Web

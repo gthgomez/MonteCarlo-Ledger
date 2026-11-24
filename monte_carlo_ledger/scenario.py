@@ -354,6 +354,19 @@ def _bill_events(as_of: date, window_end: date, read_only: bool) -> List[Dict[st
     return _bill_events_readonly(as_of, window_end) if read_only else _bill_events_rw(as_of, window_end)
 
 
+def canonical_event_order(events: List[Dict[str, Any]]) -> None:
+    """Sort explicit events by the surface-independent same-day order."""
+    events.sort(
+        key=lambda event: (
+            event["date"],
+            0 if event["type"] == "income" else 2 if event["type"] == "adjustment" else 1,
+            event.get("name") or "",
+            event["amount_cents"],
+            event.get("category") or "",
+        )
+    )
+
+
 def build_scenario(
     as_of: str,
     horizon_days: int = 90,
@@ -382,6 +395,10 @@ def build_scenario(
             liabilities, ledger["payments"], start, window_end, ledger["occurrences"]
         )
     )
+    # Canonicalize same-day ties by stable, surface-independent fields. The engine's
+    # input-order tie-breaker must not depend on SQL/array order: otherwise the same
+    # ledger could assign seeded bill/income draws differently on Web/Python.
+    canonical_event_order(events)
     starting_balance = ledger["starting_balance_cents"]
     scenario: Dict[str, Any] = {
         "contract_version": CONTRACT_VERSION,

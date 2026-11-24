@@ -77,7 +77,10 @@ async function readAssumptions(page: Page): Promise<any> {
 async function seedSavedLedger(page: Page): Promise<void> {
   await page.goto("/");
   await page.evaluate(
-    ({ ledgerKey, ledger }) => localStorage.setItem(ledgerKey, JSON.stringify(ledger)),
+    ({ ledgerKey, ledger }) => {
+      localStorage.setItem(ledgerKey, JSON.stringify(ledger));
+      localStorage.removeItem("montecarlo_demo_mode_v1");
+    },
     { ledgerKey: LEDGER_STORAGE_KEY, ledger: SAMPLE_LEDGER_STATE }
   );
   await page.reload();

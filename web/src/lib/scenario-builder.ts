@@ -1,5 +1,36 @@
 import { checkedAdd, roundHalfAway, toSafeNumber } from "../contract/money";
-import { LedgerState, LiabilityItem, PaymentItem } from "./types";
+import { IncomeItem, LedgerState, LiabilityItem, PaymentItem } from "./types";
+
+/**
+ * Locale-independent code-point comparison, matching Python's string ordering.
+ * `localeCompare` can put mixed-case/accented names in a different order and is
+ * browser-locale dependent, which would shift seeded draws between surfaces.
+ */
+function compareCodePoints(left: string, right: string): number {
+  const a = Array.from(left);
+  const b = Array.from(right);
+  const limit = Math.min(a.length, b.length);
+  for (let i = 0; i < limit; i += 1) {
+    const diff = a[i].codePointAt(0)! - b[i].codePointAt(0)!;
+    if (diff !== 0) return diff;
+  }
+  return a.length - b.length;
+}
+
+/** Canonical same-day order shared by the base scenario and what-if events. */
+export function sortScenarioEvents(events: any[]): void {
+  events.sort((left, right) => {
+    const byDate = compareCodePoints(String(left.date), String(right.date));
+    if (byDate !== 0) return byDate;
+    const leftRank = left.type === "income" ? 0 : left.type === "adjustment" ? 2 : 1;
+    const rightRank = right.type === "income" ? 0 : right.type === "adjustment" ? 2 : 1;
+    if (leftRank !== rightRank) return leftRank - rightRank;
+    const byName = compareCodePoints(String(left.name), String(right.name));
+    if (byName !== 0) return byName;
+    if (left.amount_cents !== right.amount_cents) return left.amount_cents - right.amount_cents;
+    return compareCodePoints(String(left.category ?? ""), String(right.category ?? ""));
+  });
+}
 
 function addDays(iso: string, days: number): string {
   const [y, m, d] = iso.split("-").map(Number);
@@ -39,6 +70,48 @@ function getNextDate(iso: string, frequency: string, anchorDay?: number): string
       return "9999-12-31";
   }
   return date.toISOString().split("T")[0];
+}
+
+/**
+ * The income date the plan actually uses on or after `asOf`.
+ *
+ * A stored next payday may already be in the past (the app does not rewrite the
+ * ledger just because a date passed). Showing that stale date as "next" is false;
+ * advance the same anchored recurrence the forecast uses.
+ */
+export function nextIncomeDate(income: IncomeItem, asOf: string): string {
+  if (income.next_payday >= asOf) return income.next_payday;
+  if (income.frequency === "One-time") return income.next_payday;
+  const lastAnchorDay = Number(income.last_payday.split("-")[2]);
+  const nextDay = Number(income.next_payday.split("-")[2]);
+  const [ny, nm] = income.next_payday.split("-").map(Number);
+  const lastOfNextMonth = new Date(Date.UTC(ny, nm, 0)).getUTCDate();
+  const incomeAnchorDay =
+    nextDay === Math.min(lastAnchorDay, lastOfNextMonth) ? lastAnchorDay : nextDay;
+  let current = income.next_payday;
+  let guard = 0;
+  while (current < asOf && guard < 10_000) {
+    const next = getNextDate(current, income.frequency, incomeAnchorDay);
+    if (next <= current) break;
+    current = next;
+    guard += 1;
+  }
+  return current;
+}
+
+const fixedOrdersByScenario = new WeakMap<object, Set<number>>();
+
+/** Adapter-private metadata; never serialized into the scenario or contract. */
+export function fixedEventOrders(scenario: any): ReadonlySet<number> | undefined {
+  return fixedOrdersByScenario.get(scenario);
+}
+
+export interface ProjectedDebtMinimum {
+  liability_id: string;
+  name: string;
+  date: string;
+  amount_cents: number;
+  due_day_of_month: number | null;
 }
 
 export interface ProjectedBillSlot {
@@ -113,8 +186,14 @@ export function firstOneTimeBillOutsideWindow(state: BillInputs, windowEnd: stri
 }
 
 /** One occurrence model for cash events and editable bill rows. */
-export function projectBillPayments(state: LedgerState, asOf: string, windowEnd: string) {
+export function projectBillPayments(
+  state: LedgerState,
+  asOf: string,
+  windowEnd: string,
+  fixedPaymentIds?: ReadonlySet<string>
+) {
   const events: { date: string; amount_cents: number; type: "expense"; name: string }[] = [];
+  const fixedEvents = new Set<(typeof events)[number]>();
   const slots: ProjectedBillSlot[] = [];
   const paymentById = new Map(state.payments.map((p) => [String(p.id), p] as const));
   const covered = coveredBillSlots(state.bill_occurrences);
@@ -153,12 +232,14 @@ export function projectBillPayments(state: LedgerState, asOf: string, windowEnd:
           if (!covered.has(key)) {
             generated.add(key);
             slots.push({ payment: pmt, slotDate: dueIso, dueDate: dueIso });
-            events.push({
+            const event = {
               date: dueIso,
               amount_cents: -pmt.amount_cents,
-              type: "expense",
+              type: "expense" as const,
               name: pmt.name,
-            });
+            };
+            events.push(event);
+            if (fixedPaymentIds?.has(String(pmt.id))) fixedEvents.add(event);
           }
         }
       }
@@ -172,12 +253,14 @@ export function projectBillPayments(state: LedgerState, asOf: string, windowEnd:
           if (!covered.has(key)) {
             generated.add(key);
             slots.push({ payment: pmt, slotDate: current, dueDate: current });
-            events.push({
+            const event = {
               date: current,
               amount_cents: -pmt.amount_cents,
-              type: "expense",
+              type: "expense" as const,
               name: pmt.name,
-            });
+            };
+            events.push(event);
+            if (fixedPaymentIds?.has(String(pmt.id))) fixedEvents.add(event);
           }
         }
         if (pmt.recurrence === "One-time") break;
@@ -196,14 +279,15 @@ export function projectBillPayments(state: LedgerState, asOf: string, windowEnd:
     slots.push(slot);
   }
 
-  return { events, generated, slots };
+  return { events, generated, slots, fixedEvents };
 }
 
 export function buildScenarioFromLedger(
   state: LedgerState,
   asOf: string,
   horizonDays: number = 90,
-  includeSimulation?: any
+  includeSimulation?: any,
+  options?: { fixedPaymentIds?: ReadonlySet<string> }
 ): any {
   const paymentIds = new Set(state.payments.map((payment) => String(payment.id)));
   const ownedPayments = new Set<string>();
@@ -251,7 +335,7 @@ export function buildScenarioFromLedger(
     }
   }
 
-  const bills = projectBillPayments(state, asOf, windowEnd);
+  const bills = projectBillPayments(state, asOf, windowEnd, options?.fixedPaymentIds);
   events.push(...bills.events);
 
   // 3. Future-dated posted transactions are events, not opening cash.
@@ -274,11 +358,19 @@ export function buildScenarioFromLedger(
     state.liabilities ?? [], state.payments, state.bill_occurrences, state.transactions, bills.generated, asOf, windowEnd,
   ));
 
+  sortScenarioEvents(events);
+
   const futureOutflow = state.transactions
     .filter((tx) => tx.date > asOf)
     .reduce((sum, tx) => sum + BigInt(tx.amount_cents), 0n);
   const startingBalance = toSafeNumber(BigInt(state.current_balance_cents) - futureOutflow);
 
+  const fixedOrders = new Set<number>();
+  if (bills.fixedEvents.size > 0) {
+    events.forEach((event, index) => {
+      if (bills.fixedEvents.has(event)) fixedOrders.add(index);
+    });
+  }
   const scenario: any = {
     contract_version: "2.0",
     scenario_id: `ledger-${asOf}-${horizonDays}`,
@@ -316,6 +408,7 @@ export function buildScenarioFromLedger(
   if (includeSimulation) {
     scenario.simulation = includeSimulation;
   }
+  if (fixedOrders.size > 0) fixedOrdersByScenario.set(scenario, fixedOrders);
 
   return scenario;
 }
@@ -375,7 +468,8 @@ function liabilityMinPaymentEvents(
   transactions: { id?: number | string; amount_cents: number }[],
   generatedSlots: ReadonlySet<string>,
   asOf: string,
-  windowEnd: string
+  windowEnd: string,
+  onEvent?: (detail: ProjectedDebtMinimum) => void
 ): any[] {
   const paymentById = new Map(payments.map((payment) => [String(payment.id), payment] as const));
   const occurrenceSlots = new Map<string, Map<string, typeof occurrences[number]>>();
@@ -467,16 +561,59 @@ function liabilityMinPaymentEvents(
         const principalReduction = paidCoverage ? shortfall : amount;
         if (eventDate < windowEnd && shortfall > 0) {
           events.push({ date: eventDate, amount_cents: -shortfall, type: "expense", name });
+          onEvent?.({
+            liability_id: String(liability.id),
+            name,
+            date: eventDate,
+            amount_cents: -shortfall,
+            due_day_of_month: liability.due_day_of_month ?? null,
+          });
         }
         if (eventDate < windowEnd) remainingBalance -= principalReduction;
         continue;
       }
       if (eventDate < windowEnd) {
         events.push({ date: eventDate, amount_cents: -amount, type: "expense", name });
+        onEvent?.({
+          liability_id: String(liability.id),
+          name,
+          date: eventDate,
+          amount_cents: -amount,
+          due_day_of_month: liability.due_day_of_month ?? null,
+        });
         remainingBalance -= amount;
       }
       if (`${curY}-${String(actualM).padStart(2, "0")}-01` >= windowEnd) break;
     }
   }
   return events;
+}
+
+/**
+ * The same debt-minimum cash events the forecast includes, exposed for honest
+ * presentation. This calls the one projection routine; it is not a second model.
+ */
+export function projectedDebtMinimums(
+  state: LedgerState,
+  asOf: string,
+  horizonDays: number
+): ProjectedDebtMinimum[] {
+  const windowEnd = addDays(asOf, horizonDays);
+  const bills = projectBillPayments(state, asOf, windowEnd);
+  const details: ProjectedDebtMinimum[] = [];
+  liabilityMinPaymentEvents(
+    state.liabilities ?? [],
+    state.payments,
+    state.bill_occurrences,
+    state.transactions,
+    bills.generated,
+    asOf,
+    windowEnd,
+    (detail) => details.push(detail)
+  );
+  return details.sort(
+    (left, right) =>
+      left.date.localeCompare(right.date) ||
+      left.liability_id.localeCompare(right.liability_id)
+  );
 }

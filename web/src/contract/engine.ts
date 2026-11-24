@@ -1,6 +1,7 @@
 /**
  * Pure, clock-free reference engine for MonteCarlo Contract 1.0 - 2.0.
- * Bit-for-bit conformant with Python reference engine.
+ * Conformant with the Python reference engine inside the Web safe-integer domain
+ * (|cents| <= 2^53-1). Python additionally supports the full signed int64 range.
  */
 
 import { amortize, validateLiabilities } from "./debt";
@@ -96,6 +97,11 @@ function validateEvent(ev: any): void {
   }
   if (etype === "adjustment" && amount === 0) {
     throw new ContractError("INVALID_AMOUNT", "zero adjustment");
+  }
+  // `fixed` is an adapter-private what-if instruction, not contract input. Reject
+  // it here so an external scenario cannot silently suppress variation.
+  if ("fixed" in ev) {
+    throw new ContractError("SCHEMA_INVALID", "fixed is not a contract event field");
   }
   if (!["income", "expense", "adjustment"].includes(etype)) {
     throw new ContractError("INVALID_EVENT_TYPE", String(etype));
@@ -423,7 +429,7 @@ function simulateOnce(
   windowEnd: Date,
   p: any,
   rng: SplitMix64,
-  fixedDraftExpenseCategory?: string
+  fixedOrders?: ReadonlySet<number>
 ): any {
   const scenario: InternalEvent[] = base.map((e) => ({ ...e }));
   const imin = p.income_variation_min;
@@ -433,10 +439,9 @@ function simulateOnce(
   const categoryRanges: Map<string, [number, number]> = p.expense_category_variation;
 
   for (const ev of scenario) {
-    // The fixed Web draft is present in this cash path but has no random draw.
-    // All shared contract scenarios still follow the canonical draw order below.
-    if (fixedDraftExpenseCategory !== undefined &&
-        ev.type === "expense" && ev.category === fixedDraftExpenseCategory) continue;
+    // Adapter-private what-if rows are present in this cash path but consume no
+    // draw, so other bills and surprises keep their sequence.
+    if (fixedOrders?.has(ev.order)) continue;
     if (ev.type === "income") {
       if (imin !== 0 || imax !== 0) {
         const pct = BigInt(rng.nextInt(imin, imax));
@@ -516,7 +521,7 @@ function validateSimulationParams(p: any): void {
   simInt(p, "reserve_cents", "INVALID_AMOUNT", 0, Number.MAX_SAFE_INTEGER);
 }
 
-function runExpandedScenario(scenario: any, fixedDraftExpenseCategory?: string): any {
+function runExpandedScenario(scenario: any, fixedOrders?: ReadonlySet<number>): any {
   const { events, asOf, horizon, windowEnd } = expand(scenario);
   const base = sortEvents(events);
   const start = BigInt(requireCents(scenario.starting_balance_cents, "starting_balance_cents"));
@@ -558,7 +563,7 @@ function runExpandedScenario(scenario: any, fixedDraftExpenseCategory?: string):
   let negativeRuns = 0;
 
   for (let r = 0; r < p.runs; r++) {
-    const outcome = simulateOnce(base, start, asOf, horizon, windowEnd, p, rng, fixedDraftExpenseCategory);
+    const outcome = simulateOnce(base, start, asOf, horizon, windowEnd, p, rng, fixedOrders);
     endings.push(outcome.ending_balance_cents);
     minimums.push(outcome.minimum_balance_cents);
     if (outcome.first_negative_date !== null) {
@@ -594,9 +599,16 @@ export function runScenario(scenario: any): any {
   return runExpandedScenario(scenario);
 }
 
-/** Web-local what-if only: keep one draft category fixed without shifting any bill or surprise draws. */
-export function runScenarioWithFixedDraftExpense(scenario: any, category: string): any {
-  return runExpandedScenario(scenario, category);
+/**
+ * Adapter-private what-if entry point. `fixedOrders` are input event indexes
+ * (the engine's `order` field) that must not be varied or consume a draw.
+ * Public scenarios cannot request this through an event field.
+ */
+export function runScenarioWithFixedEvents(
+  scenario: any,
+  fixedOrders: ReadonlySet<number>
+): any {
+  return runExpandedScenario(scenario, fixedOrders);
 }
 
 export function runScenarioSafe(scenario: any): any {

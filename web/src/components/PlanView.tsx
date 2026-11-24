@@ -2,7 +2,7 @@
 
 import React, { useMemo, useState } from "react";
 import { amortize } from "@/contract/debt";
-import { type Assumptions } from "@/lib/assumptions";
+import { cautiousAmountHeading, cautiousAmountShortName, type Assumptions } from "@/lib/assumptions";
 import { addDaysIso } from "@/lib/dates";
 import {
   addInstallmentDebt,
@@ -80,7 +80,7 @@ function Compare({
   const compared = next.outcome;
   const rows = [
     ...(showGuidance ? [
-      ["Cautious amount to spend", formatCautiousSpend(base.safeSpendCents, base.reserveCents), formatCautiousSpend(compared.safeSpendCents, compared.reserveCents)],
+      [cautiousAmountHeading(base.quantileNum, base.quantileDen), formatCautiousSpend(base.safeSpendCents, base.reserveCents), formatCautiousSpend(compared.safeSpendCents, compared.reserveCents)],
       ["Chance of running short", formatProbability(base.overdraftPpm), formatProbability(compared.overdraftPpm)],
     ] : []),
     ["Lowest point if the schedule is exact", formatMoney(base.projectedLowCents), formatMoney(compared.projectedLowCents)],
@@ -365,7 +365,15 @@ export function PlanView({
           <li key={debt.id} className="flex flex-wrap items-center justify-between gap-2 py-2 text-sm">
             <span>
               {debt.name} · owe {formatMoney(debt.balance_cents)} · {(debt.apr_basis_points / 100).toFixed(2)}%
-              {debt.is_active === false ? " · Archived" : base === null ? null : ` · ${debtMinimumLabel(debt)}`}
+              {debt.is_active === false
+                ? " · Archived"
+                : base === null
+                  ? null
+                  : ` · ${debtMinimumLabel(debt)}${
+                      debt.due_day_of_month
+                        ? ` · due day ${debt.due_day_of_month}`
+                        : " · due day not set (plan assumes the 1st)"
+                    }`}
             </span>
             <div className="flex flex-wrap gap-2">
               <Button type="button" variant="quiet" onClick={() => openBalanceEditor(debt)}>
@@ -559,8 +567,8 @@ export function PlanView({
               note={
                 showGuidance && purchase.status === "ok"
                   ? purchase.outcome.safeSpendCents >= 0
-                    ? "In this simulation the cautious amount stays at or above zero after the purchase. That is a model estimate, not a guarantee."
-                    : "In this simulation the cautious amount goes below zero. That is a model estimate, not a guarantee you will overdraw."
+                    ? `In this simulation the ${cautiousAmountShortName(base.quantileNum, base.quantileDen)} stays at or above zero after the purchase. That is a model estimate, not a guarantee.`
+                    : `In this simulation the ${cautiousAmountShortName(base.quantileNum, base.quantileDen)} goes below zero. That is a model estimate, not a guarantee you will overdraw.`
                   : ""
               }
             />

@@ -60,7 +60,7 @@ export function Metric({
 }) {
   return (
     <section className="rounded-xl border border-line bg-surface p-4 shadow-card">
-      <h3 className="text-sm font-medium text-muted">{label}</h3>
+      <h2 className="text-sm font-medium text-muted">{label}</h2>
       <p className="mt-1 text-2xl font-semibold tabular-nums tracking-tight text-ink sm:text-3xl">{value}</p>
       <p className="mt-2 text-sm text-muted">{detail}</p>
     </section>

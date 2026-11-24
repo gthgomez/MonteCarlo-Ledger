@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { runScenario } from "../../contract/engine";
-import { buildScenarioFromLedger, planningMinimumPaymentCents, projectBillPayments, unresolvedPastOneTimeSlots } from "../scenario-builder";
+import { runScenario, timelineRows } from "../../contract/engine";
+import { buildScenarioFromLedger, nextIncomeDate, planningMinimumPaymentCents, projectBillPayments, projectedDebtMinimums, unresolvedPastOneTimeSlots } from "../scenario-builder";
 import { markBillOccurrencePaid, moveBillOccurrence } from "../ledger-edits";
 import { LedgerState } from "../types";
 
@@ -386,7 +386,7 @@ test("a linked bill contributes only the debt minimum shortfall", () => {
   const scenario = buildScenarioFromLedger(state, "2027-01-01", 30);
   assert.deepEqual(
     scenario.events.map((event: any) => [event.date, event.amount_cents]),
-    [["2027-01-15", -1_000], ["2027-01-15", -2_000]],
+    [["2027-01-15", -2_000], ["2027-01-15", -1_000]],
   );
 });
 
@@ -402,7 +402,7 @@ test("an unpaid overdue linked occurrence does not erase the debt minimum", () =
     }],
   });
   const scenario = buildScenarioFromLedger(state, "2027-01-20", 10);
-  assert.deepEqual(scenario.events.map((event: any) => [event.date, event.amount_cents]), [["2027-01-20", -1_000], ["2027-01-20", -2_000]]);
+  assert.deepEqual(scenario.events.map((event: any) => [event.date, event.amount_cents]), [["2027-01-20", -2_000], ["2027-01-20", -1_000]]);
 });
 
 test("a paid linked occurrence uses its transaction amount and does not reduce principal twice", () => {
@@ -413,7 +413,7 @@ test("a paid linked occurrence uses its transaction amount and does not reduce p
     liabilities: [{ id: "loan-1", name: "Loan", balance_cents: 8_000, apr_basis_points: 0, min_payment_cents: 3_000, due_day_of_month: 15, linked_payment_id: "pmt-loan" }],
   });
   const scenario = buildScenarioFromLedger(state, "2027-01-01", 30);
-  assert.deepEqual(scenario.events.map((event: any) => [event.date, event.amount_cents]), [["2027-01-15", -1_000], ["2027-01-15", -2_000]]);
+  assert.deepEqual(scenario.events.map((event: any) => [event.date, event.amount_cents]), [["2027-01-15", -2_000], ["2027-01-15", -1_000]]);
 });
 
 test("a moved unpaid linked occurrence covers its original slot", () => {
@@ -673,4 +673,65 @@ test("marking paid or moving the unresolved one-time slot clears its warning", (
       .map((event: any) => [event.date, event.amount_cents]),
     [["2026-11-10", -90_000]]
   );
+});
+
+test("nextIncomeDate advances a past monthly payday without changing its anchor", () => {
+  assert.equal(
+    nextIncomeDate(
+      {
+        id: "inc-1",
+        name: "Salary",
+        amount_cents: 100000,
+        frequency: "Monthly",
+        last_payday: "2026-01-31",
+        next_payday: "2026-02-28",
+      },
+      "2026-03-10"
+    ),
+    "2026-03-31"
+  );
+  assert.equal(
+    nextIncomeDate(
+      {
+        id: "inc-2",
+        name: "Weekly",
+        amount_cents: 10000,
+        frequency: "Weekly",
+        last_payday: "2026-03-01",
+        next_payday: "2026-03-08",
+      },
+      "2026-03-10"
+    ),
+    "2026-03-15"
+  );
+});
+
+test("projected debt minimums match the cash events without altering the contract scenario", () => {
+  const state = emptyState({
+    current_balance_cents: 100000,
+    liabilities: [
+      {
+        id: "debt-card",
+        name: "Card",
+        balance_cents: 100000,
+        apr_basis_points: 0,
+        min_payment_cents: 30000,
+        kind: "installment",
+        due_day_of_month: 20,
+      },
+    ],
+  });
+  const scenario = buildScenarioFromLedger(state, "2026-03-01", 20);
+  const debtEvent = scenario.events.find((event: any) => event.name === "Card");
+  assert.equal(debtEvent.amount_cents, -30000);
+  assert.equal("category" in debtEvent, false);
+  assert.deepEqual(projectedDebtMinimums(state, "2026-03-01", 20), [
+    {
+      liability_id: "debt-card",
+      name: "Card",
+      date: "2026-03-20",
+      amount_cents: -30000,
+      due_day_of_month: 20,
+    },
+  ]);
 });

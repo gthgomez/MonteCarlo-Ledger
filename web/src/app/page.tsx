@@ -43,7 +43,8 @@ import {
   transactionSumCents,
 } from "@/lib/present";
 import { evaluateLedger } from "@/lib/scenarios";
-import { SECTION_QUESTION, sectionFromHash, type Section } from "@/lib/sections";
+import { projectedDebtMinimums } from "@/lib/scenario-builder";
+import { SECTION_LABEL, SECTION_QUESTION, sectionFromHash, type Section } from "@/lib/sections";
 import { PersistenceResult, VAULT_ID_STORAGE_KEY } from "@/lib/sync-state";
 import { SAMPLE_LEDGER_STATE, type LedgerState } from "@/lib/types";
 import { computeOverdueObligations } from "@/lib/overdue";
@@ -51,6 +52,11 @@ import { useFinancialDate } from "@/lib/use-financial-date";
 import { parseLedgerState } from "@/lib/validate";
 
 const THEME_KEY = "mc-theme";
+/**
+ * Demo provenance must survive a reload. Otherwise editing a sample row saves it
+ * as if it were the person's own ledger and the "not your finances" label vanishes.
+ */
+const DEMO_MODE_KEY = "montecarlo_demo_mode_v1";
 
 /**
  * A second submission in the same tab must fail immediately instead of queuing
@@ -125,6 +131,23 @@ function browserStorage(): Storage | null {
     return window.localStorage;
   } catch {
     return null;
+  }
+}
+
+function readDemoMarker(): boolean {
+  try {
+    return window.localStorage.getItem(DEMO_MODE_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function writeDemoMarker(active: boolean): void {
+  try {
+    if (active) window.localStorage.setItem(DEMO_MODE_KEY, "1");
+    else window.localStorage.removeItem(DEMO_MODE_KEY);
+  } catch {
+    // The visible in-memory label still applies; storage failure must not hide it.
   }
 }
 
@@ -229,9 +252,10 @@ export default function Home() {
           return;
         }
         setState(validated.state);
-        setUsingDemo(false);
+        setUsingDemo(readDemoMarker());
       } else {
         setUsingDemo(true);
+        writeDemoMarker(true);
       }
       const savedVault = localStorage.getItem(VAULT_ID_STORAGE_KEY);
       if (savedVault) setCurrentVaultId(savedVault);
@@ -300,6 +324,10 @@ export default function Home() {
   }, [showReadSettings]);
 
   const asOf = useFinancialDate();
+  const debtMinimums = useMemo(
+    () => projectedDebtMinimums(state, asOf, assumptions.horizonDays),
+    [state, asOf, assumptions.horizonDays]
+  );
 
   const settingsRecoveryMissing = settingsRecovery.status === "missing";
   const evaluation = useMemo(
@@ -350,6 +378,7 @@ export default function Home() {
     setSection(next);
     const url = `${window.location.pathname}${window.location.search}#${next}`;
     window.history.replaceState(null, "", url);
+    requestAnimationFrame(() => document.getElementById("content")?.focus({ preventScroll: true }));
   }
 
   function reloadLedger() {
@@ -387,6 +416,7 @@ export default function Home() {
     setStoredRaw(raw);
     setState(nextState);
     setUsingDemo(demo);
+    writeDemoMarker(demo);
     setSaveWarning(null);
   }
 
@@ -431,7 +461,9 @@ export default function Home() {
     const saved = await runLedgerWrite(async () => {
       setSaveWarning(null);
       const result = await saveLedgerChange(nextState, { expectedRaw: storedRaw });
-      if (result.ok) showSavedLedger(nextState);
+      // Editing sample rows does not turn them into the person's finances. The
+      // demo marker and label stay until an explicit replacement/onboarding.
+      if (result.ok) showSavedLedger(nextState, usingDemo);
       return result;
     });
     if (!saved.ok && !saved.indeterminate) {
@@ -569,13 +601,16 @@ export default function Home() {
   }
 
   function handleExportJson() {
+    if (usingDemo && !window.confirm(
+      "This exports the sample household, not your finances. The file is not marked as sample data. Continue?"
+    )) return;
     const previous = ledgerFreshness !== "current";
     const serialized = previous ? displayedRawRef.current : JSON.stringify(state, null, 2);
     if (serialized === null) return;
     const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(serialized);
     const downloadAnchor = document.createElement("a");
     downloadAnchor.setAttribute("href", dataStr);
-    downloadAnchor.setAttribute("download", `montecarlo-ledger${previous ? "-previous" : ""}-${asOf}.json`);
+    downloadAnchor.setAttribute("download", `montecarlo-ledger${usingDemo ? "-sample" : ""}${previous ? "-previous" : ""}-${asOf}.json`);
     document.body.appendChild(downloadAnchor);
     downloadAnchor.click();
     downloadAnchor.remove();
@@ -805,20 +840,24 @@ export default function Home() {
     const { outcome, rows } = forecast;
     const previewDays = Math.min(30, assumptions.horizonDays);
     const slice = slicePlan(rows, asOf, previewDays, outcome.startingBalanceCents);
+    // The lead describes the same horizon that produced the cautious amount. A
+    // 30-day preview must never make a 90-day conclusion say "nothing scheduled".
+    const fullSlice = slicePlan(rows, asOf, assumptions.horizonDays, outcome.startingBalanceCents);
     const safeSpendCents = showGuidance ? outcome.safeSpendCents : null;
     const copy = describePosition({
       recordedBalanceCents: outcome.startingBalanceCents,
-      scheduledIncomeCents: slice.scheduledIncomeCents,
-      scheduledBillCents: slice.scheduledOutflowCents,
-      plannedEndingCents: slice.plannedEndingCents,
-      windowDays: previewDays,
+      scheduledIncomeCents: fullSlice.scheduledIncomeCents,
+      scheduledBillCents: fullSlice.scheduledOutflowCents,
+      plannedEndingCents: fullSlice.plannedEndingCents,
+      windowDays: assumptions.horizonDays,
       safeSpendCents,
       reserveCents: outcome.reserveCents,
       quantileNum: outcome.quantileNum,
       quantileDen: outcome.quantileDen,
       runs: outcome.runs,
       isDemo: usingDemo,
-      hasSchedule: slice.events.length > 0,
+      hasSchedule: fullSlice.events.length > 0,
+      hasDebtMinimums: debtMinimums.length > 0,
     });
     const spendingNote =
       currentSpend.totalCents === 0 && previousSpend.totalCents === 0
@@ -835,7 +874,38 @@ export default function Home() {
       overdueCents: overdue.total_cents,
       overdueEarliest: overdue.earliest_date,
       firstNegativeDate: outcome.firstNegativeDate,
-      nextBill: rows.find((row) => row.amount_cents < 0) ?? null,
+      nextBill: (() => {
+        const remaining = new Map<string, number>();
+        for (const minimum of debtMinimums) {
+          const key = `${minimum.date}|${minimum.name}|${minimum.amount_cents}`;
+          remaining.set(key, (remaining.get(key) ?? 0) + 1);
+        }
+        return rows.find((row) => {
+          if (row.amount_cents >= 0) return false;
+          const key = `${row.date}|${row.name}|${row.amount_cents}`;
+          const count = remaining.get(key) ?? 0;
+          if (count === 0) return true;
+          if (count === 1) remaining.delete(key);
+          else remaining.set(key, count - 1);
+          return false;
+        }) ?? null;
+      })(),
+      nextDebtMinimum: (() => {
+        const remaining = new Map<string, number>();
+        for (const minimum of debtMinimums) {
+          const key = `${minimum.date}|${minimum.name}|${minimum.amount_cents}`;
+          remaining.set(key, (remaining.get(key) ?? 0) + 1);
+        }
+        return rows.find((row) => {
+          if (row.amount_cents >= 0) return false;
+          const key = `${row.date}|${row.name}|${row.amount_cents}`;
+          const count = remaining.get(key) ?? 0;
+          if (count === 0) return false;
+          if (count === 1) remaining.delete(key);
+          else remaining.set(key, count - 1);
+          return true;
+        }) ?? null;
+      })(),
       spendingNote,
       overage: categoryOverages(currentSpend.byCategory, targets.categories)[0] ?? null,
       safeSpendCents,
@@ -859,6 +929,8 @@ export default function Home() {
       assumptionsChanged,
       horizonDays: assumptions.horizonDays,
       reserveCents: assumptions.reserveCents,
+      quantileNum: assumptions.quantileNum,
+      quantileDen: assumptions.quantileDen,
       runs: outcome.runs,
     };
   }
@@ -880,10 +952,27 @@ export default function Home() {
         onNavigate={navigate}
         isSaving={savesPending}
       />
-      <main id="content" className="mx-auto w-full min-w-0 max-w-5xl flex-1 space-y-4 px-4 py-6">
+      <main id="content" tabIndex={-1} className="mx-auto w-full min-w-0 max-w-5xl flex-1 space-y-4 px-4 py-6 outline-none">
+        <p className="sr-only" role="status" aria-live="polite">Showing the {SECTION_LABEL[section]} section.</p>
         <p className="text-sm text-muted">{SECTION_QUESTION[section]}</p>
         {savingNotice}
         {saveWarning && <Notice tone="warning" title="Not saved">{saveWarning}</Notice>}
+        {usingDemo && section !== "home" && (
+          <Notice tone="warning" title="Sample data — not your finances">
+            This section is still showing the sample household. Edits here stay labelled as sample data until you
+            enter your own numbers.
+            <div className="mt-3">
+              <button
+                type="button"
+                disabled={savesPending}
+                onClick={() => navigate("home")}
+                className="inline-flex min-h-11 items-center rounded-lg bg-accent px-3 text-sm font-semibold text-on-accent disabled:opacity-50"
+              >
+                Enter my own numbers
+              </button>
+            </div>
+          </Notice>
+        )}
         {!assumptionsProblem && assumptionsWarning && <Notice tone="warning" title="Financial settings">{assumptionsWarning}</Notice>}
         {ledgerProblem}
         {settingsRecovery.status === "missing" && (
@@ -950,6 +1039,12 @@ export default function Home() {
                   return { ok: false, error: "A ledger already exists here. Add new entries in Money or Bills without replacing it." };
                 }
                 const saved = await handleUpdateState(nextState);
+                if (saved.ok) {
+                  // The starter ledger replaces the sample; only now is this the
+                  // person's own plan and no longer demo data.
+                  setUsingDemo(false);
+                  writeDemoMarker(false);
+                }
                 recordDraftOutcome(HOME_ONBOARDING_DRAFT_KEY, !saved.ok);
                 return saved;
               }}
@@ -983,6 +1078,7 @@ export default function Home() {
                 horizonDays={assumptions.horizonDays}
                 assumptions={assumptions}
                 overdue={overdue}
+                debtMinimums={debtMinimums}
                 onEdit={onEdit}
                 onDiscardDraft={discardFailedDraft}
               />
@@ -1027,6 +1123,7 @@ export default function Home() {
         currentStoredRaw={storedRaw}
         onApplyState={handleApplyState}
         currentVaultId={currentVaultId}
+        usingDemo={usingDemo}
         settingsProfile={portableSettings}
         hasSavedDecisionSettings={hasSavedDecisionSettings}
         onApplyRecoveredSettings={handleApplyRecoveredSettings}

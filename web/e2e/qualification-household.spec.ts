@@ -114,7 +114,7 @@ test("a first-time household survives onboarding, a linked debt, a decision, a m
   await expect(page.getByText("Calculation Failed")).toHaveCount(0);
   await expectMetric(page, "Money available now", afterOnboarding.display.money_available_now);
   // The scheduled paycheck is not part of recorded cash; it appears only in the dated plan.
-  await expect(page.getByText(/Scheduled income in that window is \$1,900\.00\./)).toBeVisible();
+  await expect(page.getByText(/Scheduled income in that window is \$5,700\.00\./)).toBeVisible();
 
   // Zero-variance hand-oracle assumptions plus the planned $300 reserve. These are ordinary
   // Advanced controls, not storage injection.
@@ -148,7 +148,7 @@ test("a first-time household survives onboarding, a linked debt, a decision, a m
   await expect(page.getByText("Technical name: Safe to Spend (P10).")).toBeVisible();
   await expect(
     page.getByText(
-      "You have $2,345.67 recorded. Known bills in the next 30 days total $1,450.00. Scheduled income in that window is $1,900.00. If that schedule happens exactly as entered, the balance would be $2,795.67. The cautious amount you could spend is $595.67."
+      "You have $2,345.67 recorded. Known bills in the next 90 days total $4,350.00. Scheduled income in that window is $5,700.00. If that schedule happens exactly as entered, the balance would be $3,695.67. The cautious amount you could spend over the 90-day plan is $595.67."
     )
   ).toBeVisible();
 
@@ -193,7 +193,7 @@ test("a first-time household survives onboarding, a linked debt, a decision, a m
   await expect(dayStat(page, "Planned balance afterward")).toHaveText("$2,375.67");
   await expect(
     page.getByText(
-      "You have $2,345.67 recorded. Known bills in the next 30 days total $1,870.00. Scheduled income in that window is $1,900.00. If that schedule happens exactly as entered, the balance would be $2,375.67. The cautious amount you could spend is $175.67."
+      "You have $2,345.67 recorded. Known bills in the next 90 days total $5,610.00. Scheduled income in that window is $5,700.00. If that schedule happens exactly as entered, the balance would be $2,435.67. The cautious amount you could spend over the 90-day plan is $175.67."
     )
   ).toBeVisible();
 

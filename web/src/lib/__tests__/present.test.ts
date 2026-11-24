@@ -28,6 +28,9 @@ test("probability text does not round a tiny chance to 0.0%", () => {
   assert.equal(formatProbability(50), "under 0.1%");
   assert.equal(formatProbability(150_000), "15%");
   assert.equal(formatProbability(5_000), "0.5%");
+  assert.equal(formatProbability(999_500), "over 99.9%");
+  assert.equal(formatProbability(999_999), "over 99.9%");
+  assert.equal(formatProbability(1_000_000), "100%");
 });
 
 test("plan slice uses contract rows and does not invent events", () => {
@@ -313,7 +316,7 @@ test("a negative cautious amount is not described as money you could spend", () 
     isDemo: false,
     hasSchedule: true,
   });
-  assert.match(copy.lead, /no cautious amount left to spend/);
+  assert.match(copy.lead, /no amount left to spend above the reserve/);
   assert.match(copy.lead, /short of your reserve by \$40\.00/);
   assert.doesNotMatch(copy.lead, /the low point is -\$40/);
   assert.doesNotMatch(copy.lead, /you could spend/);

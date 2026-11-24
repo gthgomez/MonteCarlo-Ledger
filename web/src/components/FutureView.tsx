@@ -1,7 +1,7 @@
 "use client";
 
 import React from "react";
-import { quantilePlainName } from "@/lib/assumptions";
+import { cautiousAmountHeading, cautiousAmountShortName, quantilePlainName } from "@/lib/assumptions";
 import { formatDateLabel } from "@/lib/dates";
 import { formatMoney, formatProbability } from "@/lib/money-format";
 import { formatCautiousSpend } from "@/lib/present";
@@ -24,10 +24,24 @@ export function FutureView({
   assumptionsChanged: boolean;
 }) {
   const rank = quantilePlainName(outcome.quantileNum, outcome.quantileDen);
+  const negativeRuns = Math.round((outcome.overdraftPpm / 1_000_000) * outcome.runs);
   return (
     <div className="space-y-6">
       {assumptionsChanged && (
         <Notice tone="warning">These results use settings you changed under Advanced.</Notice>
+      )}
+      {outcome.runs < 30 && (
+        <Notice tone="warning" title="Too few modeled futures for a reliable tail">
+          {outcome.runs} modeled {outcome.runs === 1 ? "future" : "futures"} cannot support a meaningful 10th or 90th
+          percentile. Raise Modeled futures under Advanced before treating these ranks as risk estimates.
+        </Notice>
+      )}
+      {outcome.quantileNum * 10 !== outcome.quantileDen && (
+        <Notice tone="warning" title="This is not the cautious P10 amount">
+          You selected rank {outcome.quantileNum}/{outcome.quantileDen}. About{" "}
+          {Math.round((outcome.quantileNum / outcome.quantileDen) * 100)}% of modeled low points are at or below it, so
+          spending it would leave those futures at or below your reserve.
+        </Notice>
       )}
       {showGuidance ? <div className="space-y-6">
       <section className="space-y-3">
@@ -39,11 +53,12 @@ export function FutureView({
         </p>
         {outcome.overdraftPpm === 0 ? (
           <Notice tone="info" title="None of these modeled futures went negative">
-            That is {outcome.runs} simulations under these assumptions. It does not mean there is no risk in real life.
+            That is {outcome.runs} modeled {outcome.runs === 1 ? "future" : "futures"} under these assumptions. It does not mean there is no risk in real life.
           </Notice>
         ) : (
           <Notice tone="warning" title="Some modeled futures go negative">
-            {formatProbability(outcome.overdraftPpm)} went negative in the model under the current assumptions.
+            {negativeRuns} of {outcome.runs} modeled futures ({formatProbability(outcome.overdraftPpm)}) went negative
+            under the current assumptions. That is a model share, not measured real-world odds.
           </Notice>
         )}
       </section>
@@ -100,8 +115,8 @@ export function FutureView({
         </p>
         {showGuidance && <p className="mt-2 text-sm text-muted">
           {outcome.safeSpendCents < 0
-            ? `Cautious spending using the ${rank}: ${formatCautiousSpend(outcome.safeSpendCents, outcome.reserveCents)}.`
-            : `The cautious amount uses the ${rank} and is ${formatMoney(outcome.safeSpendCents)}.`} That is separate from the
+            ? `${cautiousAmountHeading(outcome.quantileNum, outcome.quantileDen)} using the ${rank}: ${formatCautiousSpend(outcome.safeSpendCents, outcome.reserveCents)}.`
+            : `The ${cautiousAmountShortName(outcome.quantileNum, outcome.quantileDen)} uses the ${rank} and is ${formatMoney(outcome.safeSpendCents)}.`} That is separate from the
           exact-schedule low point.
         </p>}
         <div className="mt-4">
@@ -116,7 +131,7 @@ export function FutureView({
 
       <Explain term="forecast uncertainty">
         The exact schedule answers “what if every entered date and amount happens?” The modeled futures answer “what
-        if income and surprise expenses move inside the ranges you set?” Missing bills can hide a shortfall; missing
+        if income, bills, and surprise expenses move inside the ranges you set?” Missing bills can hide a shortfall; missing
         income can make one look worse. Neither estimate covers events beyond the inputs and ranges you provided.
       </Explain>
     </div>

@@ -9,6 +9,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Added
+- Optional portable financial-settings profile stored as a separate encrypted vault object. A pull
+  applies a validated reserve/window/risk/budget profile; a missing or corrupt profile withholds
+  spending guidance until the person reviews it.
+- Hand-derived debt/settlement oracle corpus shared by Web and Python, including a fixed $300
+  minimum against $500 cash and a `debt-minimum` category variation.
 - MCP-ready read-only decision surface (`financial_snapshot`, `forecast`, `overdraft_risk`,
   `simulate_purchase`, `simulate_paycheck_delay`, `compare_debt_strategies`, `validate_scenario`,
   `engine_capabilities`) with typed failures, fail-closed validation, assumptions and provenance.
@@ -18,6 +23,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   zero-interest debt, exclusions, overflow).
 
 ### Changed
+- Web and Python adapters canonicalize same-day events by date, type, name, cents, and category, so
+  one ledger assigns seeded draws identically. Non-P10 ranks are no longer labelled "cautious".
+- Hypothetical purchases, monthly set-asides, and extra debt payments are fixed events that consume
+  no random draw; other bill and income variation is preserved.
+- Home describes the full plan horizon that produced the cautious amount; the 30-day preview stays
+  separately labelled.
 - **Contract 2.0 released** (2026-11-07) after fresh three-engine conformance: 38/38 fixtures,
   0 divergences; six injected divergences were all detected.
 - One contract-version policy across Python, Kotlin and TypeScript: a version-less scenario means
@@ -27,6 +38,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Widget and dashboard share one canonical simulation configuration (same runs, seed, calibration).
 
 ### Fixed
+- A linked bill with a different debt due day could charge the bill and a second full minimum.
+  The linked bill now owns the slot; the debt due day is only a one-time-link fallback.
+- Editing or reloading sample data no longer removes its "not your finances" label; a demo push
+  requires explicit confirmation.
+- A past next-payday date is no longer displayed as next.
+- Debt minimums are identified as Plan obligations, not entered bills, without changing any
+  calculation category or event amount.
+- 99.95% no longer displays as exactly 100%; tiny-run percentiles are labelled as unreliable.
 - `validate_scenario` could report `valid: true` without running schema validation; it now fails
   closed and reports which stages ran.
 - Schemas ship inside the distribution, so runtime validation works in a real install.

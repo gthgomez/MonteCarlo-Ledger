@@ -65,6 +65,8 @@ def _last_day(year: int, month: int) -> int:
 
 
 def _validate_event(ev: Dict[str, Any]) -> None:
+    if "fixed" in ev:
+        raise ContractError("SCHEMA_INVALID", "fixed is not a contract event field")
     amount = require_cents(ev.get("amount_cents"), "event.amount_cents")
     etype = ev.get("type")
     if etype == "income" and amount <= 0:
@@ -359,12 +361,17 @@ def _params(simulation: Dict[str, Any]) -> Dict[str, Any]:
     for low, high in (
         ("income_variation_min", "income_variation_max"),
         ("expense_variation_min", "expense_variation_max"),
-        ("surprise_amount_min", "surprise_amount_max"),
     ):
         lo = sim_int(low, "INVALID_AMOUNT", -MAX_MONEY_CENTS, MAX_MONEY_CENTS)
         hi = sim_int(high, "INVALID_AMOUNT", -MAX_MONEY_CENTS, MAX_MONEY_CENTS)
         if lo > hi:
             raise ContractError("INVALID_AMOUNT", f"{low} {lo} exceeds {high} {hi}")
+    # Surprises are expenses. Negative bounds would create a windfall labelled
+    # "Unexpected Expense"; the Web validator already rejects them.
+    surprise_lo = sim_int("surprise_amount_min", "INVALID_AMOUNT", 0, MAX_MONEY_CENTS)
+    surprise_hi = sim_int("surprise_amount_max", "INVALID_AMOUNT", 0, MAX_MONEY_CENTS)
+    if surprise_lo > surprise_hi:
+        raise ContractError("INVALID_AMOUNT", f"surprise_amount_min {surprise_lo} exceeds surprise_amount_max {surprise_hi}")
     sim_int("surprise_probability_ppm", "INVALID_AMOUNT", 0, 1_000_000)
     sim_int("surprise_check_interval_days", "INVALID_HORIZON", 1, 100_000)
     num = sim_int("quantile_num", "INVALID_QUANTILE", 1, 1_000_000)
@@ -379,12 +386,15 @@ def _params(simulation: Dict[str, Any]) -> Dict[str, Any]:
 def _simulate_once(
     base: List[Dict[str, Any]], start: int, as_of: date, horizon: int,
     window_end: date, p: Dict[str, Any], rng: SplitMix64,
+    fixed_orders: Optional[set[int]] = None,
 ) -> Dict[str, Any]:
     scenario = [dict(e) for e in base]
     imin, imax = p["income_variation_min"], p["income_variation_max"]
     emin, emax = p["expense_variation_min"], p["expense_variation_max"]
     category_ranges: Dict[str, Tuple[int, int]] = p["expense_category_variation"]
     for ev in scenario:
+        if fixed_orders is not None and ev["order"] in fixed_orders:
+            continue
         if ev["type"] == "income":
             if imin != 0 or imax != 0:
                 pct = rng.next_int(imin, imax)
@@ -415,8 +425,9 @@ def _simulate_once(
     return forecast(start, as_of, _ordered(scenario))
 
 
-def run_scenario(scenario: Dict[str, Any]) -> Dict[str, Any]:
-    """Run one canonical scenario, returning a canonical result. Raises ContractError."""
+def _run_scenario(
+    scenario: Dict[str, Any], fixed_orders: Optional[set[int]] = None
+) -> Dict[str, Any]:
     events, as_of, horizon, window_end = expand(scenario)
     base = _ordered(events)
     result: Dict[str, Any] = {
@@ -452,7 +463,7 @@ def run_scenario(scenario: Dict[str, Any]) -> Dict[str, Any]:
     minimums: List[int] = []
     negative_runs = 0
     for _ in range(p["runs"]):
-        r = _simulate_once(base, start, as_of, horizon, window_end, p, rng)
+        r = _simulate_once(base, start, as_of, horizon, window_end, p, rng, fixed_orders)
         endings.append(r["ending_balance_cents"])
         minimums.append(r["minimum_balance_cents"])
         if r["first_negative_date"] is not None:
@@ -477,6 +488,23 @@ def run_scenario(scenario: Dict[str, Any]) -> Dict[str, Any]:
         ),
     }
     return result
+
+
+def run_scenario(scenario: Dict[str, Any]) -> Dict[str, Any]:
+    """Run one canonical scenario, returning a canonical result. Raises ContractError."""
+    return _run_scenario(scenario)
+
+
+def run_scenario_with_fixed_events(
+    scenario: Dict[str, Any], fixed_orders: set[int]
+) -> Dict[str, Any]:
+    """Adapter-private what-if entry point.
+
+    ``fixed_orders`` are input event indexes (the engine's ``order`` field) that
+    are present in the cash path but must not consume a random draw. Public
+    scenarios cannot ask for this through an event field.
+    """
+    return _run_scenario(scenario, fixed_orders)
 
 
 def run_scenario_safe(scenario: Dict[str, Any]) -> Dict[str, Any]:

@@ -34,7 +34,7 @@ export function Header({
     <header aria-busy={isSaving || undefined} className="sticky top-0 z-30 border-b border-line bg-surface">
       <div className="mx-auto flex max-w-5xl flex-wrap items-center justify-between gap-3 px-4 py-3">
         <div className="min-w-0">
-          <p className="text-lg font-semibold tracking-tight text-ink">MonteCarlo</p>
+          <h1 className="text-lg font-semibold tracking-tight text-ink">MonteCarlo</h1>
           <p className="text-sm text-muted">A plan for your money</p>
         </div>
         <div className="flex flex-wrap gap-2">
@@ -46,7 +46,7 @@ export function Header({
             aria-label={isSynced && vaultId ? `Cloud Vault ${vaultId}` : "Cloud Vault"}
             className="inline-flex min-h-11 items-center rounded-lg border border-line bg-inset px-3 text-sm font-semibold text-ink aria-disabled:opacity-50"
           >
-            Sync
+            Cloud Vault
           </button>
           {onExportJson && (
             <button

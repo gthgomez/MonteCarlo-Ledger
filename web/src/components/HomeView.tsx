@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useState } from "react";
+import { cautiousAmountHeading, cautiousAmountShortName } from "@/lib/assumptions";
 import { formatDateLabel } from "@/lib/dates";
 import { createStarterLedger, dollarsToCents } from "@/lib/ledger-edits";
 import { formatMoney } from "@/lib/money-format";
@@ -24,6 +25,8 @@ export interface HomeForecast {
   assumptionsChanged: boolean;
   horizonDays: number;
   reserveCents: number;
+  quantileNum: number;
+  quantileDen: number;
   runs: number;
 }
 
@@ -61,6 +64,8 @@ function ForecastBody({
     assumptionsChanged,
     horizonDays,
     reserveCents,
+    quantileNum,
+    quantileDen,
     runs,
   } = forecast;
   const previewDays = Math.min(30, horizonDays);
@@ -73,6 +78,13 @@ function ForecastBody({
       {assumptionsChanged && (
         <Notice tone="warning">These results use assumptions you changed under Advanced. They are still estimates.</Notice>
       )}
+      {quantileNum * 10 !== quantileDen && (
+        <Notice tone="warning" title="This is not the cautious P10 amount">
+          You selected rank {quantileNum}/{quantileDen}. It is not the conservative 1/10 amount: about{" "}
+          {Math.round((quantileNum / quantileDen) * 100)}% of modeled low points are at or below it. Spending it would
+          leave those futures at or below your reserve.
+        </Notice>
+      )}
 
       <div className="grid gap-4 md:grid-cols-3">
         <Metric
@@ -82,13 +94,21 @@ function ForecastBody({
         />
         {safeSpendCents !== null ? (
           <Metric
-            label={hasGap ? (hasReserve ? "Gap to your safety reserve" : "Modeled cash shortfall") : "Cautious amount to spend"}
+            label={hasGap
+              ? (hasReserve ? "Gap to your safety reserve" : "Modeled cash shortfall")
+              : quantileNum === 1 && quantileDen === 10
+                ? "Cautious amount to spend"
+                : quantileNum * 2 === quantileDen
+                  ? "Middle modeled amount"
+                  : quantileNum * 10 === quantileDen * 9
+                    ? "Optimistic modeled amount"
+                    : `Modeled amount at rank ${quantileNum}/${quantileDen}`}
             value={formatMoney(Math.abs(safeSpendCents))}
             detail={hasGap
               ? hasReserve
                 ? `Nothing is left for extra spending in this estimate. Falling below your ${formatMoney(reserveCents)} reserve does not necessarily mean going below zero.`
                 : "The selected modeled low point goes below zero without extra spending. This is an estimate, not a guarantee."
-              : `An estimate of what you could spend while keeping ${formatMoney(reserveCents)} set aside in the modeled low point. It is not your current balance.`}
+              : `An estimate of what you could spend over the ${horizonDays}-day plan while keeping ${formatMoney(reserveCents)} set aside in the modeled low point. It is not your current balance.`}
           />
         ) : (
           <Notice tone="info" title="Not enough information to suggest spending">
@@ -101,7 +121,7 @@ function ForecastBody({
         <Metric
           label="Lowest point if the schedule is exact"
           value={formatMoney(plannedLowCents)}
-          detail={`On ${formatDateLabel(plannedLowDate)}, inside the ${horizonDays}-day plan. This is the exact schedule, separate from the cautious amount.`}
+          detail={`On ${formatDateLabel(plannedLowDate)}, inside the ${horizonDays}-day plan. This is the exact schedule, separate from the ${cautiousAmountShortName(quantileNum, quantileDen)}.`}
         />
       </div>
 
@@ -176,7 +196,7 @@ function ForecastBody({
           rank, not an average.
         </p>
         <div className="grid gap-2">
-          <Explain term="cautious amount to spend">
+          <Explain term={cautiousAmountHeading(quantileNum, quantileDen).toLowerCase()}>
             The lowest balance in the rank you selected, minus any reserve you set. With the default rank, about the
             more difficult tenth of modeled low points. Spending that amount in the model would bring that low point to
             the reserve. It is not cash sitting in a separate pile.
@@ -186,7 +206,7 @@ function ForecastBody({
             entered. No surprises are included in that line.
           </Explain>
           <Explain term="modeled futures">
-            The same schedule, with income and occasional surprise expenses moved inside the ranges under Advanced.
+            The same schedule, with income, bills, and occasional surprise expenses moved inside the ranges under Advanced.
             They show how fragile the plan is. They are not promises.
           </Explain>
         </div>

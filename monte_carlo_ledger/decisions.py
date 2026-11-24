@@ -13,7 +13,12 @@ from typing import Any, Dict, List, Optional
 
 from . import db_manager
 from . import scenario as scenario_mod
-from .contract import CONTRACT_VERSION, ContractError, run_scenario
+from .contract import (
+    CONTRACT_VERSION,
+    ContractError,
+    run_scenario,
+    run_scenario_with_fixed_events,
+)
 from .contract.engine import SIMULATION_DEFAULTS, SUPPORTED_CONTRACT_VERSIONS
 from .contract.money import MAX_MONEY_CENTS
 
@@ -287,8 +292,8 @@ def simulate_purchase(
 ) -> Dict[str, Any]:
     """Compare baseline vs a one-time purchase on ``purchase_date``.
 
-    Expense variation is forced off so the only difference between the two runs is
-    the purchase itself (the purchase event consumes no RNG draws).
+    The purchase is fixed and consumes no RNG draw; other bills keep the caller's
+    expense variation. This matches the Web what-if and isolates the decision.
     """
     _require_positive_int(amount_cents, "amount_cents")
     if amount_cents > MAX_AMOUNT_CENTS:
@@ -307,21 +312,23 @@ def simulate_purchase(
             f"purchase_date {purchase_date} is outside "
             f"[{as_of}, {(window_end).isoformat()})",
         )
-    overrides = dict(sim or {})
-    overrides.setdefault("expense_variation_min", 0)
-    overrides.setdefault("expense_variation_max", 0)
-    params = _sim(overrides)
+    params = _sim(dict(sim or {}))
     view = _view_for(as_of, horizon_days)
 
     baseline = run_scenario(_build(as_of, horizon_days, dict(params), ledger=view))
     with_purchase_scenario = _build(as_of, horizon_days, dict(params), ledger=view)
-    with_purchase_scenario["events"].append({
+    purchase_event = {
         "date": purchase_date,
         "amount_cents": -amount_cents,
         "type": "expense",
         "name": "Planned purchase",
-    })
-    with_purchase = run_scenario(with_purchase_scenario)
+    }
+    with_purchase_scenario["events"].append(purchase_event)
+    scenario_mod.canonical_event_order(with_purchase_scenario["events"])
+    fixed_order = with_purchase_scenario["events"].index(purchase_event)
+    # The amount and date are the decision variables. Keeping other bill variation
+    # intact and consuming no draw matches the Web what-if.
+    with_purchase = run_scenario_with_fixed_events(with_purchase_scenario, {fixed_order})
     return _attach_ledger(
         {
             "baseline": baseline,

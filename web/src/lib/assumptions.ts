@@ -113,7 +113,21 @@ export function quantilePlainName(num: number, den: number): string {
   return `nearest-rank ${num}/${den}`;
 }
 
+export function cautiousAmountHeading(num: number, den: number): string {
+  if (num * 10 === den) return "Cautious amount to spend";
+  if (num * 2 === den) return "Middle modeled amount";
+  if (num * 10 === den * 9) return "Optimistic modeled amount";
+  return `Modeled amount at rank ${num}/${den}`;
+}
+
+export function cautiousAmountShortName(num: number, den: number): string {
+  if (num * 10 === den) return "cautious amount";
+  if (num * 2 === den) return "middle modeled amount";
+  if (num * 10 === den * 9) return "optimistic modeled amount";
+  return `rank ${num}/${den} amount`;
+}
+
 export function safeSpendTechnicalName(num: number, den: number): string {
-  if (num === 1 && den === 10) return "Safe to Spend (P10)";
+  if (num * 10 === den) return "Safe to Spend (P10)";
   return `Safe to spend (nearest-rank ${num}/${den})`;
 }

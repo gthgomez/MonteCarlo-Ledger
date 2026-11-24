@@ -164,3 +164,20 @@ def test_overflow_is_detected_not_wrapped():
         assert exc.code == "MONEY_OVERFLOW"
     else:  # pragma: no cover - the assertion below is the point
         raise AssertionError("overflow must raise MONEY_OVERFLOW, never wrap")
+
+
+def test_fixed_event_field_is_not_public_contract_input():
+    import pytest
+
+    scenario = _base()
+    scenario["events"] = [
+        {
+            "date": AS_OF,
+            "amount_cents": -10_000,
+            "type": "expense",
+            "name": "Rent",
+            "fixed": True,
+        }
+    ]
+    with pytest.raises(contract.ContractError, match="fixed is not a contract event field"):
+        contract.run_scenario(scenario)

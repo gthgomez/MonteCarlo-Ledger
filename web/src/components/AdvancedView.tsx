@@ -248,6 +248,13 @@ export function AdvancedView({
               ? "These fields match the applied settings used by results."
               : "No forecast is using these settings right now."}
         </p>
+        {assumptions.runs < 30 && (
+          <div className="mt-3">
+            <Notice tone="warning" title="Too few modeled futures">
+              Fewer than 30 futures cannot support a meaningful 10th or 90th percentile. Use at least 30 for a tail estimate.
+            </Notice>
+          </div>
+        )}
         <p className="mt-3 text-sm text-muted">
           This screen limits modeled futures to {UI_MAX_RUNS} so the page stays responsive. The engine can run more,
           but those extra runs are not offered here. A higher rank makes the cautious amount less cautious.
@@ -275,7 +282,7 @@ export function AdvancedView({
             </dd>
           </div>
           <div>
-            <dt className="text-muted">Cautious amount at rank {outcome.quantileNum}/{outcome.quantileDen}</dt>
+            <dt className="text-muted">Modeled amount at rank {outcome.quantileNum}/{outcome.quantileDen}</dt>
             <dd className="font-medium tabular-nums">{formatMoney(outcome.safeSpendCents)}</dd>
           </div>
           <div>
@@ -307,10 +314,10 @@ export function AdvancedView({
             <dd className="font-medium tabular-nums">{formatMoney(outcome.reserveCents)}</dd>
           </div>
         </dl>
-        {outcome.quantileNum !== 1 || outcome.quantileDen !== 10 ? (
+        {outcome.quantileNum * 10 !== outcome.quantileDen ? (
           <div className="mt-3">
             <Notice tone="warning">
-              The cautious amount is using rank {outcome.quantileNum}/{outcome.quantileDen}, so it is not Safe to Spend
+              The modeled amount is using rank {outcome.quantileNum}/{outcome.quantileDen}, so it is not Safe to Spend
               (P10).
             </Notice>
           </div>

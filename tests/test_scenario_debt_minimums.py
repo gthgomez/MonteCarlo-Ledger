@@ -204,7 +204,9 @@ def test_linked_one_time_occurrence_uses_original_slot(tmp_path, monkeypatch, pa
         "is_user_modified": moved_to != "2027-01-15",
     }]
     _restore(tmp_path, monkeypatch, snapshot)
-    assert _cash_events("2027-01-20", 40) == expected + [("2027-02-15", "Debt", -3_000)]
+    assert _cash_events("2027-01-20", 40) == sorted(
+        expected + [("2027-02-15", "Debt", -3_000)], key=lambda row: (row[0], row[1])
+    )
 
 
 def test_paid_link_only_covers_recorded_amount_and_preserves_next_minimum(tmp_path, monkeypatch):
@@ -221,9 +223,9 @@ def test_paid_link_only_covers_recorded_amount_and_preserves_next_minimum(tmp_pa
     }]
     _restore(tmp_path, monkeypatch, snapshot)
     assert _cash_events("2027-01-20", 40) == [
-        ("2027-02-15", "Scheduled payment", -2_000),
         ("2027-01-20", "Debt", -1_000),
         ("2027-02-15", "Debt", -1_000),
+        ("2027-02-15", "Scheduled payment", -2_000),
     ]
 
 
@@ -268,8 +270,8 @@ def test_unlinked_replacement_cannot_inherit_an_old_link_for_same_local_id(tmp_p
     second["liabilities"].pop()
     sync.restore_ledger_snapshot(second)
     assert _cash_events(horizon=30) == [
-        ("2027-01-15", "Independent bill", -3_000),
         ("2027-01-15", "Debt", -3_000),
+        ("2027-01-15", "Independent bill", -3_000),
     ]
 
 
