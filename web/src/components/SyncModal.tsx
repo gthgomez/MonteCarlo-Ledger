@@ -11,6 +11,17 @@ import { LedgerState } from "@/lib/types";
 import { parseLedgerState } from "@/lib/validate";
 import { PersistenceResult } from "@/lib/sync-state";
 import type { LedgerChangeOptions } from "@/lib/persistence";
+import { formatMoney } from "@/lib/money-format";
+import {
+  rememberSettingsProfileRevision,
+  type SettingsProfile,
+} from "@/lib/settings-profile";
+import { pullSettingsProfile, pushSettingsProfile } from "@/lib/settings-vault";
+
+export type SettingsRecoveryOutcome =
+  | { status: "applied"; message: string }
+  | { status: "missing"; message: string }
+  | { status: "kept"; message: string };
 
 interface SyncModalProps {
   isOpen: boolean;
@@ -23,6 +34,14 @@ interface SyncModalProps {
     options: LedgerChangeOptions
   ) => Promise<PersistenceResult>;
   currentVaultId?: string;
+  /** The settings that a push should send with the ledger, or null when invalid. */
+  settingsProfile: SettingsProfile | null;
+  /** True only when this browser already holds explicitly saved decision settings. */
+  hasSavedDecisionSettings: boolean;
+  /** Apply a recovered profile; resolves to null on success or an error message. */
+  onApplyRecoveredSettings: (profile: SettingsProfile) => Promise<string | null>;
+  /** Tell the page whether recovered settings were applied, missing, or deliberately kept. */
+  onSettingsRecovery: (outcome: SettingsRecoveryOutcome) => void;
   /** Tells the page which vault id was durably remembered after a successful push. */
   onVaultSelected: (vaultId: string) => void;
   /**
@@ -50,8 +69,24 @@ function randomVaultId(): string {
   return `vault-${Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("")}`;
 }
 
+function browserStorage(): Storage | null {
+  try {
+    return window.localStorage;
+  } catch {
+    return null;
+  }
+}
+
 function describeError(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+function describeRecoveredSettings(profile: SettingsProfile): string {
+  const categoryCount = Object.keys(profile.budgetTargets.categories).length;
+  const target = profile.budgetTargets.monthlyLimitCents === null
+    ? "no monthly spending target"
+    : `a ${formatMoney(profile.budgetTargets.monthlyLimitCents)} monthly spending target`;
+  return `${profile.assumptions.horizonDays}-day window, ${formatMoney(profile.assumptions.reserveCents)} reserve, and ${target}${categoryCount > 0 ? ` with ${categoryCount} category target${categoryCount === 1 ? "" : "s"}` : ""}`;
 }
 
 export function SyncModal({
@@ -61,6 +96,10 @@ export function SyncModal({
   currentStoredRaw,
   onApplyState,
   currentVaultId,
+  settingsProfile,
+  hasSavedDecisionSettings,
+  onApplyRecoveredSettings,
+  onSettingsRecovery,
   onVaultSelected,
   recoveryRequired,
 }: SyncModalProps) {
@@ -207,10 +246,34 @@ export function SyncModal({
           "this browser could not save the Vault ID (another tab may have selected a different vault, or storage failed); record the Vault ID and passphrase now so you can pull this vault again"
         );
       }
+      let settingsRevision: number | null = null;
+      if (settingsProfile) {
+        try {
+          const settingsResult = await pushSettingsProfile(
+            chosenVaultId,
+            passphrase,
+            settingsProfile
+          );
+          if (settingsResult.ok) {
+            settingsRevision = settingsResult.revision;
+            if (!settingsResult.ancestryPersisted) {
+              problems.push(
+                "financial settings were saved but their local revision could not be recorded, so pull before pushing settings again"
+              );
+            }
+          } else {
+            problems.push(`financial settings were not synchronized: ${settingsResult.error}`);
+          }
+        } catch (err: unknown) {
+          problems.push(`financial settings were not synchronized: ${describeError(err)}`);
+        }
+      } else {
+        problems.push("financial settings are invalid, so only the ledger was pushed");
+      }
       setStatusMessage(
         problems.length === 0
-          ? `Successfully pushed encrypted snapshot to Cloud Vault (rev ${revision})!`
-          : `Pushed to Cloud Vault (rev ${revision}), but ${problems.join("; ")}.`
+          ? `Successfully pushed encrypted snapshot to Cloud Vault (rev ${revision})!${settingsRevision !== null ? ` Financial settings saved (rev ${settingsRevision}).` : ""}`
+          : `Pushed the ledger to Cloud Vault (rev ${revision}), but ${problems.join("; ")}.`
       );
     } catch (err: unknown) {
       if (operationSeq.current !== id) return;
@@ -237,6 +300,19 @@ export function SyncModal({
       );
       // Closing (or another operation) invalidates this request before any write.
       if (!isCurrent(id, controller)) return;
+
+      // Read the optional settings companion before replacing anything. If the
+      // profile is missing or corrupt, the ledger can still be restored, but the
+      // page withholds guidance until the person reviews decision settings.
+      let profileOutcome: Awaited<ReturnType<typeof pullSettingsProfile>> | null = null;
+      let profileError: string | null = null;
+      try {
+        profileOutcome = await pullSettingsProfile(target.vaultId, target.passphrase);
+      } catch (err: unknown) {
+        profileError = describeError(err);
+      }
+      if (!isCurrent(id, controller)) return;
+
       // Do not claim success unless the browser durably stored the restored ledger.
       // The exact authorized raw snapshot is re-checked under the shared write lock.
       const applied = await onApplyState(state, {
@@ -246,7 +322,9 @@ export function SyncModal({
         signal: controller.signal,
         requireLock: true,
       });
-      if (!isCurrent(id, controller)) return;
+      // If the dialog was closed while the write was still queued, the abort made
+      // this fail. If the ledger already committed, continue: new records must not
+      // stay beside old/default decision settings without a recorded status.
       if (!applied.ok) {
         // An indeterminate rollback may have left all or part of the vault state
         // stored, so do not call the restore "not persisted".
@@ -257,7 +335,49 @@ export function SyncModal({
         );
         return;
       }
-      setStatusMessage(`Successfully pulled, decrypted and saved vault (rev ${revision})!`);
+
+      const missingMessage =
+        "Ledger restored, but this vault has no saved financial settings. The reserve, plan window, risk assumptions, and budget targets were not recovered.";
+      if (profileOutcome?.status === "found") {
+        const settingsError = await onApplyRecoveredSettings(profileOutcome.profile);
+        if (!settingsError) {
+          rememberSettingsProfileRevision(
+            browserStorage(),
+            profileOutcome.profileVaultId,
+            profileOutcome.revision,
+            profileOutcome.profile.savedAt
+          );
+          const message = `Recovered financial settings: ${describeRecoveredSettings(profileOutcome.profile)}.`;
+          onSettingsRecovery({ status: "applied", message });
+          setStatusMessage(`Successfully pulled, decrypted and saved vault (rev ${revision})! ${message}`);
+        } else {
+          const message = `Ledger restored, but its recovered financial settings could not be saved: ${settingsError}`;
+          onSettingsRecovery({ status: "missing", message });
+          setStatusMessage(`Successfully pulled, decrypted and saved vault (rev ${revision})! Financial settings need review before spending guidance is shown.`);
+        }
+      } else if (profileOutcome?.status === "missing") {
+        if (hasSavedDecisionSettings) {
+          const message =
+            "Ledger restored. This vault has no saved financial settings; kept the settings already saved in this browser.";
+          onSettingsRecovery({ status: "kept", message });
+          setStatusMessage(`Successfully pulled, decrypted and saved vault (rev ${revision})! Financial settings were kept from this browser.`);
+        } else {
+          onSettingsRecovery({ status: "missing", message: missingMessage });
+          setStatusMessage(`Successfully pulled, decrypted and saved vault (rev ${revision})! Financial settings need review before spending guidance is shown.`);
+        }
+      } else {
+        const detail = profileError
+          ?? (profileOutcome?.status === "unreadable" ? profileOutcome.error : "settings were unavailable");
+        if (hasSavedDecisionSettings) {
+          const message = `Ledger restored, but its saved financial settings could not be read (${detail}). Kept the settings already saved in this browser.`;
+          onSettingsRecovery({ status: "kept", message });
+          setStatusMessage(`Successfully pulled, decrypted and saved vault (rev ${revision})! Financial settings were kept from this browser.`);
+        } else {
+          const message = `Ledger restored, but its financial settings could not be recovered (${detail}).`;
+          onSettingsRecovery({ status: "missing", message });
+          setStatusMessage(`Successfully pulled, decrypted and saved vault (rev ${revision})! Financial settings need review before spending guidance is shown.`);
+        }
+      }
     } catch (err: unknown) {
       if (!isCurrent(id, controller)) return;
       if (err instanceof VaultLocalChangesError && !allowOverwriteLocal) {
@@ -464,10 +584,17 @@ export function SyncModal({
               encrypted snapshot, vault ID, and sync metadata. It does not receive your passphrase or encryption key.
             </p>
             <p className="text-ink">
-              A pull replaces the ledger in this browser. To keep a copy, close Sync and use Export in the header first.
-              Applying a replacement also clears unsaved values in any open form draft in this tab. Budget targets and
-              forecast settings, including your reserve, stay in this browser and are not recovered from the vault.
+              A pull replaces the ledger in this browser. When the vault has them, it also applies the saved financial
+              settings: your plan window, reserve, risk assumptions, and budget targets. To keep a copy of the current
+              ledger, close Sync and use Export in the header first. Applying a replacement also clears unsaved values
+              in any open form draft in this tab. A vault created by an older client may have no settings profile; the
+              app then withholds spending guidance until you review the settings instead of assuming zero reserve.
               Android-only data needs a separate native backup.
+            </p>
+            <p className="text-muted">
+              A push sends the settings currently shown in this browser with the ledger. The settings object is
+              encrypted separately with the same passphrase. It is not part of the portable ledger snapshot, so
+              Python and Android ledgers remain readable without it.
             </p>
             <p className="text-muted">
               After a successful push this browser remembers the Vault ID, but never the passphrase.
@@ -573,7 +700,8 @@ export function SyncModal({
             <p className="text-muted">
               Close this dialog, then export from the header to save an unencrypted ledger file. Keep it private.
               Importing a valid file here replaces this ledger and clears unsaved values in any open form draft.
-              Budget targets and forecast settings are not in the file.
+              Budget targets and forecast settings are not in the ledger file; use the encrypted vault to move them
+              between devices, and keep a separate record of them with any file-only backup.
             </p>
 
             <label className="flex flex-col items-center justify-center border-2 border-dashed border-line hover:border-accent focus-within:outline focus-within:outline-accent rounded-xl p-6 cursor-pointer bg-inset hover:bg-inset transition">

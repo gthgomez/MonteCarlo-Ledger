@@ -122,8 +122,11 @@ The Web companion is available at:
 
 The Web app runs Contract 2.0 simulations in the browser. Your ledger stays there unless you
 choose to export or sync it. The optional vault receives an encrypted snapshot and sync
-metadata. A vault pull replaces the ledger; it does not merge records or restore browser-only
-budget targets and forecast settings, including the reserve. See [what syncs and how to
+metadata. A Web push also stores validated budget targets and forecast settings (reserve, plan
+window, and risk assumptions) in a separate encrypted settings object under a derived vault ID.
+A vault pull replaces the ledger rather than merging records. If the settings object is missing
+or cannot be read, the Web app withholds spending guidance until the person reviews the settings;
+it never silently substitutes a zero reserve. See [what syncs and how to
 recover](docs/VAULT_COMPATIBILITY.md#what-follows-the-ledger) and the
 [Web/Python qualification plan](docs/campaign/WEB_PYTHON_QUALIFICATION.md).
 

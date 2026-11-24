@@ -16,7 +16,7 @@ Older clients must reject 2.2 before replacing their local records. Retain a bac
 | --- | --- | --- |
 | Recorded cash entries, income schedules, supported bills and their dated occurrences and settlements | Included. Links between records belong to the same snapshot. | Keep a separate local ledger backup before a restore or an upgrade. |
 | Supported debts and minimums | Included; payment links and inactive debt state require 2.2 readers. | Keep the originating client's backup if it stores additional debt fields. |
-| Web budget targets, forecast settings (including reserve, window, and risk assumptions), theme | Not included. They stay in that browser profile; pulling into a fresh profile does not recover them. | Keep a separate record of the settings you want to reproduce. Different inputs can yield different forecasts from identical ledger data. |
+| Web budget targets and forecast settings (reserve, window, risk assumptions, seed) | Included in a **separate encrypted settings profile** when this Web version pushes. Theme and unsaved drafts stay local. An older vault has no profile. | Pull applies a profile when present. If it is missing or unreadable, the Web app withholds spending guidance until you review the settings; it does not assume a zero reserve. |
 | Android-only accounts, assets, goals, and rules; inactive bills, account-linked debts, and statement closing dates | Not included in the portable snapshot. Use Android's native encrypted backup, not a vault pull, to preserve this data. | Retain the native backup and qualify its restore on the intended Android build. |
 
 The Web export is **unencrypted JSON**. Treat it as sensitive and keep it offline or in a protected
@@ -50,6 +50,28 @@ After restoring, check the recorded balance, the next required payment and any b
 Re-enter browser-only settings under **Budget** and **Advanced**; they can differ from the settings
 used when the ledger was last viewed. If validation fails or you see a conflict, retain the local
 copy and resolve the mismatch before pushing anything back.
+
+## Portable Web financial settings
+
+A ledger snapshot describes records, not the assumptions used to interpret them. The same records with
+a zero reserve and a 90-day window can produce a different spending recommendation than the same
+records with the owner's real reserve. Web therefore stores an optional **settings profile** in a
+second encrypted vault object under the derived ID `settings-<vaultId>` (or a hash-based ID when the
+result would exceed the server's 128-character limit).
+
+- The profile is encrypted with the same passphrase and the vault's KDF salt. It contains only the
+  validated forecast assumptions and budget targets; theme and unsaved drafts are excluded.
+- The ledger snapshot version is unchanged (2.0-2.2), so Python, Android, and older Web clients keep
+  reading the ledger exactly as before. They ignore the companion object rather than rejecting it.
+- The profile has its own revision. A push may update it only from the revision this browser last
+  synchronized; otherwise the app reports a conflict and sends no settings. A ledger push that
+  succeeds while settings conflict is reported as a partial sync, not as a complete plan.
+- A pull reads the profile before replacing the ledger. If the ledger is replaced and the profile is
+  applied, the app reports the recovered reserve and window. If the profile is missing or invalid,
+  the ledger is still restored but spending guidance is withheld until the person explicitly saves
+  the settings shown now or edits them under **Advanced**.
+- A profile is not a record-by-record merge and does not make settings portable through a plain JSON
+  ledger export. Keep a separate copy of the reserve and window with any file-only backup.
 
 ## Payment links
 
