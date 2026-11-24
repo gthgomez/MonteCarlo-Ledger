@@ -360,12 +360,17 @@ def _params(simulation: Dict[str, Any]) -> Dict[str, Any]:
     for low, high in (
         ("income_variation_min", "income_variation_max"),
         ("expense_variation_min", "expense_variation_max"),
-        ("surprise_amount_min", "surprise_amount_max"),
     ):
         lo = sim_int(low, "INVALID_AMOUNT", -MAX_MONEY_CENTS, MAX_MONEY_CENTS)
         hi = sim_int(high, "INVALID_AMOUNT", -MAX_MONEY_CENTS, MAX_MONEY_CENTS)
         if lo > hi:
             raise ContractError("INVALID_AMOUNT", f"{low} {lo} exceeds {high} {hi}")
+    # Surprises are expenses. Negative bounds would create a windfall labelled
+    # "Unexpected Expense"; the Web validator already rejects them.
+    surprise_lo = sim_int("surprise_amount_min", "INVALID_AMOUNT", 0, MAX_MONEY_CENTS)
+    surprise_hi = sim_int("surprise_amount_max", "INVALID_AMOUNT", 0, MAX_MONEY_CENTS)
+    if surprise_lo > surprise_hi:
+        raise ContractError("INVALID_AMOUNT", f"surprise_amount_min {surprise_lo} exceeds surprise_amount_max {surprise_hi}")
     sim_int("surprise_probability_ppm", "INVALID_AMOUNT", 0, 1_000_000)
     sim_int("surprise_check_interval_days", "INVALID_HORIZON", 1, 100_000)
     num = sim_int("quantile_num", "INVALID_QUANTILE", 1, 1_000_000)

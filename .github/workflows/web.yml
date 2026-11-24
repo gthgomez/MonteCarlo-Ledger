@@ -59,6 +59,11 @@ jobs:
         working-directory: .
         run: python -m pip install -e '.[dev]'
 
+      - name: Resolve the Python interpreter path
+        id: python-path
+        working-directory: .
+        run: echo "path=$(python -c 'import sys; print(sys.executable)')" >> "$GITHUB_OUTPUT"
+
       - name: Install Playwright browser
         run: pnpm exec playwright install --with-deps chromium
 
@@ -66,7 +71,7 @@ jobs:
         run: pnpm exec playwright test
         env:
           NODE_ENV: production
-          MC_QUALIFICATION_PYTHON: python
+          MC_QUALIFICATION_PYTHON: ${{ steps.python-path.outputs.path }}
 
       - name: Upload Playwright traces on failure
         if: failure()
