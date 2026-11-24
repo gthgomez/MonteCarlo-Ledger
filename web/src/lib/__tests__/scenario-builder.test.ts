@@ -112,6 +112,53 @@ test("events outside [as_of, windowEnd) are excluded", () => {
   assert.deepEqual(scenario.events, []);
 });
 
+test("a linked bill covers the debt minimum when its due day differs from the debt's", () => {
+  const state = emptyState({
+    version: "2.2",
+    current_balance_cents: 50000,
+    payments: [
+      {
+        id: "pmt-card",
+        name: "Card payment",
+        amount_cents: 30000,
+        recurrence: "Monthly",
+        due_day: 15,
+      },
+    ],
+    liabilities: [
+      {
+        id: "debt-card",
+        name: "Card",
+        balance_cents: 100000,
+        apr_basis_points: 0,
+        min_payment_cents: 30000,
+        kind: "installment",
+        due_day_of_month: 20,
+        linked_payment_id: "pmt-card",
+      },
+    ],
+  });
+  const scenario = buildScenarioFromLedger(state, "2026-03-05", 20, {
+    runs: 10,
+    seed: 42,
+    quantile_num: 1,
+    quantile_den: 10,
+    income_variation_min: 0,
+    income_variation_max: 0,
+    expense_variation_min: 0,
+    expense_variation_max: 0,
+    surprise_probability_ppm: 0,
+    surprise_amount_min: 0,
+    surprise_amount_max: 0,
+    surprise_check_interval_days: 14,
+    reserve_cents: 0,
+  });
+  const cash = scenario.events.map((event: any) => [event.date, event.amount_cents]);
+  // One $300 bill payment, not a second $300 debt minimum on the 20th.
+  assert.deepEqual(cash, [["2026-03-15", -30000]]);
+  assert.equal(runScenario(scenario).risk.safe_to_spend_cents, 20000);
+});
+
 test("liabilities are mapped through with contract-2.0 fields", () => {
   const state = emptyState({
     liabilities: [

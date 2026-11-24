@@ -59,7 +59,7 @@ Restore replaces a ledger; it does not combine rows from separate snapshots. Cli
 
 ## Cash forecasts
 
-The linked payment covers a debt minimum only for the matching schedule slot. A moved occurrence is matched using its original date, and its cash event uses the revised date. A linked bill below the minimum leaves a debt shortfall. A posted settlement covers only the amount recorded for that slot. The forecast starts from the entered outstanding debt balance and does not apply a recorded settlement to it a second time.
+The linked payment covers a debt minimum only for the matching schedule slot. The bill's own due date owns that slot for the month, even if the debt's stored due day differs; the debt due day is only a fallback for a month a one-time link does not occupy. A moved occurrence is matched using its original date, and its cash event uses the revised date. A linked bill below the minimum leaves a debt shortfall charged once on the bill's date. A posted settlement covers only the amount recorded for that slot. The forecast starts from the entered outstanding debt balance and does not apply a recorded settlement to it a second time.
 
 Persisted overdue unpaid occurrences count at the start of the plan. A forecast refresh does not invent past recurring payments. The scheduled bill represents the entered cash commitment. Keep that schedule up to date after payoff or when a lender changes its automatic debit. Deleting a linked bill removes the relationship and leaves any active outstanding debt in the forecast. Archived debts are retained in storage.
 

@@ -271,3 +271,51 @@ def test_unlinked_replacement_cannot_inherit_an_old_link_for_same_local_id(tmp_p
         ("2027-01-15", "Independent bill", -3_000),
         ("2027-01-15", "Debt", -3_000),
     ]
+
+
+def test_linked_bill_covers_minimum_when_liability_due_day_differs(tmp_path, monkeypatch):
+    """A linked bill is the debt payment even if the debt's stored due day is stale.
+
+    The hand oracle is $500.00 cash - one $300.00 payment = $200.00 left. Charging
+    the bill on the 15th and a second minimum on the debt's stored 20th would
+    deduct $600.00 and report -$100.00.
+    """
+    snapshot = _snapshot()
+    snapshot["current_balance_cents"] = 50_000
+    snapshot["transactions"][0]["amount_cents"] = 50_000
+    snapshot["payments"][0]["amount_cents"] = 30_000
+    snapshot["liabilities"][0]["due_day_of_month"] = 20
+    snapshot["liabilities"][0]["min_payment_cents"] = 30_000
+    snapshot["liabilities"][0]["balance_cents"] = 100_000
+    _restore(tmp_path, monkeypatch, snapshot)
+
+    events = _cash_events("2026-12-01", 20)
+    assert events == [("2026-12-15", "Scheduled payment", -30_000)]
+    scenario = build_scenario("2026-12-01", 20, include_simulation={
+        "runs": 10,
+        "seed": 42,
+        "quantile_num": 1,
+        "quantile_den": 10,
+        "income_variation_min": 0,
+        "income_variation_max": 0,
+        "expense_variation_min": 0,
+        "expense_variation_max": 0,
+        "surprise_probability_ppm": 0,
+        "surprise_amount_min": 0,
+        "surprise_amount_max": 0,
+        "surprise_check_interval_days": 14,
+        "reserve_cents": 0,
+    }, read_only=True)
+    from monte_carlo_ledger.contract import run_scenario
+
+    assert run_scenario(scenario)["risk"]["safe_to_spend_cents"] == 20_000
+
+
+def test_linked_bill_due_after_liability_slot_also_charges_once(tmp_path, monkeypatch):
+    snapshot = _snapshot()
+    snapshot["payments"][0]["due_day"] = 20
+    snapshot["liabilities"][0]["due_day_of_month"] = 15
+    _restore(tmp_path, monkeypatch, snapshot)
+    assert _cash_events("2026-12-01", 25) == [
+        ("2026-12-20", "Scheduled payment", -3_000),
+    ]
