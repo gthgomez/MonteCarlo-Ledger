@@ -4,6 +4,7 @@ import {
   readSettingsProfileRevision,
   rememberSettingsProfileRevision,
   settingsProfileVaultId,
+  SETTINGS_PROFILE_SCHEMA_VERSION,
   type SettingsProfile,
 } from "./settings-profile";
 import { defaultSyncStorage, type SyncStorage } from "./sync-state";
@@ -86,6 +87,7 @@ export async function pushSettingsProfile(
   vaultId: string,
   passphrase: string,
   profile: SettingsProfile,
+  ledgerRevision: number,
   storage: SyncStorage | null = defaultSyncStorage()
 ): Promise<SettingsProfilePushResult> {
   const profileVaultId = await settingsProfileVaultId(vaultId);
@@ -99,9 +101,23 @@ export async function pushSettingsProfile(
         error: "The ledger vault does not exist yet, so financial settings were not sent.",
       };
     }
+    if (ledgerMetadata.revision !== ledgerRevision) {
+      return {
+        ok: false,
+        profileVaultId,
+        conflict: true,
+        error: "The ledger was updated again before these financial settings could be saved. Pull the latest vault and review its settings.",
+      };
+    }
+    const bound = parseSettingsProfile({
+      ...profile,
+      schemaVersion: SETTINGS_PROFILE_SCHEMA_VERSION,
+      ledgerRevision,
+    });
+    if (!bound.ok) return { ok: false, profileVaultId, conflict: false, error: bound.error };
     const existing = await fetchMetadata(profileVaultId);
     const keys = await deriveVaultKeys(passphrase, ledgerMetadata.kdf_salt_b64);
-    const encrypted = await encryptVault(JSON.stringify(profile), keys.encKey);
+    const encrypted = await encryptVault(JSON.stringify(bound.profile), keys.encKey);
 
     if (!existing) {
       const res = await fetch("/api/vault", {

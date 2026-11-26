@@ -323,12 +323,16 @@ export function dollarsToCents(value: number): number | null {
 }
 
 /** Parse an entered dollar amount without rounding away a fraction of a cent. */
-export function parseDollarsToCents(text: string): number | null {
-  const match = /^(\d{1,14})(?:\.(\d{1,2}))?$/.exec(text.trim());
+export function parseDollarsToCents(text: string, options?: { allowNegative: boolean }): number | null {
+  const trimmed = text.trim();
+  const negative = options?.allowNegative === true && trimmed.startsWith("-");
+  const magnitude = negative ? trimmed.slice(1) : trimmed;
+  const canonical = magnitude.startsWith(".") ? `0${magnitude}` : magnitude;
+  const match = /^(\d{1,14})(?:\.(\d{1,2}))?$/.exec(canonical);
   if (!match) return null;
   const cents = BigInt(match[1]) * 100n + BigInt((match[2] ?? "").padEnd(2, "0"));
   const value = Number(cents);
-  return Number.isSafeInteger(value) ? value : null;
+  return Number.isSafeInteger(value) ? (negative ? -value : value) : null;
 }
 
 /** "21.99" -> 2199 basis points. Rejects float math and more than two decimals. */
@@ -439,6 +443,131 @@ export function recordCashflow(
       description: input.description.trim() || category,
     },
   ];
+  return commit(next);
+}
+
+/** Positive whole-cent fields the Money editor collects for one recorded row. */
+export interface CashTransactionEditInput {
+  /** Calendar date in YYYY-MM-DD. */
+  date: string;
+  /**
+   * Positive magnitude in whole cents. The stored row keeps its existing
+   * Income/Expense kind, so the sign is never entered by the user.
+   */
+  amountCents: number;
+  /** Omit to keep the recorded category. */
+  category?: string;
+  /** Omit to keep the recorded note; an empty string falls back to the category. */
+  description?: string;
+}
+
+const ADJUSTMENT_HISTORY_MESSAGE =
+  "Adjustment entries are system history and cannot be edited or deleted. Reconcile the balance instead.";
+
+/** Rebuild cash from the rows so an edit can never leave a drifted balance. */
+function recomputeCashBalance(next: LedgerState): boolean {
+  let sum = 0n;
+  for (const transaction of next.transactions) {
+    if (!Number.isSafeInteger(transaction.amount_cents)) return false;
+    sum += BigInt(transaction.amount_cents);
+  }
+  const total = Number(sum);
+  if (!Number.isSafeInteger(total)) return false;
+  next.current_balance_cents = total;
+  return true;
+}
+
+function linkedOccurrences(state: LedgerState, transactionKey: string) {
+  return state.bill_occurrences.filter(
+    (occurrence) => stableRowId(occurrence.transaction_id) === transactionKey,
+  );
+}
+
+/**
+ * Edit one recorded Income or Expense in place. The stable row id and kind are
+ * preserved; the balance is recomputed from the whole transaction list, so
+ * future rows keep their dates and amounts. Adjustment rows are system history
+ * and are rejected explicitly. A transaction that settles a bill may change its
+ * date, category, and note, but its amount must stay the bill's amount because
+ * the occurrence link enforces that pairing.
+ */
+export function editCashTransaction(
+  state: LedgerState,
+  transactionId: number | string,
+  input: CashTransactionEditInput,
+): EditResult {
+  const transactionKey = stableRowId(transactionId);
+  if (transactionKey === null) return { ok: false, error: "Choose a recorded transaction to edit." };
+  const current = state.transactions.find((transaction) => String(transaction.id) === transactionKey);
+  if (!current) return { ok: false, error: "That transaction no longer exists." };
+  if (current.type === "Adjustment") return { ok: false, error: ADJUSTMENT_HISTORY_MESSAGE };
+  if (current.type !== "Income" && current.type !== "Expense") {
+    return { ok: false, error: "Only recorded income and expenses can be edited." };
+  }
+  if (!input || typeof input !== "object") return { ok: false, error: "Enter the transaction details." };
+  if (!validIsoDate(input.date)) return { ok: false, error: "Use a valid calendar date." };
+  if (!Number.isSafeInteger(input.amountCents) || input.amountCents <= 0) {
+    return { ok: false, error: "Enter an amount greater than zero in dollars and cents." };
+  }
+  const linked = linkedOccurrences(state, transactionKey);
+  if (linked.length > 0 && input.amountCents !== Math.abs(current.amount_cents)) {
+    return {
+      ok: false,
+      error: "This transaction settles a linked bill. Only its date, category, and note can change; edit the bill to change the amount.",
+    };
+  }
+  let category = current.category;
+  if (input.category !== undefined) {
+    category = input.category.trim() || (current.type === "Income" ? "Income" : "Spending");
+    if (category.length > 40) return { ok: false, error: "Use a shorter category name." };
+  }
+  const next = clone(state);
+  const row = next.transactions.find((transaction) => String(transaction.id) === transactionKey)!;
+  row.date = input.date;
+  row.amount_cents = current.type === "Income" ? input.amountCents : -input.amountCents;
+  if (input.category !== undefined) row.category = category;
+  if (input.description !== undefined) {
+    row.description = input.description.trim() || category || (current.type === "Income" ? "Income" : "Spending");
+  }
+  if (!recomputeCashBalance(next)) {
+    return { ok: false, error: "That amount is outside the supported range." };
+  }
+  next.updated_at = new Date().toISOString();
+  return commit(next);
+}
+
+/**
+ * Delete one recorded Income or Expense and restore cash by recomputing the
+ * whole ledger. When the row settled a bill, the existing occurrence (original
+ * or moved) is reopened in place with the same slot, id, dates, and modified
+ * flag, but `paid: false` and `transaction_id: null`; unrelated occurrences and
+ * debts are untouched. Adjustment rows are rejected explicitly.
+ */
+export function deleteCashTransaction(
+  state: LedgerState,
+  transactionId: number | string,
+): EditResult {
+  const transactionKey = stableRowId(transactionId);
+  if (transactionKey === null) return { ok: false, error: "Choose a recorded transaction to delete." };
+  const current = state.transactions.find((transaction) => String(transaction.id) === transactionKey);
+  if (!current) return { ok: false, error: "That transaction no longer exists." };
+  if (current.type === "Adjustment") return { ok: false, error: ADJUSTMENT_HISTORY_MESSAGE };
+  if (current.type !== "Income" && current.type !== "Expense") {
+    return { ok: false, error: "Only recorded income and expenses can be deleted." };
+  }
+  const next = clone(state);
+  next.transactions = next.transactions.filter(
+    (transaction) => String(transaction.id) !== transactionKey,
+  );
+  for (const occurrence of next.bill_occurrences) {
+    if (stableRowId(occurrence.transaction_id) !== transactionKey) continue;
+    occurrence.paid = false;
+    occurrence.transaction_id = null;
+  }
+  if (!recomputeCashBalance(next)) {
+    return { ok: false, error: "That amount is outside the supported range." };
+  }
+  next.updated_at = new Date().toISOString();
   return commit(next);
 }
 

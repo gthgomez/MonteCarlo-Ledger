@@ -280,3 +280,21 @@ def test_no_skew_is_quiet(
     text = workspace["report"].read_text()
     assert "- in Python results only (0): (none)" in text
     assert "corpus skew" not in capsys.readouterr().err
+
+
+def test_strict_comparison_rejects_newer_android_only_fixture(workspace: Dict[str, Path]) -> None:
+    (workspace["kotlin"] / "android-only.json").write_text('{"error":"SCHEMA_INVALID"}')
+    rc = _run(
+        workspace,
+        "--kotlin-sha",
+        KOTLIN_SHA,
+        "--contract-pin",
+        str(_pin(workspace)),
+        "--strict",
+        "--report",
+        str(workspace["report"]),
+    )
+    assert rc == 1
+    report = workspace["report"].read_text()
+    assert "- in Kotlin results only (1): `android-only`" in report
+    assert "| android-only | UNEXPECTED |" in report

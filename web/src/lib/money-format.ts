@@ -9,6 +9,13 @@ export function formatMoney(cents: number): string {
   return `${sign}$${dollars}.${remainder}`;
 }
 
+/** Unlocalized dollar input with an exact round trip for safe integer cents. */
+export function formatDollarsInput(cents: number): string {
+  if (!Number.isSafeInteger(cents)) return "";
+  const magnitude = BigInt(Math.abs(cents));
+  return `${cents < 0 ? "-" : ""}${magnitude / 100n}.${String(magnitude % 100n).padStart(2, "0")}`;
+}
+
 /**
  * Parts-per-million where 1_000_000 = 100%.
  * Tiny non-zero probabilities are not rounded to 0.0%.

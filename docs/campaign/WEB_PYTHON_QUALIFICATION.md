@@ -161,10 +161,24 @@ pnpm --dir web test
 MC_QUALIFICATION_PYTHON="$PWD/.venv/bin/python" pnpm --dir web test:e2e
 ```
 
-The recovery proof requires the explicit Python interpreter. Do not count an ordinary browser run
-that skips the integration as qualification. The browser test server uses a process-local vault
-backend. Keep the actual hosted deployment and environment in a separate record; a Vercel status
-for the baseline is not evidence that a new candidate is deployed or that live recovery works.
+The recovery proof requires the explicit Python interpreter. Do not count a run that skipped the
+integration. The default browser test uses a process-local memory vault. Run the same recovery
+journeys against a disposable local libSQL file after building Web:
+
+```sh
+MC_QUALIFICATION_PYTHON="$PWD/.venv/bin/python" \
+MC_QUALIFICATION_VAULT_FILE="$(mktemp -d)/vault.sqlite" \
+pnpm --dir web exec playwright test e2e/qualification-recovery.spec.ts \
+  e2e/portable-settings.spec.ts --project desktop --workers 1
+```
+
+On Windows set the two variables with `$env:...`, use the absolute path to
+`.venv\Scripts\python.exe`, and run `corepack pnpm exec playwright test` from `web/`.
+Keep the SQLite file outside the checkout. A file-backed run proves reads/writes through the
+local libSQL path. To check server restart, create a synthetic vault against loopback, stop the
+owned Next process, and start the same build pointing at the same untouched file. Pull into a
+fresh initialized SQLite ledger and compare the revision, cent amounts, dates, and linked IDs.
+Hosted deployment and live recovery need separate evidence.
 
 The **local candidate gate** can pass without authorizing deployment. An **everyday-use Web release**
 needs evidence for each claim it makes, including real novice comprehension and hosted recovery if

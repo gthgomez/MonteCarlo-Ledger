@@ -1,7 +1,7 @@
 """Interactive terminal dashboards rendered from the canonical contract engine (MC-07).
 
 Every financial number below originates in ``monte_carlo_ledger.dashboard_view`` (which runs
-the Contract 1.x engine over an explicit ``as_of``). The only retained product heuristic is
+the Contract 2.0 engine over an explicit ``as_of``). The only retained product heuristic is
 the daily pacing guidance, which is labelled non-normative and derived from the canonical
 projected low point. Rendering never reads a clock for financial placement.
 """
@@ -33,6 +33,7 @@ def render_monte_carlo_dashboard(days_ahead: int = 90, runs: int = 500, *, as_of
     is_sync, ledger, stored = db_manager.validate_balance_consistency()
     if not is_sync:
         _render_balance_warning(ledger, stored)
+        return
 
     view = dashboard_view.build(as_of, days_ahead, runs=runs)
     result = view["result"]
@@ -85,7 +86,8 @@ def render_monte_carlo_dashboard(days_ahead: int = 90, runs: int = 500, *, as_of
         print()
 
     cprint("-" * 48, Theme.DIM)
-    cprint("This is a probabilistic estimate based on:", Theme.DIM)
+    cprint("These are simulated outcomes, not measured odds or a spending guarantee.", Theme.DIM)
+    cprint("This estimate uses:", Theme.DIM)
     cprint(
         f"- income variation: {SIMULATION_DEFAULTS['income_variation_min']}% "
         f"to +{SIMULATION_DEFAULTS['income_variation_max']}%",
@@ -178,6 +180,7 @@ def render_timeline_dashboard(*, as_of: date):
         _render_balance_warning(ledger, stored)
 
     view = dashboard_view.build(as_of, 30)
+    starting_cash = view["scenario"]["starting_balance_cents"]
     result = view["result"]
     rows = view["rows"]
     low_point = dashboard_view.projected_low_point(result)
@@ -190,14 +193,22 @@ def render_timeline_dashboard(*, as_of: date):
     print(f"{Theme.BOLD}TODAY: {as_of.strftime('%b %d')}{Theme.RESET}")
     print()
 
+    cprint("CASH RECORDED THROUGH TODAY", Theme.BOLD)
+    print(format_currency(starting_cash))
+    print()
+
     cprint("PROJECTED LOW POINT (next 30 days)", Theme.BOLD)
     disp_color = Theme.GREEN if low_point >= 0 else Theme.RED
     cprint(f"{format_currency(low_point)}", disp_color + Theme.BOLD)
     print()
 
-    cprint("DAILY PACING (guidance, not a contract value)", Theme.BOLD)
-    limit_color = Theme.GREEN if daily_limit >= 0 else Theme.RED
-    cprint(f"{format_currency(daily_limit)} / day", limit_color)
+    cprint("DAILY PACING ESTIMATE", Theme.BOLD)
+    if not is_sync:
+        print("Reconcile the ledger before using a spending estimate.")
+    elif not any(row["type"] == "expense" for row in rows):
+        print("Add upcoming bills before using a spending estimate.")
+    else:
+        print(f"{format_currency(daily_limit)} / day if the entered schedule holds. No extra reserve is set.")
     print()
 
     if next_event:

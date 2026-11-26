@@ -7,9 +7,9 @@ import { BudgetView } from "@/components/BudgetView";
 import { FutureView } from "@/components/FutureView";
 import { Header } from "@/components/Header";
 import { HomeView, type HomeForecast } from "@/components/HomeView";
-import { MoneyView } from "@/components/MoneyView";
+import { MoneyView, type PurchaseToRecord } from "@/components/MoneyView";
 import { PlanView } from "@/components/PlanView";
-import { SyncModal } from "@/components/SyncModal";
+import { SyncModal, type SettingsRecoveryOutcome } from "@/components/SyncModal";
 import { Notice } from "@/components/ui";
 import { DEFAULT_ASSUMPTIONS, type Assumptions } from "@/lib/assumptions";
 import {
@@ -29,7 +29,13 @@ import {
 import { serializeSettingsProfile, type SettingsProfile } from "@/lib/settings-profile";
 import { type EditResult } from "@/lib/ledger-edits";
 import { formatMoney } from "@/lib/money-format";
-import { LEDGER_STORAGE_KEY, saveLedgerChange, type LedgerChangeOptions } from "@/lib/persistence";
+import {
+  LEDGER_STORAGE_KEY,
+  resolveSettingsReview,
+  saveLedgerChange,
+  type LedgerChangeOptions,
+} from "@/lib/persistence";
+import { readSettingsReview, SETTINGS_REVIEW_STORAGE_KEY } from "@/lib/settings-review";
 import {
   beyondWindowBillNotice,
   buildInsights,
@@ -166,6 +172,10 @@ export default function Home() {
   /** True only when this browser has explicitly saved decision-critical settings. */
   const [hasSavedDecisionSettings, setHasSavedDecisionSettings] = useState(false);
   const [settingsRecovery, setSettingsRecovery] = useState<SettingsRecovery>({ status: "none" });
+  /** Token of the durable review guard this page is holding; null when it loaded as corrupt. */
+  const [settingsReviewToken, setSettingsReviewToken] = useState<string | null>(null);
+  /** Exact guard bytes this page displayed; required to recover a corrupt guard. */
+  const [settingsReviewRaw, setSettingsReviewRaw] = useState<string | null>(null);
   const [storedRaw, setStoredRaw] = useState<string | null>(null);
   // Storage events and the write completion handler need the latest adopted
   // snapshot even before React renders the corresponding state.
@@ -176,6 +186,7 @@ export default function Home() {
   const [isSyncModalOpen, setIsSyncModalOpen] = useState(false);
   const [currentVaultId, setCurrentVaultId] = useState<string | undefined>();
   const [section, setSection] = useState<Section>("home");
+  const [purchaseToRecord, setPurchaseToRecord] = useState<PurchaseToRecord>();
   const [targets, setTargets] = useState<BudgetTargets>(EMPTY_TARGETS);
   const [targetWarning, setTargetWarning] = useState<string | null>(null);
   const [theme, setTheme] = useState<"light" | "dark" | null>(null);
@@ -188,6 +199,7 @@ export default function Home() {
   const [ledgerViewGeneration, setLedgerViewGeneration] = useState(0);
   const writeInFlightRef = useRef(false);
   const settingsWriteInFlightRef = useRef(false);
+  const settingsRecoveryStatusRef = useRef<SettingsRecovery["status"]>("none");
   // Keys of forms whose last submitted save failed. A key is added only after a
   // real persistence failure and removed by that same form's next success.
   const failedDraftKeysRef = useRef<Set<string>>(new Set());
@@ -262,6 +274,28 @@ export default function Home() {
       const budget = loadBudgetTargets(localStorage);
       setTargets(budget.targets);
       setTargetWarning(budget.warning);
+
+      // A vault restore writes this guard in the same bundle as the ledger. It
+      // must survive a reload, a tab close, or a storage event until settings
+      // are applied for that restore or explicitly reviewed.
+      const review = readSettingsReview(localStorage);
+      if (review.status === "valid") {
+        setSettingsReviewToken(review.guard.token);
+        setSettingsReviewRaw(review.raw);
+        setSettingsRecovery({
+          status: "missing",
+          message:
+            "A vault restore did not confirm its financial settings. Review the plan window and reserve before spending guidance is shown.",
+        });
+      } else if (review.status === "corrupt") {
+        setSettingsReviewToken(null);
+        setSettingsReviewRaw(review.raw);
+        setSettingsRecovery({
+          status: "missing",
+          message:
+            "The saved financial-settings review record could not be read. Review the settings before spending guidance is shown.",
+        });
+      }
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : "unknown error";
       setLoadError(`Local storage is unavailable (${message}). Changes cannot be persisted safely.`);
@@ -323,6 +357,41 @@ export default function Home() {
     return () => window.removeEventListener("storage", receiveAssumptions);
   }, [showReadSettings]);
 
+  useEffect(() => {
+    settingsRecoveryStatusRef.current = settingsRecovery.status;
+  }, [settingsRecovery.status]);
+
+  useEffect(() => {
+    function receiveReview(event: StorageEvent) {
+      if (event.key !== SETTINGS_REVIEW_STORAGE_KEY && event.key !== null) return;
+      const incoming = readSettingsReview(browserStorage());
+      // A removal or replacement must never erase the guard this tab already
+      // displayed. Keep its known identity and let the explicit review/reload
+      // decide; a newer valid guard is adopted only when this tab is not gated.
+      if (incoming.status === "absent") return;
+      if (settingsRecoveryStatusRef.current === "missing") return;
+      if (incoming.status === "valid") {
+        setSettingsReviewToken(incoming.guard.token);
+        setSettingsReviewRaw(incoming.raw);
+        setSettingsRecovery({
+          status: "missing",
+          message:
+            "A vault restore did not confirm its financial settings. Review the plan window and reserve before spending guidance is shown.",
+        });
+      } else {
+        setSettingsReviewToken(null);
+        setSettingsReviewRaw(incoming.raw);
+        setSettingsRecovery({
+          status: "missing",
+          message:
+            "The saved financial-settings review record could not be read. Review the settings before spending guidance is shown.",
+        });
+      }
+    }
+    window.addEventListener("storage", receiveReview);
+    return () => window.removeEventListener("storage", receiveReview);
+  }, []);
+
   const asOf = useFinancialDate();
   const debtMinimums = useMemo(
     () => projectedDebtMinimums(state, asOf, assumptions.horizonDays),
@@ -330,6 +399,12 @@ export default function Home() {
   );
 
   const settingsRecoveryMissing = settingsRecovery.status === "missing";
+  // A verified ledger can still tell us what is posted through today, even
+  // when its forecast settings are awaiting review.
+  const cashDuringReview = settingsRecoveryMissing && ledgerFreshness === "current" &&
+    transactionSumCents(state.transactions) === state.current_balance_cents
+    ? transactionSumCents(state.transactions.filter((transaction) => transaction.date <= asOf))
+    : null;
   const evaluation = useMemo(
     () => assumptionsProblem || ledgerFreshness !== "current" || settingsRecoveryMissing
       ? null
@@ -360,10 +435,11 @@ export default function Home() {
   function showReplacedLedger(nextState: LedgerState, demo = false) {
     showSavedLedger(nextState, demo);
     failedDraftKeysRef.current.clear();
+    setPurchaseToRecord(undefined);
     setLedgerViewGeneration((current) => current + 1);
   }
 
-  function navigate(next: Section) {
+  function navigate(next: Section, record?: { purchase?: PurchaseToRecord }) {
     // Navigation is held until the durable result is known so a pending save
     // cannot be mistaken for an abandoned draft or hidden behind another section.
     if (writeInFlightRef.current || settingsWriteInFlightRef.current) return;
@@ -375,10 +451,15 @@ export default function Home() {
       failedDraftKeysRef.current.clear();
       setSaveWarning(null);
     }
+    setPurchaseToRecord(record?.purchase);
     setSection(next);
     const url = `${window.location.pathname}${window.location.search}#${next}`;
     window.history.replaceState(null, "", url);
-    requestAnimationFrame(() => document.getElementById("content")?.focus({ preventScroll: true }));
+    requestAnimationFrame(() => {
+      const amount = record && document.getElementById("money-entry-amount");
+      if (amount) amount.focus();
+      else document.getElementById("content")?.focus({ preventScroll: true });
+    });
   }
 
   function reloadLedger() {
@@ -482,16 +563,29 @@ export default function Home() {
       return { ok: false, error: REPLACEMENT_CANCELLED_MESSAGE };
     }
     return runLedgerWrite(async () => {
-      const saved = await saveLedgerChange(nextState, { ...options, requireLock: true });
+      const saved = await saveLedgerChange(nextState, {
+        ...options,
+        requireLock: true,
+        // A vault restore supplies its required guard. A local file import has no
+        // vault relationship, so it clears a guard from the ledger it replaces.
+        settingsReview: options.settingsReview
+          ?? (options.vaultId ? undefined : { action: "clear" }),
+      });
       if (saved.ok) {
         showReplacedLedger(nextState);
-        if (options.vaultId) setCurrentVaultId(options.vaultId);
+        if (options.vaultId) {
+          setCurrentVaultId(options.vaultId);
+        } else {
+          setSettingsReviewToken(null);
+          setSettingsReviewRaw(null);
+          setSettingsRecovery({ status: "none" });
+        }
       }
       return saved;
     });
   }
 
-  async function handleApplyAssumptions(
+  async function saveAssumptionsForReview(
     nextAssumptions: Assumptions,
     fromRecovery = false
   ): Promise<string | null> {
@@ -508,15 +602,6 @@ export default function Home() {
       if (saved.ok) {
         showReadSettings(parseSavedAssumptions(saved.raw));
         setHasSavedDecisionSettings(true);
-        // An explicit save is a deliberate choice; it resolves the post-restore
-        // "settings were not recovered" block without pretending they came from
-        // the vault.
-        if (settingsRecovery.status === "missing") {
-          setSettingsRecovery({
-            status: "applied",
-            message: "Financial settings were saved in this browser after recovery.",
-          });
-        }
         return null;
       }
       if (saved.reason === "conflict") {
@@ -548,6 +633,87 @@ export default function Home() {
     }
   }
 
+  async function handleApplyAssumptions(
+    nextAssumptions: Assumptions,
+    fromRecovery = false,
+    options: { skipReviewClear?: boolean } = {}
+  ): Promise<string | null> {
+    if (writeInFlightRef.current) return BUSY_SAVE_MESSAGE;
+    if (settingsWriteInFlightRef.current) return SETTINGS_SAVE_BUSY;
+
+    if (settingsRecovery.status !== "missing" || options.skipReviewClear) {
+      return saveAssumptionsForReview(nextAssumptions, fromRecovery);
+    }
+
+    // Check the reviewed guard, save the settings and clear the guard under one
+    // ledger lock. A newer restore cannot clear its guard between our check and
+    // our write, and an older save cannot overwrite newer settings after it.
+    const resolution = await resolveSettingsReview(
+      {
+        token: settingsReviewToken,
+        expectedRaw: settingsReviewRaw,
+        apply: async () => {
+          const error = await saveAssumptionsForReview(nextAssumptions, fromRecovery);
+          return error ? { ok: false, error } : { ok: true };
+        },
+      },
+      browserStorage()
+    );
+
+    if (resolution.applied && resolution.cleared) {
+      setSettingsReviewToken(null);
+      setSettingsReviewRaw(null);
+      setSettingsRecovery({
+        status: "applied",
+        message: "Financial settings were reviewed and saved in this browser after recovery.",
+      });
+      return null;
+    }
+
+    if (resolution.superseded) {
+      const current = readSettingsReview(browserStorage());
+      if (current.status === "absent") {
+        // A newer restore/review resolved the guard. Do not overwrite its settings.
+        setSettingsReviewToken(null);
+        setSettingsReviewRaw(null);
+        setSettingsRecovery({ status: "none" });
+        showReadSettings(loadAssumptions(browserStorage()), true);
+        const error =
+          "A newer vault restore or settings review superseded this one. The current settings were loaded; review them before saving.";
+        setAssumptionsWarning(error);
+        return error;
+      }
+      // Keep this tab's reviewed identity. Do not adopt a newer guard from a
+      // storage event or a racing restore; reload so the person reviews the
+      // ledger and settings that actually replaced this one.
+      const error =
+        "A newer vault restore replaced the review you are looking at. These settings were not applied; reload and review the current ledger.";
+      setSettingsRecovery({
+        status: "missing",
+        message:
+          "A newer vault restore replaced this review. Reload to review the current ledger and financial settings before spending guidance is shown.",
+      });
+      setAssumptionsWarning(error);
+      return error;
+    }
+
+    const current = readSettingsReview(browserStorage());
+    if (current.status === "valid" || current.status === "corrupt") {
+      setSettingsReviewToken(current.status === "valid" ? current.guard.token : null);
+      setSettingsReviewRaw(current.raw);
+    }
+    const error = resolution.error
+      ?? "Financial settings could not be confirmed. Review the saved settings before guidance is shown.";
+    setSettingsRecovery({
+      status: "missing",
+      message: resolution.applied
+        ? "Financial settings were saved, but the vault-restore review could not be cleared. Review the settings again before spending guidance is shown."
+        : "Financial settings were not applied because the vault-restore review changed or could not be confirmed. Review the current settings.",
+    });
+    setAssumptionsWarning(error);
+    return error;
+  }
+
   /**
    * Apply settings recovered from the portable vault profile. The ledger was
    * already replaced, so this is the step that makes the recovered decision
@@ -555,23 +721,41 @@ export default function Home() {
    * closed; it never falls back to defaults silently.
    */
   async function handleApplyRecoveredSettings(profile: SettingsProfile): Promise<string | null> {
-    const settingsError = await handleApplyAssumptions(profile.assumptions, true);
+    // The restore caller already holds the ledger lock inside resolveSettingsReview.
+    // skipReviewClear prevents re-entering it while still using the normal save path.
+    const settingsError = await handleApplyAssumptions(profile.assumptions, true, {
+      skipReviewClear: true,
+    });
     if (settingsError) return settingsError;
     const savedTargets = saveBudgetTargets(browserStorage(), profile.budgetTargets);
     if (!savedTargets.ok) {
       setTargetWarning(savedTargets.error);
-      // Budget targets do not change the spending calculation. Keep the recovered
-      // decision settings usable and surface the target failure separately.
-    } else {
-      setTargets(profile.budgetTargets);
-      setTargetWarning(null);
+      // A target failure leaves the guard in place: the recovered profile is not
+      // fully applied, so spending guidance must stay withheld until review.
+      return savedTargets.error;
     }
+    setTargets(profile.budgetTargets);
+    setTargetWarning(null);
     return null;
   }
 
   function readSavedSettings() {
     if (writeInFlightRef.current || settingsWriteInFlightRef.current) return;
     showReadSettings(loadAssumptions(browserStorage()));
+  }
+
+  function receiveSettingsRecovery(outcome: SettingsRecoveryOutcome) {
+    setSettingsRecovery(outcome);
+    if (outcome.status === "missing") {
+      setSettingsReviewToken(outcome.reviewToken);
+      const current = readSettingsReview(browserStorage());
+      setSettingsReviewRaw(
+        current.status === "valid" || current.status === "corrupt" ? current.raw : null
+      );
+    } else if (outcome.status === "applied" || outcome.status === "kept") {
+      setSettingsReviewToken(null);
+      setSettingsReviewRaw(null);
+    }
   }
 
   async function handleResetDemo() {
@@ -589,10 +773,17 @@ export default function Home() {
     }
     if (!confirm(DEMO_RESET_MESSAGE)) return;
     await runLedgerWrite(async () => {
-      const result = await saveLedgerChange(SAMPLE_LEDGER_STATE, { expectedRaw: storedRaw, requireLock: true });
+      const result = await saveLedgerChange(SAMPLE_LEDGER_STATE, {
+        expectedRaw: storedRaw,
+        requireLock: true,
+        settingsReview: { action: "clear" },
+      });
       if (result.ok) {
         showReplacedLedger(SAMPLE_LEDGER_STATE, true);
         setLoadError(null);
+        setSettingsReviewToken(null);
+        setSettingsReviewRaw(null);
+        setSettingsRecovery({ status: "none" });
       } else if (!result.indeterminate) {
         setSaveWarning(result.error);
       }
@@ -1033,6 +1224,7 @@ export default function Home() {
               needsSchedule={needsSchedule}
               forecast={homeForecast}
               onNavigate={navigate}
+              onRecordPurchase={ledgerFreshness === "current" ? () => navigate("money", {}) : undefined}
               saving={savesPending}
               createOwn={async (nextState) => {
                 if (!usingDemo) {
@@ -1054,9 +1246,11 @@ export default function Home() {
             <MoneyView
               state={state}
               asOf={asOf}
-              startingBalanceCents={forecast?.outcome.startingBalanceCents ?? null}
+              startingBalanceCents={forecast?.outcome.startingBalanceCents ?? cashDuringReview}
               onEdit={onEdit}
+              onDiscardDraft={discardFailedDraft}
               saving={savesPending}
+              purchaseToRecord={purchaseToRecord}
             />
           )}
           {section === "budget" && (
@@ -1094,6 +1288,9 @@ export default function Home() {
               onEdit={onEdit}
               onDiscardDraft={discardFailedDraft}
               saving={savesPending}
+              onRecordPurchase={
+                !usingDemo && ledgerFreshness === "current" ? (purchase) => navigate("money", { purchase }) : undefined
+              }
             />
           )}
           {section === "future" && forecast && (
@@ -1125,9 +1322,10 @@ export default function Home() {
         currentVaultId={currentVaultId}
         usingDemo={usingDemo}
         settingsProfile={portableSettings}
+        settingsReviewRequired={settingsRecoveryMissing}
         hasSavedDecisionSettings={hasSavedDecisionSettings}
         onApplyRecoveredSettings={handleApplyRecoveredSettings}
-        onSettingsRecovery={setSettingsRecovery}
+        onSettingsRecovery={receiveSettingsRecovery}
         onVaultSelected={setCurrentVaultId}
       />
     </div>

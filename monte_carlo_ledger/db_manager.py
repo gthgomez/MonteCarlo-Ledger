@@ -478,6 +478,70 @@ def get_ledger_balance() -> int:
         return _to_int_strict(res[0])
     return 0  # Unreachable at runtime; satisfies type checker
 
+def _posted_cash(conn: sqlite3.Connection, as_of_date: str) -> int:
+    """Dated cash basis shared by the read and write reconciliation paths."""
+    row = conn.execute(
+        "SELECT SUM(amount) FROM transactions WHERE date <= ?", (as_of_date,)
+    ).fetchone()
+    return _to_int_strict(row[0])
+
+
+def get_ledger_balance_through(as_of_date: str) -> int:
+    """Posted cash: sum of transactions dated on or before ``as_of_date``.
+
+    ``get_ledger_balance`` remains the all-dated sum used for the cached-balance
+    invariant. This is the figure an actual bank balance can be compared with while
+    future-dated rows (scheduled income or bill payments) are still pending.
+    """
+    as_of_date = budget_engine.normalize_date(as_of_date)
+    with get_db_connection() as conn:
+        return _posted_cash(conn, as_of_date)
+
+
+def _format_signed_cents(cents: int) -> str:
+    """Signed currency text for adjustment descriptions (parity with ui.format_currency)."""
+    sign = "+" if cents > 0 else "-" if cents < 0 else ""
+    dollars, remainder = divmod(abs(cents), 100)
+    return f"{sign}${dollars:,}.{remainder:02d}"
+
+
+def reconcile_cash_balance(
+    actual_cents: int, as_of_date: str, reason: str, category: str = "Adjustment"
+) -> int:
+    """Atomically align posted cash with an actual bank balance; return the delta.
+
+    The adjustment row is dated ``as_of_date``, so future-dated rows are untouched.
+    The cached balance is refreshed from the all-dated ledger sum in the same write
+    transaction, preserving ``get_ledger_balance() == get_stored_balance()``. A zero
+    delta writes nothing.
+    """
+    as_of_date = budget_engine.normalize_date(as_of_date)
+    with get_db_connection() as conn:
+        with conn:
+            conn.execute("BEGIN IMMEDIATE")  # lock before reading the basis
+            posted = _posted_cash(conn, as_of_date)
+            delta = actual_cents - posted
+            if delta != 0:
+                conn.execute(
+                    "INSERT INTO transactions (amount, category, type, date, description) "
+                    "VALUES (?, ?, 'Adjustment', ?, ?)",
+                    (
+                        delta,
+                        category,
+                        as_of_date,
+                        f"{reason} ({_format_signed_cents(delta)})",
+                    ),
+                )
+                ledger_sum = _to_int_strict(
+                    conn.execute("SELECT SUM(amount) FROM transactions").fetchone()[0]
+                )
+                conn.execute(
+                    "UPDATE settings SET value = ? WHERE key = 'current_balance'",
+                    (ledger_sum,),
+                )
+    return delta
+
+
 def get_stored_balance() -> int:
     """Retrieves the cached balance from settings."""
     with get_db_connection() as conn:

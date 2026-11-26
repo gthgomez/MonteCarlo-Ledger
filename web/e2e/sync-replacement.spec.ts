@@ -403,6 +403,7 @@ test.describe("uncertain replacement recovery", () => {
   }) => {
     test.setTimeout(90_000);
     const SYNC_STORAGE_KEY = "montecarlo_vault_sync_v1";
+    const SETTINGS_REVIEW_KEY = "montecarlo_settings_review_v1";
 
     await page.goto("/");
 
@@ -530,6 +531,12 @@ test.describe("uncertain replacement recovery", () => {
     expect(incomingRaw).not.toBe(priorRaw);
     expect(await page.evaluate((key) => localStorage.getItem(key), VAULT_ID_STORAGE_KEY)).toBeNull();
     expect(await page.evaluate((key) => localStorage.getItem(key), SYNC_STORAGE_KEY)).toBeNull();
+    const guardRaw = await page.evaluate((key) => localStorage.getItem(key), SETTINGS_REVIEW_KEY);
+    expect(JSON.parse(guardRaw ?? "null")).toMatchObject({
+      vaultId,
+      ledgerRevision: 1,
+      reason: "settings-pending",
+    });
 
     type InjectedWrite = { key: string; value: string; blocked: boolean };
     const writes = (): Promise<InjectedWrite[]> =>
@@ -540,6 +547,7 @@ test.describe("uncertain replacement recovery", () => {
         return harness.__syncReplacementWrites ?? [];
       });
     expect(await writes()).toEqual([
+      { key: SETTINGS_REVIEW_KEY, value: guardRaw, blocked: false },
       { key: LEDGER_STORAGE_KEY, value: incomingExpected, blocked: false },
       { key: VAULT_ID_STORAGE_KEY, value: vaultId, blocked: true },
       { key: LEDGER_STORAGE_KEY, value: priorRaw, blocked: true },
@@ -577,7 +585,7 @@ test.describe("uncertain replacement recovery", () => {
     expect(exported).not.toBe(incomingRaw);
     expect(download.suggestedFilename()).toMatch(/previous/);
     // Reading/exporting the previous bytes itself must not touch storage.
-    expect((await writes()).length).toBe(3);
+    expect((await writes()).length).toBe(4);
 
     // Sticky uncertainty: a focus/storage freshness check must not retract the
     // banner or write anything while the tab still holds the older view.
@@ -620,6 +628,7 @@ test.describe("uncertain replacement recovery", () => {
       reload.click(),
     ]);
     await expect(page.getByRole("heading", { name: "Saved ledger could not be verified" })).toHaveCount(0);
+    await expect(page.getByRole("heading", { name: "Financial settings were not recovered" })).toBeVisible();
     await expect(cash.getByText("$7,777.00", { exact: true })).toBeVisible();
     await expect(page.getByLabel("Note")).toHaveValue("");
     expect(await storedRaw(page)).toBe(incomingRaw);

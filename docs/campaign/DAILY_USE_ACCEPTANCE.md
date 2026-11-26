@@ -1,0 +1,104 @@
+# Daily-use acceptance
+
+Starting default-branch heads fetched on 2026-11-25: Ledger
+`f3367b7d98ca016bc81cb45c11556fd18e9259ac` (`master`); Android
+`a0b70b40f1b39aea05eb92a50c265fb88a55592e` (`main`). Use synthetic plans in fresh
+profiles, disposable SQLite files and loopback test servers. Keep individual
+checks bound to the revision or locally changed files actually exercised.
+
+| ID | Acceptance and why it matters | Platform / owner | State and evidence |
+| --- | --- | --- | --- |
+| FIN-01 | $500 opening cash and one $300 explicitly linked bill on the 15th against a debt minimum on the 20th leave $200. Unlinked identical records leave −$100. Compare date, outflow, balance and shortfall. | Android ledger adapter/dashboard; first dependency | Passing for Android `6e9aa952ba02367adeb35dd1f9f410bc4cfc9e38`: [API 34 emulator](https://github.com/gthgomez/MonteCarloLedger-Android/actions/runs/45763661539) rendered both outcomes and verified a $40 hypothesis leaves the actual ledger unchanged. Baseline `a0b70b4` failed the dashboard oracle: expected 20,000 cents, observed −10,000. |
+| FIN-02 | A paid amount already in cash is not replayed. Partial payment leaves the genuine shortfall; moved bills retain their original obligation period and their new cash date; inactive rows do not hide independent debt. | Android/Python/Web adapters; depends on FIN-01 | Android `6e9aa95`: [unit gate](https://github.com/gthgomez/MonteCarloLedger-Android/actions/runs/45763661424) includes whole-cent, leap-month, moved, reserve and linked correction controls. Later schedule-template edits and legacy paid-without-transaction records still require cross-platform semantic qualification. |
+| PAR-01 | Exact Android and Ledger candidates reproduce the supported contract fixtures. Adapter and displayed-result tests are separate from engine conformance. | Cross-repository CI + app qualification; depends on FIN-01 | [Exact run 45764710904](https://github.com/gthgomez/MonteCarlo-Ledger/actions/runs/45764710904): Ledger `90d9cadccbe727b917eb3f87b76432828e641898` and Android `6e9aa952ba02367adeb35dd1f9f410bc4cfc9e38`, 38 fixtures, zero divergences or one-sided IDs. Contract fixtures are not proof of ledger/adapter parity for arbitrary histories. |
+| USE-01 | Start empty, enter cash and obligations, see a dated assessment, preview a purchase without writing it, record it exactly once, and see the changed answer after reload. | Web/Python/Android flows; depends on FIN-01 | [Web `b983a14` CI](https://github.com/gthgomez/MonteCarlo-Ledger/actions/runs/45833239153) exercised Chromium against the production build. $500 opening minus a $300 bill leaves $200; a $100 reserve leaves $100 headroom. A $40 hypothetical leaves $160 / $60 with no ledger write. Confirming the purchase leaves $460 current cash. Android exercised the hypothetical on API 34; complete Android first-run continuity is unqualified. |
+| USE-02 | Settle a bill, record income, correct and reconcile cash, then close and reopen without losing saved records or double-booking events. | App persistence + presentation | Installed CLI `89e66e6` posts −$40 (baseline −$840) to reconcile $500 to $460 without bringing the $800 future receipt forward; repeat adds no row. Running loopback API sees $460 low and $1,260 ending. Web `b983a14` records $50 income, corrects the purchase note, reconciles −$5, deletes a $300 settlement to reopen its bill, settles again, and reloads to $205 with exactly one settlement. |
+| USE-03 | Qualify normal entry, overview and recovery with keyboard and representative small, tablet and desktop layouts; separately check Android touch/font scaling and actual accessibility tools. | Web and Android UI | Web daily journey passed at 390×844, 768×1024, and 1280×800 with Enter activation, amount-field focus, and no Home horizontal overflow. Screenshots show Plan's narrow-screen results need scrolling. No full assistive-technology, zoom or physical-device coverage. |
+| REC-01 | Restore matching schedules, links, reserve and assumptions, or disclose/withhold incompatible guidance. Test stale revisions, interrupted writes, failed restore, restart and continuation. | Web/CLI/Android vault and backup | [Web `b983a14` CI](https://github.com/gthgomez/MonteCarlo-Ledger/actions/runs/45833239153): 197 browser passes, 2 intentional skips, and a separate 16-pass file-backed libSQL lane. Chromium → vault HTTP → installed Python/SQLite → fresh Chromium preserves rows and links; after a Python-only edit, advice stays withheld until review and the exact low is $975. Local build `tz6y_V-wqCn23e0T492LR` on `b983a14` restored revision 1, $460 and both rows into separate SQLite after restarting Next with the same libSQL file. Hosted recovery and three-client backup/restore remain unqualified. |
+| MODEL-01 | Forecast evaluation uses information present at each historical cutoff and measures daily minima and cash shortfalls where complete daily history exists. Show sample size and distinguish model results from observed rates. | Android backtest; shared evidence standard | The offline harness measures held-out one-month troughs and Brier scores using a training-only baseline. Both runs suppress synthetic surprises because the training baseline already includes irregular spending. The mixed-expense fixture covered three of six months after this correction. Representative history, an account-complete 90-day replay, and real-world accuracy remain unqualified. |
+| REL-01 | Independently qualify installed Python, built Web and exact Android emulator candidates, with hosted recovery and distribution recorded separately. | Release integration; depends on the relevant gates above | Android `6e9aa95`: 44 tests on API 34 CI emulator and unsigned [release compile](https://github.com/gthgomez/MonteCarloLedger-Android/actions/runs/45763661353). Android Lab later admitted a managed AVD but it timed out booting; cleanup completed. Web `master` is linked to GitHub Production; Android `main` can trigger signing. No production merge is required for local qualification. |
+
+## Financial vocabulary
+
+- **Recorded cash now** is eligible posted cash through the assessment date.
+  Future receipts and available credit are separate. A transfer between two
+  eligible cash accounts does not change total cash.
+- **Obligations** are unpaid required outflows. A linked scheduled payment and
+  its liability minimum may represent the same obligation; amounts, names and
+  similar dates alone do not prove a match.
+- **Projected cash** is a dated balance conditional on entered activity. The
+  low point is the smallest balance in the window; the ending balance can be
+  higher even when cash runs short in the middle.
+- **Reserve** is cash the user intends to keep. **Spending headroom** is the
+  applicable low-point estimate after protecting that reserve; it is neither
+  available credit nor the ending balance.
+- **Forecast uncertainty** is conditional on the model's inputs. A seeded
+  simulation can be reproducible without accurately estimating real-world odds.
+
+## Reruns
+
+- Ledger: follow the [local qualification procedure](WEB_PYTHON_QUALIFICATION.md#reproduce-the-local-gate).
+- Use an empty, absolute local file path in `MC_QUALIFICATION_VAULT_FILE` to
+  exercise the production libSQL storage path with `pnpm exec playwright test
+  e2e/qualification-recovery.spec.ts e2e/portable-settings.spec.ts --workers 1`.
+  Set `MC_QUALIFICATION_PYTHON` to the installed candidate interpreter. The
+  defaults use memory. Neither path uses a hosted database or credentials.
+- Android dashboard adapter: `./gradlew :app:testDebugUnitTest --tests '*ContractAdoptionDashboardTest' --no-daemon`.
+  This verifies the ViewModel's financial presentation inputs, not device rendering.
+- Android runtime: plan through `android-lab plan --project . --suite instrumentation`
+  or use the repository's API 34 emulator CI. Preserve the exact device report.
+- Exact engine/adapter check: choose the Ledger candidate ref in **Contract
+  conformance**, dispatch `target=candidate-sha` with the full `android_sha`, and
+  check the two observed SHAs and the strict comparison in the run report. A
+  normal PR run may use the historical pin; its report cannot qualify a new
+  Android candidate. The manual lane runs the Kotlin bridge and dashboard tests
+  alongside the emitter, but it does not launch an app.
+- To reproduce the exact comparison locally, emit fresh Python results with
+  `python tools/conformance/run_python.py --out build/python-results`. From a
+  clean exact Android candidate run `./gradlew :app:testDebugUnitTest --tests
+  '*ContractEmitTest' --tests '*ContractScenarioBridgeTest' --tests
+  '*ContractAdoptionDashboardTest' --no-daemon`. In the Ledger checkout,
+  run `python tools/conformance/cross_engine.py --fixtures fixtures --python-dir
+  build/python-results --kotlin-dir <android>/app/build/contract-results
+  --kotlin-sha <full-android-sha> --contract-pin
+  <android>/app/src/test/resources/contract/contract-pin.json --strict`.
+
+## Readiness and evidence custody
+
+| Surface | What the exercised build supports | Release and operational gaps |
+| --- | --- | --- |
+| Python CLI / local API | The installed CLI reconciles dated cash once, and the loopback API reads the same SQLite rows. The [CI matrix for `b983a14`](https://github.com/gthgomez/MonteCarlo-Ledger/actions/runs/45833239348) passed Python 3.10–3.12 and clean install. | Ready to review and use the exercised local workflows on the candidate. General forecast parity and live vault operation are separate. |
+| Web | A synthetic household can decide, record, correct and reconcile a purchase, settle a bill, and recover a ledger with the correct settings or an explicit review gate. | Candidate browser evidence covers Chromium. Human onboarding comfort, assistive technology, other browsers, and hosted recovery have not been qualified. |
+| Android | Candidate Forecast evaluates a purchase without saving it, and shows linked or separate loan outflows in the API 34 emulator. Local storage regressions cover linked corrections and moved slots. | Standalone signed install, device upgrade/recovery, and an uninterrupted first-run household on a physical phone are unqualified. Existing legacy skipped/paid-without-payment records and some native-only debt/account settings are not portable. |
+| Prediction and parity | Exact fixtures check deterministic and seeded outputs. Synthetic household cases separately check adapters and displayed amounts. | No estimate of realized 90-day risk is established. Matching engines cannot resolve effects of missing balances, transfers, historical settlement amounts or assumptions. |
+
+Delivery is through draft [Ledger #68](https://github.com/gthgomez/MonteCarlo-Ledger/pull/68)
+and [Android #50](https://github.com/gthgomez/MonteCarloLedger-Android/pull/50).
+Neither candidate is merged or publicly released. GitHub Actions and preview status are
+separate from production availability. Local evidence is under
+`D:\AgentData\evidence\montecarlo-daily-use-20261125`, including the installed CLI/API
+JSON, Chromium comparison screenshots, Android API 34 reports, strict comparison report,
+and `verify-vault-restart.ps1`. Rerun on fresh synthetic data.
+
+## Engine-to-application map
+
+“Exposed” below means the application calls the indicated owner. It is not a
+claim that every scenario has been exercised on a current build.
+
+| Decision | Calculation authority and required data | Application surface, limits and evidence |
+| --- | --- | --- |
+| What cash can I use now, and when will it run low? | Contract 2.0 dated cash flow; ledger adapter chooses eligible opening cash and dated obligations. | Python CLI/API and Web expose deterministic low/ending, Android Forecast/Analysis map the engine summary. Python installed CLI/API proves dated cash reconciliation. Android rejects ambiguous confirmed balances that might include future cash. |
+| How much room do I have after a reserve? | Modeled low-point rank minus reserve with configured horizon, dates and ranges. | Web Home/Advanced, Python CLI/API options. Android engine accepts a reserve; the dashboard's standard path supplies zero. No parity claim for adjustable reserves. |
+| Do upcoming bills or debts leave a shortfall? | Stable bill/occurrence/transaction and debt IDs, dated recurrence, forecast adapter. | Bills/Home (Web), interactive bills and CLI/API forecast (Python), Dashboard/Bills/Forecast (Android). Hand oracles cover linked and independent debt; special schedule types and settlement semantics still need separate qualification. |
+| Can I buy this? What if payday is late? | Canonical scenario and a hypothetical dated edit without a ledger write. | Web Plan and Android Forecast expose both. Python CLI exposes both, and the HTTP API exposes purchase. Web hands a same-day purchase to record review. The installed CLI verified a delayed paycheck can change the exact low from $100 to −$200 yet still end at $300. |
+| What if a bill changes or a surprise arrives? | Web Plan bill-amount scenario; stochastic surprise-rate and magnitude inputs to the forecast engine. | Web Plan and Advanced, Python programmatic risk inputs, Android calibration. Modeled probabilities are conditional. There is no verified empirical accuracy or three-platform dedicated unexpected-expense action. |
+| How should I pay off debt? | Contract 2.0 amortization with balances, APR, minimums, chosen strategy and extra payment. | Web Plan and Android debt-payoff comparison expose snowball and avalanche; Python has technical engine interfaces. Monthly amortization is separate from the timing of an actual extra cash payment. |
+| Am I on track for the spending target? | Posted expense totals by period/category, plus planned commitments where separately shown. | Web Budget and Android category tracker; planning and forecast state differ across platforms. Browser budget targets are only paired through Web's companion vault profile. |
+| How well did earlier forecasts match actual cash? | Android historical calibration and offline month-end/trough backtest. | Android shows provenance; the backtest is technical and synthetic. No evidence for calibrated 90-day real-world shortfall odds. |
+| What belongs in my spendable accounts? | Eligible-cash classification at the adapter, never available credit. | Android has account routing; the shared ledger snapshot and Web/Python cannot represent all Android account semantics. Internal-transfer qualification and portable account semantics remain blockers. |
+
+Actual Budget's [reconciliation workflow](https://actualbudget.org/docs/accounts/reconciliation/)
+shows the cleared amount and difference before committing a correction. The
+applicable behavior here is to show the dated cash basis separately from the
+ledger total (Python) and preserve the balance adjustment preview (Web).
+MonteCarlo does not infer a bank-cleared state or lock transactions on that basis.

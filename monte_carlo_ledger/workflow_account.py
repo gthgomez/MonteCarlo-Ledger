@@ -1,4 +1,7 @@
-from . import db_manager
+from datetime import datetime
+from typing import Optional
+
+from . import budget_engine, db_manager
 from .ui import (
     CancelInput,
     Theme,
@@ -17,14 +20,19 @@ def handle_reconcile():
         print("\n(Cancelled)")
 
 
-def reconcile_flow():
+def reconcile_flow(as_of: Optional[str] = None):
+    as_of = budget_engine.normalize_date(
+        as_of or datetime.now().strftime("%Y-%m-%d")
+    )
     while True:
         try:
             clear_screen()
             print("\n--- Reconcile Bank Balance ---")
             ledger_bal = db_manager.get_ledger_balance()
+            current_bal = db_manager.get_ledger_balance_through(as_of)
             stored_bal = db_manager.get_stored_balance()
-            print(f" Ledger Sum:    {format_currency(ledger_bal)}")
+            print(f" Ledger Sum:    {format_currency(ledger_bal)} (all dates)")
+            print(f" Current Cash:  {format_currency(current_bal)} (through {as_of})")
             if ledger_bal != stored_bal:
                 print(f" Stored Balance: {format_currency(stored_bal)} (MISMATCH)")
 
@@ -34,21 +42,23 @@ def reconcile_flow():
             choice = input("\n Choice: ").strip()
 
             if choice == "1":
-                actual_cents = prompt_user("Enter actual CURRENT bank balance", "money")
-                delta = actual_cents - ledger_bal
-                if delta == 0:
-                    cprint(" Ledger sum already matches bank.", Theme.GREEN)
+                actual_cents = prompt_user("Enter actual CURRENT bank balance", "balance")
+                # Re-read: the rendered figure may be stale by the time input returns.
+                latest_bal = db_manager.get_ledger_balance_through(as_of)
+                if actual_cents == latest_bal:
+                    cprint(" Current cash already matches bank.", Theme.GREEN)
                     wait_for_user()
                 else:
                     reason = prompt_user("Reason for correction", default="Reconciliation adjustment")
-                    db_manager.add_transaction(
-                        delta,
-                        "Adjustment",
-                        f"{reason} ({format_currency(delta)})",
-                        t_type="Adjustment",
-                    )
-                    db_manager.sync_stored_balance()
-                    cprint(f" Success: Ledger corrected by {format_currency(delta)}.", Theme.GREEN)
+                    applied = db_manager.reconcile_cash_balance(actual_cents, as_of, reason)
+                    if applied == 0:
+                        # The transaction re-read the basis; a concurrent update won.
+                        cprint(" Current cash already matches bank.", Theme.GREEN)
+                    else:
+                        cprint(
+                            f" Success: Current cash corrected by {format_currency(applied)}.",
+                            Theme.GREEN,
+                        )
                     wait_for_user()
             elif choice == "2":
                 db_manager.sync_stored_balance()
