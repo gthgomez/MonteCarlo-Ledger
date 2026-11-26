@@ -73,6 +73,7 @@ jobs:
         run: echo "path=$(python -c 'import sys; print(sys.executable)')" >> "$GITHUB_OUTPUT"
 
       - name: Install Playwright browser
+        id: chromium
         run: pnpm exec playwright install --with-deps chromium
 
       - name: Browser E2E against the production build
@@ -82,10 +83,11 @@ jobs:
           MC_QUALIFICATION_PYTHON: ${{ steps.python-path.outputs.path }}
 
       - name: Qualify recovery against a disposable libSQL file
+        if: ${{ !cancelled() && steps.chromium.outcome == 'success' }}
         run: |
           export MC_QUALIFICATION_VAULT_FILE="$(mktemp -d "$RUNNER_TEMP/montecarlo-vault.XXXXXX")/vault.sqlite"
           pnpm exec playwright test e2e/qualification-recovery.spec.ts e2e/portable-settings.spec.ts \
-            --project desktop --workers 1
+            --project desktop --workers 1 --output test-results-libsql
         env:
           NODE_ENV: production
           MC_QUALIFICATION_PYTHON: ${{ steps.python-path.outputs.path }}
@@ -95,5 +97,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: playwright-traces
-          path: web/test-results
+          path: |
+            web/test-results
+            web/test-results-libsql
           if-no-files-found: ignore

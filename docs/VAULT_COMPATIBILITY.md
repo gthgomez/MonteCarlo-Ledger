@@ -16,7 +16,7 @@ Older clients must reject 2.2 before replacing their local records. Retain a bac
 | --- | --- | --- |
 | Recorded cash entries, income schedules, supported bills and their dated occurrences and settlements | Included. Links between records belong to the same snapshot. | Keep a separate local ledger backup before a restore or an upgrade. |
 | Supported debts and minimums | Included; payment links and inactive debt state require 2.2 readers. | Keep the originating client's backup if it stores additional debt fields. |
-| Web budget targets and forecast settings (reserve, window, risk assumptions, seed) | Included in a **separate encrypted settings profile** when this Web version pushes. Theme and unsaved drafts stay local. An older vault has no profile. | Pull applies a profile when present. If it is missing or unreadable, the Web app withholds spending guidance until you review the settings; it does not assume a zero reserve. |
+| Web budget targets and forecast settings (reserve, window, risk assumptions, seed) | Included in a **separate encrypted settings profile** when this Web version pushes. Theme and unsaved drafts stay local. | Web applies only a profile for the exact ledger revision. Otherwise, it withholds spending guidance until you review the settings. |
 | Android-only accounts, assets, goals, and rules; inactive bills, account-linked debts, and statement closing dates | Not included in the portable snapshot. Use Android's native encrypted backup, not a vault pull, to preserve this data. | Retain the native backup and qualify its restore on the intended Android build. |
 
 The Web export is **unencrypted JSON**. Treat it as sensitive and keep it offline or in a protected
@@ -71,8 +71,9 @@ result would exceed the server's 128-character limit).
   revision being restored. A ledger-only push from Python or Android, a partial Web push, or a
   version 1 profile may leave no verified match. The records can still be restored, but financial
   guidance stays withheld, including after reload, until the person reviews and saves the settings
-  in this browser or pulls a matching profile. To re-pair, review the reserve and plan window in
-  **Advanced** and targets in **Budget**, then push from Web.
+   in this browser or pulls a matching profile. Web disables pushing while review is required.
+   Review the reserve and plan window in **Advanced** and the targets in **Budget**, then push from
+   Web. If another tab completes the review first, reload to see the current saved plan.
 - Version 1 profiles remain readable for synchronization ancestry; their settings cannot be
   assigned automatically to a ledger revision. Older Web builds may flag a version 2 companion as
   unreadable but still read the unchanged ledger snapshot.

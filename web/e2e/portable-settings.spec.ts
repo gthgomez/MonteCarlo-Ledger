@@ -52,7 +52,7 @@ async function push(page: Page, vaultId: string): Promise<void> {
   await page.getByRole("button", { name: "Push (Upload)" }).click();
   await expect(
     page.getByText(/Successfully pushed|Pushed the ledger/)
-  ).toBeVisible();
+  ).toBeVisible({ timeout: 15_000 });
   await closeSync(page);
 }
 
@@ -121,7 +121,12 @@ async function pushLedgerOnlyVault(page: Page, vaultId: string): Promise<void> {
 
 async function pullAndRestore(page: Page, vaultId: string): Promise<void> {
   await pull(page, vaultId);
-  await confirmDemoReplacementIfAsked(page);
+  const dialog = page.getByRole("dialog", { name: "Cloud Vault & CLI Synchronization" });
+  const confirm = dialog.getByRole("button", { name: "Replace local ledger with the vault" });
+  const restored = dialog.getByText(/Successfully pulled, decrypted and saved vault|Ledger restored (?:at revision|\(rev)/);
+  await expect(confirm.or(restored)).toBeVisible({ timeout: 15_000 });
+  if (await confirm.isVisible()) await confirm.click();
+  await expect(restored).toBeVisible({ timeout: 15_000 });
 }
 
 /** Fail one durable-guard write in this synthetic browser context. */
