@@ -23,6 +23,7 @@ import {
 import { SAMPLE_LEDGER_STATE, type LedgerState } from "../types";
 import { transactionSumCents } from "../present";
 import { unresolvedPastOneTimeSlots } from "../scenario-builder";
+import { formatDollarsInput } from "../money-format";
 
 test("dollar entry becomes integer cents", () => {
   assert.equal(dollarsToCents(45.2), 4520);
@@ -32,8 +33,13 @@ test("dollar entry becomes integer cents", () => {
 test("exact dollar entry rejects fractions of a cent and unsafe totals", () => {
   assert.equal(parseDollarsToCents("150.2"), 15_020);
   assert.equal(parseDollarsToCents("0.01"), 1);
+  assert.equal(parseDollarsToCents(".50"), 50);
   assert.equal(parseDollarsToCents("90071992547409.91"), Number.MAX_SAFE_INTEGER);
-  for (const invalid of ["", "0.005", "1e2", "90071992547409.92"]) {
+  const cents = Number.MAX_SAFE_INTEGER - 1;
+  assert.equal(formatDollarsInput(cents), "90071992547409.90");
+  assert.equal(parseDollarsToCents(formatDollarsInput(cents)), cents);
+  assert.equal(parseDollarsToCents("-.50", { allowNegative: true }), -50);
+  for (const invalid of ["", "-0.50", "0.005", "1e2", "90071992547409.92"]) {
     assert.equal(parseDollarsToCents(invalid), null);
   }
 });

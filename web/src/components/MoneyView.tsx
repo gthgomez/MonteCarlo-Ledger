@@ -13,7 +13,7 @@ import {
   removeIncome,
   type EditResult,
 } from "@/lib/ledger-edits";
-import { formatMoney } from "@/lib/money-format";
+import { formatDollarsInput, formatMoney } from "@/lib/money-format";
 import { cashMinusEnteredDebt, enteredDebtCents, transactionSumCents } from "@/lib/present";
 import { nextIncomeDate } from "@/lib/scenario-builder";
 import { type PersistenceResult } from "@/lib/sync-state";
@@ -44,7 +44,7 @@ export function MoneyView({
 }) {
   const [kind, setKind] = useState<"Expense" | "Income">("Expense");
   const [amount, setAmount] = useState(() =>
-    purchaseToRecord ? (purchaseToRecord.amountCents / 100).toFixed(2) : ""
+    purchaseToRecord ? formatDollarsInput(purchaseToRecord.amountCents) : ""
   );
   const [category, setCategory] = useState("");
   const [description, setDescription] = useState("");
@@ -74,7 +74,7 @@ export function MoneyView({
   const [incomeError, setIncomeError] = useState<string | null>(null);
 
   const [reconcile, setReconcile] = useState(() =>
-    startingBalanceCents === null ? "" : (startingBalanceCents / 100).toFixed(2)
+    startingBalanceCents === null ? "" : formatDollarsInput(startingBalanceCents)
   );
   const [pinnedReconcileDate, setPinnedReconcileDate] = useState<string | null>(null);
   const reconcileDate = pinnedReconcileDate ?? asOf;
@@ -85,7 +85,7 @@ export function MoneyView({
   const debt = enteredDebtCents(state.liabilities);
   const net = startingBalanceCents === null ? null : cashMinusEnteredDebt(startingBalanceCents, state.liabilities);
   const futureCount = state.transactions.filter((tx) => tx.date > asOf).length;
-  const reconcileCents = reconcile.trim() === "" ? null : dollarsToCents(Number(reconcile));
+  const reconcileCents = parseDollarsToCents(reconcile, { allowNegative: true });
   // A pending/failed reconcile keeps its original date, but a pin never makes
   // an unavailable or stale cash summary a valid basis for a preview.
   const reconcileBaseCents =
@@ -191,7 +191,7 @@ export function MoneyView({
       return;
     }
     if (reconcileCents === null) {
-      setReconcileError("Enter the balance you see, in dollars.");
+      setReconcileError("Enter the balance you see, using no more than two decimal places.");
       return;
     }
     const submittedDate = reconcileDate;
@@ -219,7 +219,7 @@ export function MoneyView({
     setTransactionError(null);
     setTransactionEdit({
       id: tx.id,
-      amount: (Math.abs(tx.amount_cents) / 100).toFixed(2),
+      amount: formatDollarsInput(Math.abs(tx.amount_cents)),
       date: tx.date,
       category: tx.category ?? "",
       description: tx.description ?? "",
@@ -240,11 +240,12 @@ export function MoneyView({
       setTransactionError("Enter a positive amount with no more than two decimal places.");
       return;
     }
+    const original = state.transactions.find((row) => row.id === transactionEdit.id);
     const result = editCashTransaction(state, transactionEdit.id, {
       amountCents,
       date: transactionEdit.date,
-      category: transactionEdit.category,
-      description: transactionEdit.description,
+      category: transactionEdit.category === (original?.category ?? "") ? undefined : transactionEdit.category,
+      description: transactionEdit.description === (original?.description ?? "") ? undefined : transactionEdit.description,
     });
     if (!result.ok) {
       setTransactionError(result.error);

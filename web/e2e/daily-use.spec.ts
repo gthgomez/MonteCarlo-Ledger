@@ -68,6 +68,11 @@ test("check a purchase, record it once, and continue the household on the next d
   expect(await rawLedger(page)).toBe(beforeDecision);
   await page.getByLabel("Note", { exact: true }).fill("Synthetic groceries");
   const record = page.getByRole("button", { name: "Record this", exact: true });
+  await amount.fill("40.005");
+  await record.click();
+  await expect(page.getByRole("alert").filter({ hasText: /no more than two decimal places/ })).toBeVisible();
+  expect(await rawLedger(page)).toBe(beforeDecision);
+  await amount.fill("40");
   await record.click();
   await expect(page.getByRole("status").filter({ hasText: /Recorded \$40\.00/ })).toBeVisible();
   await expect(amount).toHaveValue("");

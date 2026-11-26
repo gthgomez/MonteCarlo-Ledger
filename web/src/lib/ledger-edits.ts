@@ -323,12 +323,16 @@ export function dollarsToCents(value: number): number | null {
 }
 
 /** Parse an entered dollar amount without rounding away a fraction of a cent. */
-export function parseDollarsToCents(text: string): number | null {
-  const match = /^(\d{1,14})(?:\.(\d{1,2}))?$/.exec(text.trim());
+export function parseDollarsToCents(text: string, options?: { allowNegative: boolean }): number | null {
+  const trimmed = text.trim();
+  const negative = options?.allowNegative === true && trimmed.startsWith("-");
+  const magnitude = negative ? trimmed.slice(1) : trimmed;
+  const canonical = magnitude.startsWith(".") ? `0${magnitude}` : magnitude;
+  const match = /^(\d{1,14})(?:\.(\d{1,2}))?$/.exec(canonical);
   if (!match) return null;
   const cents = BigInt(match[1]) * 100n + BigInt((match[2] ?? "").padEnd(2, "0"));
   const value = Number(cents);
-  return Number.isSafeInteger(value) ? value : null;
+  return Number.isSafeInteger(value) ? (negative ? -value : value) : null;
 }
 
 /** "21.99" -> 2199 basis points. Rejects float math and more than two decimals. */
