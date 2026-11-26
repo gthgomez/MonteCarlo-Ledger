@@ -133,6 +133,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return PROVENANCE_EXIT
 
     rows: List[Dict[str, str]] = []
+    fixture_ids: set[str] = set()
     failures = 0
     checked = 0
 
@@ -144,6 +145,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         expected = doc.get("expected")
         status = doc.get("expected_status", "frozen")
         sid = scenario.get("scenario_id", path.stem)
+        fixture_ids.add(sid)
         if status == "pending-generation" or expected is None:
             rows.append({"id": sid, "outcome": "PENDING", "detail": "expected not frozen"})
             continue
@@ -179,18 +181,22 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         rows.append({"id": sid, "outcome": "FAIL" if detail else "PASS",
                      "detail": " | ".join(detail)})
 
-    # Corpus skew: which scenario ids only one engine emitted. Reported (it discloses cross-repo
-    # coupling — a Ledger fixture newer than the pinned Android SHA), but never tolerated: a
-    # scenario missing from either engine is already MISSING above and fails the run.
+    # A frozen Ledger fixture missing an output already failed above. Strict mode
+    # must also reject extra emitted IDs, including when Android's corpus is newer.
     python_ids = scenario_ids(args.python_dir)
     kotlin_ids = scenario_ids(args.kotlin_dir)
     only_python = sorted(set(python_ids) - set(kotlin_ids))
     only_kotlin = sorted(set(kotlin_ids) - set(python_ids))
+    if args.strict:
+        for sid in sorted((set(python_ids) | set(kotlin_ids)) - fixture_ids):
+            failures += 1
+            rows.append({"id": sid, "outcome": "UNEXPECTED",
+                         "detail": "emitted scenario has no Ledger fixture"})
     if only_python or only_kotlin:
         print(
             f"warning: corpus skew — python-only={len(only_python)} kotlin-only={len(only_kotlin)}; "
-            "the missing scenarios fail below by design. Bump ANDROID_PIN_SHA together with the "
-            "vendored contract-pin.json (see the workflow header) to resynchronise the corpora.",
+            "frozen fixtures need both results; strict mode also rejects unexpected results. "
+            "Use revisions with matching fixture corpora.",
             file=sys.stderr,
         )
 
@@ -208,9 +214,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "",
         "## Corpus skew",
         "",
-        "Reported only, never tolerated: a scenario emitted by one engine and not the other is "
-        "already MISSING above and fails the run. Skew means the pinned Android commit predates a "
-        "Ledger fixture change; bump `ANDROID_PIN_SHA` and re-vendor `contract-pin.json` together.",
+        "A frozen fixture missing an engine result fails the comparison. Strict mode also fails "
+        "on emitted scenario IDs with no Ledger fixture. Use revisions with matching corpora.",
         "",
         f"- in Python results only ({len(only_python)}): {_listing(only_python)}",
         f"- in Kotlin results only ({len(only_kotlin)}): {_listing(only_kotlin)}",
