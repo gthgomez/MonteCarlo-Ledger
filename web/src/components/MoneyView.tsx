@@ -4,7 +4,10 @@ import React, { useEffect, useState } from "react";
 import { formatDateLabel } from "@/lib/dates";
 import {
   addIncomeSchedule,
+  deleteCashTransaction,
   dollarsToCents,
+  editCashTransaction,
+  parseDollarsToCents,
   reconcileBalance,
   recordCashflow,
   removeIncome,
@@ -14,35 +17,53 @@ import { formatMoney } from "@/lib/money-format";
 import { cashMinusEnteredDebt, enteredDebtCents, transactionSumCents } from "@/lib/present";
 import { nextIncomeDate } from "@/lib/scenario-builder";
 import { type PersistenceResult } from "@/lib/sync-state";
-import { type IncomeItem, type LedgerState } from "@/lib/types";
+import { type IncomeItem, type LedgerState, type TransactionItem } from "@/lib/types";
 import { Button, Explain, fieldClass, Notice, Panel } from "./ui";
 
 const RECONCILE_UNAVAILABLE_MESSAGE =
   "Reconcile was not submitted because the current cash summary and adjustment preview are unavailable.";
+
+export type PurchaseToRecord = { amountCents: number; date: string };
 
 export function MoneyView({
   state,
   asOf,
   startingBalanceCents,
   onEdit,
+  onDiscardDraft,
   saving,
+  purchaseToRecord,
 }: {
   state: LedgerState;
   asOf: string;
   startingBalanceCents: number | null;
   onEdit: (result: EditResult, draftKey?: string) => Promise<PersistenceResult>;
+  onDiscardDraft: (draftKey: string) => void;
   saving: boolean;
+  purchaseToRecord?: PurchaseToRecord;
 }) {
   const [kind, setKind] = useState<"Expense" | "Income">("Expense");
-  const [amount, setAmount] = useState("");
+  const [amount, setAmount] = useState(() =>
+    purchaseToRecord ? (purchaseToRecord.amountCents / 100).toFixed(2) : ""
+  );
   const [category, setCategory] = useState("");
   const [description, setDescription] = useState("");
-  const [dateInput, setDate] = useState<string | null>(null);
+  const [dateInput, setDate] = useState<string | null>(purchaseToRecord?.date ?? null);
   // An implicit date sent to a write stays visible while that write is queued or
   // failed. A successful write releases it, so a fresh untouched form follows asOf.
   const [pinnedDate, setPinnedDate] = useState<string | null>(null);
   const date = dateInput ?? pinnedDate ?? asOf;
   const [formError, setFormError] = useState<string | null>(null);
+  const [recordNotice, setRecordNotice] = useState("");
+  const [transactionEdit, setTransactionEdit] = useState<{
+    id: string | number;
+    amount: string;
+    date: string;
+    category: string;
+    description: string;
+  } | null>(null);
+  const [transactionError, setTransactionError] = useState<string | null>(null);
+  const [transactionNotice, setTransactionNotice] = useState("");
 
   const [incomeName, setIncomeName] = useState("");
   const [incomeAmount, setIncomeAmount] = useState("");
@@ -88,9 +109,10 @@ export function MoneyView({
 
   async function submitRecord(event: React.FormEvent) {
     event.preventDefault();
-    const cents = dollarsToCents(Number(amount));
+    setRecordNotice("");
+    const cents = parseDollarsToCents(amount);
     if (cents === null || cents <= 0) {
-      setFormError("Enter an amount greater than zero.");
+      setFormError("Enter an amount greater than zero with no more than two decimal places.");
       return;
     }
     const submittedAmount = amount;
@@ -118,6 +140,11 @@ export function MoneyView({
     }
     setFormError(null);
     setPinnedDate((current) => (current === submittedDate ? null : current));
+    setRecordNotice(
+      `${submittedDate > asOf ? "Scheduled" : "Recorded"} ${formatMoney(cents)} ${
+        kind === "Expense" ? "out" : "in"
+      } on ${formatDateLabel(submittedDate)}.`
+    );
     // Clear only what was actually submitted. A value changed while the write
     // was pending belongs to the next draft and must survive the previous save.
     setAmount((current) => (current === submittedAmount ? "" : current));
@@ -186,6 +213,62 @@ export function MoneyView({
 
   const rows = [...state.transactions].reverse();
 
+  function openTransactionEdit(tx: TransactionItem) {
+    if (tx.id === undefined || tx.type === "Adjustment") return;
+    setTransactionNotice("");
+    setTransactionError(null);
+    setTransactionEdit({
+      id: tx.id,
+      amount: (Math.abs(tx.amount_cents) / 100).toFixed(2),
+      date: tx.date,
+      category: tx.category ?? "",
+      description: tx.description ?? "",
+    });
+  }
+
+  function closeTransactionEdit() {
+    onDiscardDraft("money:edit");
+    setTransactionEdit(null);
+    setTransactionError(null);
+  }
+
+  async function submitTransactionEdit(event: React.FormEvent) {
+    event.preventDefault();
+    if (!transactionEdit || saving) return;
+    const amountCents = parseDollarsToCents(transactionEdit.amount);
+    if (amountCents === null || amountCents <= 0) {
+      setTransactionError("Enter a positive amount with no more than two decimal places.");
+      return;
+    }
+    const result = editCashTransaction(state, transactionEdit.id, {
+      amountCents,
+      date: transactionEdit.date,
+      category: transactionEdit.category,
+      description: transactionEdit.description,
+    });
+    if (!result.ok) {
+      setTransactionError(result.error);
+      return;
+    }
+    const saved = await onEdit(result, "money:edit");
+    if (!saved.ok) {
+      setTransactionError(saved.error);
+      return;
+    }
+    closeTransactionEdit();
+    setTransactionNotice("Transaction updated.");
+  }
+
+  async function removeTransaction(tx: TransactionItem) {
+    if (tx.id === undefined || saving) return;
+    const name = tx.description || tx.category || tx.type;
+    if (!window.confirm(`Delete “${name}”? If this paid a bill, that bill will be reopened.`)) return;
+    setTransactionNotice("");
+    const saved = await onEdit(deleteCashTransaction(state, tx.id));
+    setTransactionError(saved.ok ? null : saved.error);
+    if (saved.ok) setTransactionNotice("Transaction deleted.");
+  }
+
   return (
     <fieldset disabled={saving} className="m-0 min-w-0 w-full space-y-6 border-0 p-0">
       <Panel
@@ -232,6 +315,9 @@ export function MoneyView({
       </Panel>
 
       <Panel title="Record money in or out" lede="This updates the ledger. A future date is kept as scheduled, not as money already spent.">
+        {purchaseToRecord && !recordNotice && (
+          <p className="mb-3 text-sm text-muted">Review the amount and date from your purchase comparison before saving.</p>
+        )}
         <form onSubmit={submitRecord} className="grid gap-3 sm:grid-cols-2">
           <label className="text-sm font-medium">
             Kind
@@ -242,7 +328,7 @@ export function MoneyView({
           </label>
           <label className="text-sm font-medium">
             Amount ($)
-            <input className={`${fieldClass} mt-1`} inputMode="decimal" value={amount} onChange={(e) => setAmount(e.target.value)} />
+            <input id="money-entry-amount" className={`${fieldClass} mt-1`} inputMode="decimal" value={amount} onChange={(e) => setAmount(e.target.value)} />
           </label>
           <label className="text-sm font-medium">
             Category
@@ -272,26 +358,70 @@ export function MoneyView({
           <div>
             <Button type="submit">Record this</Button>
           </div>
+          <p className="text-sm text-muted sm:col-span-2 empty:hidden" role="status">{recordNotice}</p>
         </form>
       </Panel>
 
       <Panel title="Recorded activity">
+        <p className="text-sm text-muted empty:hidden" role="status">{transactionNotice}</p>
+        {transactionError && transactionEdit === null && (
+          <p className="text-sm text-danger" role="alert">{transactionError}</p>
+        )}
         {rows.length === 0 ? (
           <p className="text-sm text-muted">No transactions yet. Record income or spending above, or set an opening balance.</p>
         ) : (
           <ul className="divide-y divide-line">
-            {rows.map((tx) => (
+            {rows.map((tx) => {
+              const name = tx.description || tx.category || tx.type;
+              const editable = tx.id !== undefined && tx.type !== "Adjustment";
+              return (
               <li key={String(tx.id)} className="flex flex-wrap items-baseline justify-between gap-2 py-3 text-sm">
                 <div>
-                  <p className="font-medium">{tx.description || tx.category || tx.type}</p>
+                  <p className="font-medium">{name}</p>
                   <p className="text-muted">
                     {formatDateLabel(tx.date)} · {tx.category || tx.type}
                     {tx.date > asOf ? " · Scheduled, not spent yet" : ""}
                   </p>
                 </div>
                 <p className="tabular-nums font-semibold">{formatMoney(tx.amount_cents)}</p>
+                {editable && transactionEdit === null && (
+                  <div className="flex flex-wrap gap-2">
+                    <Button type="button" variant="quiet" aria-label={`Edit ${name}`} onClick={() => openTransactionEdit(tx)}>Edit</Button>
+                    <Button type="button" variant="quiet" aria-label={`Delete ${name}`} onClick={() => void removeTransaction(tx)}>Delete</Button>
+                  </div>
+                )}
+                {transactionEdit !== null && transactionEdit.id === tx.id && (
+                  <form onSubmit={submitTransactionEdit} className="grid w-full gap-3 sm:grid-cols-2">
+                    <label>
+                      Corrected amount ($)
+                      <input className={`${fieldClass} mt-1`} inputMode="decimal" value={transactionEdit.amount}
+                        onChange={(event) => setTransactionEdit({ ...transactionEdit, amount: event.target.value })} />
+                    </label>
+                    <label>
+                      Corrected date
+                      <input className={`${fieldClass} mt-1`} type="date" value={transactionEdit.date}
+                        onChange={(event) => setTransactionEdit({ ...transactionEdit, date: event.target.value })} />
+                    </label>
+                    <label>
+                      Corrected category
+                      <input className={`${fieldClass} mt-1`} value={transactionEdit.category}
+                        onChange={(event) => setTransactionEdit({ ...transactionEdit, category: event.target.value })} />
+                    </label>
+                    <label>
+                      Corrected note
+                      <input className={`${fieldClass} mt-1`} value={transactionEdit.description}
+                        onChange={(event) => setTransactionEdit({ ...transactionEdit, description: event.target.value })} />
+                    </label>
+                    {transactionError && <p className="text-danger sm:col-span-2" role="alert">{transactionError}</p>}
+                    <div className="flex gap-2 sm:col-span-2">
+                      <Button type="submit">Save correction</Button>
+                      <Button type="button" variant="quiet" onClick={closeTransactionEdit}>Cancel</Button>
+                    </div>
+                  </form>
+                )}
               </li>
-            ))}
+              );
+            })}
           </ul>
         )}
       </Panel>

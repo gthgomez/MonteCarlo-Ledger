@@ -22,8 +22,8 @@ import {
  * restore whose durable bundle write fails leaves the previous ledger, vault
  * identity and revision ancestry unchanged.
  *
- * The server is the Playwright-managed loopback build with
- * VAULT_MEMORY_STORE=1 and empty Turso overrides (see playwright.config.ts).
+ * The server is the Playwright-managed loopback build with an explicit memory
+ * or disposable local libSQL store and no hosted Turso credentials.
  * Every assertion below is about one synthetic one-time vault; the temporary
  * SQLite file is disposable and no existing ledger, env file, credential, or
  * external endpoint is read.
@@ -378,6 +378,14 @@ async function failNextSyncStorageWrite(page: Page): Promise<void> {
   }, SYNC_STORAGE_KEY);
 }
 
+async function reviewSettingsAfterLedgerOnlyRevision(page: Page): Promise<void> {
+  const heading = page.getByRole("heading", { name: "Financial settings were not recovered" });
+  await expect(heading).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Cautious amount to spend" })).toHaveCount(0);
+  await page.getByRole("button", { name: "Use the settings shown now" }).click();
+  await expect(heading).toHaveCount(0);
+}
+
 test.describe("W2 Web → Python → fresh Web recovery", () => {
   test.use({ timezoneId: "UTC", locale: "en-US", colorScheme: "light" });
 
@@ -700,12 +708,12 @@ test.describe("W2 Web → Python → fresh Web recovery", () => {
             .click();
           await expect(
             secondPage.getByText(
-              /Successfully pulled, decrypted and saved vault \(rev 2\)!/
+              /Ledger restored at revision 2/
             )
           ).toBeVisible();
           await closeSync(secondPage);
 
-          await expect(moneyNow(secondPage)).toHaveText("$1,175.00");
+          await expect(secondPage.getByRole("heading", { name: "Financial settings were not recovered" })).toBeVisible();
           await expect(secondPage.getByText("Calculation Failed")).toHaveCount(0);
 
           const restored = await readLedger(secondPage);
@@ -767,16 +775,14 @@ test.describe("W2 Web → Python → fresh Web recovery", () => {
           });
           expect(restoredPaymentIds.has(String(restoredCarDebt.linked_payment_id))).toBe(true);
 
-          // Shared records and portable financial settings came back; the theme
-          // preference stayed local to the first browser.
+          // Python published a new ledger revision without Web settings. Its edit and
+          // relationships restore; the earlier Web reserve and budget may not be adopted.
           expect(await readStorage(secondPage, THEME_STORAGE_KEY)).toBeNull();
-          expect(JSON.parse((await readStorage(secondPage, ASSUMPTIONS_STORAGE_KEY)) ?? "null")).toMatchObject({
-            schemaVersion: 1,
-            values: { reserveCents: 52_500 },
-          });
-          expect(JSON.parse((await readStorage(secondPage, BUDGET_STORAGE_KEY)) ?? "null")).toMatchObject({
-            monthlyLimitCents: 20_000,
-          });
+          expect(await readStorage(secondPage, ASSUMPTIONS_STORAGE_KEY)).toBeNull();
+          expect(await readStorage(secondPage, BUDGET_STORAGE_KEY)).toBeNull();
+          await secondPage.reload();
+          await reviewSettingsAfterLedgerOnlyRevision(secondPage);
+          await expect(moneyNow(secondPage)).toHaveText("$1,175.00");
           await expect(
             secondPage.getByRole("button", { name: "Use dark theme" })
           ).toBeVisible();
@@ -786,9 +792,8 @@ test.describe("W2 Web → Python → fresh Web recovery", () => {
             baseRevision: 2,
           });
 
-          // The one posted $25 expense lowers the exact low from $1,000.00 to
-          // $975.00. The first profile's reserve is local, so its modeled
-          // spending result may differ, but this deterministic low must not.
+          // Explicit review unlocks the same deterministic cash low: the posted
+          // $25 expense lowers it from $1,000.00 to $975.00.
           await expect(exactLow(secondPage)).toHaveText("$975.00");
           await expect(
             secondPage.getByText(/On Apr 5, 2028, inside the 90-day plan\./)
@@ -808,7 +813,7 @@ test.describe("W2 Web → Python → fresh Web recovery", () => {
           await secondPage.getByRole("button", { name: "Pull (Download)" }).click();
           await expect(
             secondPage.getByText(
-              /Successfully pulled, decrypted and saved vault \(rev 2\)!/
+              /Ledger restored at revision 2/
             )
           ).toBeVisible();
           await closeSync(secondPage);
@@ -832,6 +837,7 @@ test.describe("W2 Web → Python → fresh Web recovery", () => {
               (row: any) => row.description === EDIT_DESCRIPTION
             )
           ).toHaveLength(1);
+          await reviewSettingsAfterLedgerOnlyRevision(secondPage);
         });
 
         await test.step("authenticated restore with a failed persistence write keeps the good ledger", async () => {
@@ -901,10 +907,11 @@ test.describe("W2 Web → Python → fresh Web recovery", () => {
           await replace.click();
           await expect(
             secondPage.getByText(
-              /Successfully pulled, decrypted and saved vault \(rev 2\)!/
+              /Ledger restored at revision 2/
             )
           ).toBeVisible();
           await closeSync(secondPage);
+          await reviewSettingsAfterLedgerOnlyRevision(secondPage);
           await expect(moneyNow(secondPage)).toHaveText("$1,175.00");
           await expect(exactLow(secondPage)).toHaveText("$975.00");
           expectCanonicalSnapshotEqual(

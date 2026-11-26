@@ -59,17 +59,23 @@ records with the owner's real reserve. Web therefore stores an optional **settin
 second encrypted vault object under the derived ID `settings-<vaultId>` (or a hash-based ID when the
 result would exceed the server's 128-character limit).
 
-- The profile is encrypted with the same passphrase and the vault's KDF salt. It contains only the
-  validated forecast assumptions and budget targets; theme and unsaved drafts are excluded.
+- The profile is encrypted with the same passphrase and the vault's KDF salt. Version 2 contains
+  validated forecast assumptions and budget targets plus the exact ledger revision they belong to.
+  Theme and unsaved drafts are excluded.
 - The ledger snapshot version is unchanged (2.0-2.2), so Python, Android, and older Web clients keep
   reading the ledger exactly as before. They ignore the companion object rather than rejecting it.
 - The profile has its own revision. A push may update it only from the revision this browser last
   synchronized; otherwise the app reports a conflict and sends no settings. A ledger push that
   succeeds while settings conflict is reported as a partial sync, not as a complete plan.
-- A pull reads the profile before replacing the ledger. If the ledger is replaced and the profile is
-  applied, the app reports the recovered reserve and window. If the profile is missing or invalid,
-  the ledger is still restored but spending guidance is withheld until the person explicitly saves
-  the settings shown now or edits them under **Advanced**.
+- A pull restores settings automatically only when the decrypted profile names the ledger
+  revision being restored. A ledger-only push from Python or Android, a partial Web push, or a
+  version 1 profile may leave no verified match. The records can still be restored, but financial
+  guidance stays withheld, including after reload, until the person reviews and saves the settings
+  in this browser or pulls a matching profile. To re-pair, review the reserve and plan window in
+  **Advanced** and targets in **Budget**, then push from Web.
+- Version 1 profiles remain readable for synchronization ancestry; their settings cannot be
+  assigned automatically to a ledger revision. Older Web builds may flag a version 2 companion as
+  unreadable but still read the unchanged ledger snapshot.
 - A profile is not a record-by-record merge and does not make settings portable through a plain JSON
   ledger export. Keep a separate copy of the reserve and window with any file-only backup.
 

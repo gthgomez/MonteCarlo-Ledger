@@ -8,6 +8,15 @@ import {
   readSyncRecord,
   SyncStorage,
 } from "./sync-state";
+import {
+  SETTINGS_REVIEW_STORAGE_KEY,
+  clearSettingsReview,
+  readSettingsReview,
+  writeSettingsReview,
+  type SettingsReviewGuard,
+  type SettingsReviewReason,
+  type SettingsReviewResolution,
+} from "./settings-review";
 
 export const LEDGER_STORAGE_KEY = "montecarlo_ledger_state_v2";
 
@@ -18,6 +27,25 @@ export const LEDGER_STORAGE_KEY = "montecarlo_ledger_state_v2";
  */
 export const LEDGER_LOCK_NAME = "montecarlo-ledger-write";
 
+/** A vault restore must add a guard; a local replacement must clear one. */
+export type SettingsReviewChange =
+  | { action: "require"; token: string; reason: SettingsReviewReason }
+  | { action: "clear" };
+
+export interface SettingsReviewApplyResult {
+  ok: boolean;
+  error?: string;
+}
+
+export interface SettingsReviewResolutionRequest {
+  /** Guard token the user/restore actually reviewed; null for a corrupt record. */
+  token: string | null;
+  /** Exact raw guard bytes the user reviewed. Required to recover a corrupt record. */
+  expectedRaw?: string | null;
+  /** Applied under the ledger lock; any failure keeps the guard in place. */
+  apply?: () => Promise<SettingsReviewApplyResult>;
+}
+
 /** Options for a ledger mutation whose authorization is tied to one durable snapshot. */
 export interface LedgerChangeOptions {
   /** Exact raw ledger value the user authorized replacing; null means "no stored ledger". */
@@ -27,6 +55,11 @@ export interface LedgerChangeOptions {
   signal?: AbortSignal;
   /** Restores/imports must fail closed when the Web Locks API is unavailable. */
   requireLock?: boolean;
+  /**
+   * Vault restores pass a required guard so the ledger and its review state are
+   * one recoverable bundle. Imports/demo resets clear the previous guard.
+   */
+  settingsReview?: SettingsReviewChange;
 }
 
 type LockRequestCallback<T> = (lock: unknown) => T | Promise<T>;
@@ -76,7 +109,8 @@ export function applyLedgerBundle(
   vaultId?: string,
   syncRevision?: number,
   storage: SyncStorage | null = defaultSyncStorage(),
-  ledgerKey: string = LEDGER_STORAGE_KEY
+  ledgerKey: string = LEDGER_STORAGE_KEY,
+  settingsReview?: SettingsReviewChange
 ): PersistenceResult {
   if (!storage) {
     return {
@@ -85,14 +119,43 @@ export function applyLedgerBundle(
     };
   }
   const previous: [string, string | null][] = [];
+  let reviewPrevious: string | null = null;
+  let reviewChanged = false;
+  let reviewGuard: SettingsReviewGuard | null = null;
   try {
     const serialized = JSON.stringify(state);
+    // The review guard is part of the same recoverable bundle as the ledger. It
+    // is written first so a reload cannot see new records with no review state.
+    if (settingsReview) {
+      reviewPrevious = storage.getItem(SETTINGS_REVIEW_STORAGE_KEY);
+      previous.push([SETTINGS_REVIEW_STORAGE_KEY, reviewPrevious]);
+    }
     previous.push([ledgerKey, storage.getItem(ledgerKey)]);
     if (vaultId) {
       previous.push([VAULT_ID_STORAGE_KEY, storage.getItem(VAULT_ID_STORAGE_KEY)]);
       if (syncRevision !== undefined) {
         previous.push([SYNC_STORAGE_KEY, storage.getItem(SYNC_STORAGE_KEY)]);
       }
+    }
+    if (settingsReview) {
+      if (settingsReview.action === "require") {
+        reviewChanged = true;
+        if (!vaultId || syncRevision === undefined) {
+          throw new Error("a vault restore must identify its revision before requiring a review");
+        }
+        reviewGuard = {
+          vaultId,
+          ledgerRevision: syncRevision,
+          token: settingsReview.token,
+          reason: settingsReview.reason,
+          recordedAt: new Date().toISOString(),
+        };
+        if (!writeSettingsReview(storage, reviewGuard)) {
+          throw new Error("the financial-settings review could not be stored");
+        }
+      }
+      // A "clear" happens only after the replacement ledger is verified. If this
+      // process is interrupted, the old guarded ledger still has its old guard.
     }
     storage.setItem(ledgerKey, serialized);
     if (storage.getItem(ledgerKey) !== serialized) {
@@ -109,11 +172,41 @@ export function applyLedgerBundle(
         }
       }
     }
+    if (settingsReview?.action === "clear") {
+      reviewChanged = true;
+      if (!clearSettingsReview(storage)) {
+        throw new Error("the previous financial-settings review could not be cleared");
+      }
+    }
     return { ok: true };
   } catch (err: unknown) {
     let restored = true;
+    // Roll back the review key last, after deciding whether the ledger may still
+    // hold the attempted restore.
     for (const [key, value] of previous.reverse()) {
+      if (reviewChanged && key === SETTINGS_REVIEW_STORAGE_KEY) continue;
       if (!restore(storage, key, value)) restored = false;
+    }
+    if (reviewChanged) {
+      if (restored) {
+        // Every other key is verified back to its previous bytes, so the old
+        // review state is safe to restore (including absent).
+        if (!restore(storage, SETTINGS_REVIEW_STORAGE_KEY, reviewPrevious)) {
+          restored = false;
+        }
+      } else if (settingsReview?.action === "require" && reviewGuard) {
+        // The ledger may still hold the restore. Never fall back to "absent":
+        // keep a verified guard so a reload still withholds guidance.
+        const current = readSettingsReview(storage);
+        if (current.status !== "valid" || current.guard.token !== reviewGuard.token) {
+          writeSettingsReview(storage, reviewGuard);
+        }
+      } else if (settingsReview?.action === "clear") {
+        // A local replacement with an unverified rollback stays conservative.
+        if (!restore(storage, SETTINGS_REVIEW_STORAGE_KEY, reviewPrevious)) {
+          restored = false;
+        }
+      }
     }
     const detail = err instanceof Error ? err.message : "storage failure";
     if (restored) {
@@ -219,7 +312,8 @@ function saveIfStillCurrent(
     options.vaultId,
     options.syncRevision,
     storage,
-    ledgerKey
+    ledgerKey,
+    options.settingsReview
   );
 }
 
@@ -269,5 +363,119 @@ export async function saveLedgerChange(
     }
     // Once a lock manager exists, no writer may bypass it on request failure.
     return { ok: false, error: LOCK_FAILED };
+  }
+}
+
+/**
+ * Verify the reviewed guard, apply decision settings, and clear the guard under
+ * the same shared ledger lock.
+ *
+ * A newer restore writes a different token/raw record under this lock. An older
+ * settings apply can therefore no longer overwrite newer settings after the newer
+ * restore has cleared its guard. The apply callback must not take the ledger lock
+ * again (use the existing skipReviewClear path); it may take the settings lock.
+ */
+export async function resolveSettingsReview(
+  request: SettingsReviewResolutionRequest,
+  storage: SyncStorage | null = defaultSyncStorage(),
+  lockManager: LedgerLockManager | null = defaultLedgerLockManager()
+): Promise<SettingsReviewResolution> {
+  if (!storage) {
+    return {
+      ok: false,
+      cleared: false,
+      applied: false,
+      superseded: false,
+      current: null,
+      error: "Local storage is unavailable; the financial-settings review could not be resolved.",
+    };
+  }
+
+  const run = async (): Promise<SettingsReviewResolution> => {
+    const current = readSettingsReview(storage);
+
+    if (current.status === "absent") {
+      // Something newer resolved or replaced the restore. Do not apply the older
+      // settings over it, and do not invent a gate that has nothing to clear.
+      return { ok: true, cleared: true, applied: false, superseded: true, current: null };
+    }
+
+    if (current.status === "valid") {
+      const rawMatches = request.expectedRaw === undefined || request.expectedRaw === current.raw;
+      if (request.token === null || current.guard.token !== request.token || !rawMatches) {
+        return {
+          ok: true,
+          cleared: false,
+          applied: false,
+          superseded: true,
+          current: current.guard,
+        };
+      }
+    } else {
+      // A corrupt record can be recovered only from the exact bytes the person
+      // reviewed; a token alone is not enough, and an undefined raw is blind.
+      if (
+        request.token !== null ||
+        request.expectedRaw === undefined ||
+        current.raw === null ||
+        request.expectedRaw !== current.raw
+      ) {
+        return { ok: true, cleared: false, applied: false, superseded: true, current: null };
+      }
+    }
+
+    let applied = false;
+    if (request.apply) {
+      let result: SettingsReviewApplyResult;
+      try {
+        result = await request.apply();
+      } catch (err: unknown) {
+        return {
+          ok: false,
+          cleared: false,
+          applied: false,
+          superseded: false,
+          current: current.status === "valid" ? current.guard : null,
+          error: err instanceof Error ? err.message : "The financial settings could not be applied.",
+        };
+      }
+      if (!result.ok) {
+        return {
+          ok: false,
+          cleared: false,
+          applied: false,
+          superseded: false,
+          current: current.status === "valid" ? current.guard : null,
+          error: result.error ?? "The financial settings could not be applied.",
+        };
+      }
+      applied = true;
+    }
+
+    if (!clearSettingsReview(storage)) {
+      return {
+        ok: false,
+        cleared: false,
+        applied,
+        superseded: false,
+        current: current.status === "valid" ? current.guard : null,
+        error: "The financial-settings review marker could not be cleared.",
+      };
+    }
+    return { ok: true, cleared: true, applied, superseded: false, current: null };
+  };
+
+  if (!lockManager) return run();
+  try {
+    return await lockManager.request(LEDGER_LOCK_NAME, { mode: "exclusive" }, run);
+  } catch {
+    return {
+      ok: false,
+      cleared: false,
+      applied: false,
+      superseded: false,
+      current: null,
+      error: "The financial-settings review could not be locked for a safe resolve.",
+    };
   }
 }

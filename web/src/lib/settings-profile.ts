@@ -11,10 +11,12 @@ import type { KeyValueStorage } from "./budget-targets";
  * it up, so they neither lose data nor misinterpret it.
  */
 
-export const SETTINGS_PROFILE_SCHEMA_VERSION = 1;
+export const SETTINGS_PROFILE_SCHEMA_VERSION = 2;
 
 export interface SettingsProfile {
-  schemaVersion: typeof SETTINGS_PROFILE_SCHEMA_VERSION;
+  schemaVersion: 1 | typeof SETTINGS_PROFILE_SCHEMA_VERSION;
+  /** The ledger revision from the same push, absent only on legacy/local profiles. */
+  ledgerRevision?: number;
   /** Informational only; never used to choose between financial values. */
   savedAt: string;
   assumptions: Assumptions;
@@ -37,14 +39,22 @@ function hasExactKeys(value: Record<string, unknown>, expected: readonly string[
 
 export function parseSettingsProfile(raw: unknown): SettingsProfileParseResult {
   if (!isObject(raw)) return { ok: false, error: "Financial settings profile must be an object." };
-  if (!hasExactKeys(raw, ["schemaVersion", "savedAt", "assumptions", "budgetTargets"])) {
-    return { ok: false, error: "Financial settings profile has unrecognized fields." };
-  }
-  if (raw.schemaVersion !== SETTINGS_PROFILE_SCHEMA_VERSION) {
+  const version = raw.schemaVersion;
+  if (version !== 1 && version !== SETTINGS_PROFILE_SCHEMA_VERSION) {
     return {
       ok: false,
       error: `Financial settings profile uses unsupported version ${String(raw.schemaVersion)}.`,
     };
+  }
+  const fields = ["schemaVersion", "savedAt", "assumptions", "budgetTargets"];
+  if (version === SETTINGS_PROFILE_SCHEMA_VERSION) fields.push("ledgerRevision");
+  if (!hasExactKeys(raw, fields)) {
+    return { ok: false, error: "Financial settings profile has missing or unrecognized fields." };
+  }
+  const ledgerRevision = raw.ledgerRevision;
+  if (version === SETTINGS_PROFILE_SCHEMA_VERSION &&
+      (typeof ledgerRevision !== "number" || !Number.isSafeInteger(ledgerRevision) || ledgerRevision < 1)) {
+    return { ok: false, error: "Financial settings profile has an invalid ledger revision." };
   }
   if (typeof raw.savedAt !== "string" || Number.isNaN(Date.parse(raw.savedAt))) {
     return { ok: false, error: "Financial settings profile has an invalid timestamp." };
@@ -67,7 +77,8 @@ export function parseSettingsProfile(raw: unknown): SettingsProfileParseResult {
   return {
     ok: true,
     profile: {
-      schemaVersion: SETTINGS_PROFILE_SCHEMA_VERSION,
+      schemaVersion: version,
+      ...(typeof ledgerRevision === "number" ? { ledgerRevision } : {}),
       savedAt: raw.savedAt,
       assumptions: { ...assumptions },
       budgetTargets: parsedTargets.targets,
@@ -81,7 +92,7 @@ export function serializeSettingsProfile(
   savedAt: string = new Date().toISOString()
 ): SettingsProfile {
   const candidate: SettingsProfile = {
-    schemaVersion: SETTINGS_PROFILE_SCHEMA_VERSION,
+    schemaVersion: 1,
     savedAt,
     assumptions: { ...assumptions },
     budgetTargets: {

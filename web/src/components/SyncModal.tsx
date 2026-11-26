@@ -11,16 +11,22 @@ import { LedgerState } from "@/lib/types";
 import { parseLedgerState } from "@/lib/validate";
 import { PersistenceResult } from "@/lib/sync-state";
 import type { LedgerChangeOptions } from "@/lib/persistence";
+import { resolveSettingsReview } from "@/lib/persistence";
 import { formatMoney } from "@/lib/money-format";
 import {
+  readSettingsProfileRevision,
   rememberSettingsProfileRevision,
   type SettingsProfile,
 } from "@/lib/settings-profile";
+import {
+  newSettingsReviewToken,
+  type SettingsReviewReason,
+} from "@/lib/settings-review";
 import { pullSettingsProfile, pushSettingsProfile } from "@/lib/settings-vault";
 
 export type SettingsRecoveryOutcome =
   | { status: "applied"; message: string }
-  | { status: "missing"; message: string }
+  | { status: "missing"; message: string; reviewToken: string | null }
   | { status: "kept"; message: string };
 
 interface SyncModalProps {
@@ -262,10 +268,13 @@ export function SyncModal({
       let settingsRevision: number | null = null;
       if (settingsProfile) {
         try {
+          // Bind the profile to the exact ledger revision pushVault just had
+          // accepted. Do not re-read metadata to choose this value.
           const settingsResult = await pushSettingsProfile(
             chosenVaultId,
             passphrase,
-            settingsProfile
+            settingsProfile,
+            revision
           );
           if (settingsResult.ok) {
             settingsRevision = settingsResult.revision;
@@ -326,6 +335,17 @@ export function SyncModal({
       }
       if (!isCurrent(id, controller)) return;
 
+      // The ledger restore and its needs-review guard are one durable bundle:
+      // persistence writes and verifies the guard before the ledger. Even a found
+      // profile starts guarded until its settings are applied and the guard is
+      // cleared for this exact restore token.
+      const reviewToken = newSettingsReviewToken();
+      const reviewReason: SettingsReviewReason =
+        profileOutcome?.status === "found"
+          ? "settings-pending"
+          : profileOutcome?.status === "unreadable" || profileError !== null
+            ? "unreadable"
+            : "missing";
       // Do not claim success unless the browser durably stored the restored ledger.
       // The exact authorized raw snapshot is re-checked under the shared write lock.
       const applied = await onApplyState(state, {
@@ -334,6 +354,7 @@ export function SyncModal({
         syncRevision: revision,
         signal: controller.signal,
         requireLock: true,
+        settingsReview: { action: "require", token: reviewToken, reason: reviewReason },
       });
       // If the dialog was closed while the write was still queued, the abort made
       // this fail. If the ledger already committed, continue: new records must not
@@ -349,47 +370,118 @@ export function SyncModal({
         return;
       }
 
+      // Gate guidance immediately after the ledger commit, before any settings
+      // read/apply await. A slow or failed profile apply can never leave the new
+      // ledger briefly usable with old/default assumptions.
+      onSettingsRecovery({
+        status: "missing",
+        message:
+          "Ledger restored. Confirming its financial settings before spending guidance is shown.",
+        reviewToken,
+      });
+
       const missingMessage =
         "Ledger restored, but this vault has no saved financial settings. The reserve, plan window, risk assumptions, and budget targets were not recovered.";
+      const missingWithSavedSettings =
+        "Ledger restored. This vault has no saved financial settings; the settings already saved in this browser were kept but must be reviewed for this ledger before spending guidance is shown.";
       if (profileOutcome?.status === "found") {
-        const settingsError = await onApplyRecoveredSettings(profileOutcome.profile);
-        if (!settingsError) {
+        // Remember ancestry for any authenticated parsed profile, even when its
+        // ledger binding is legacy or mismatched. The revision CAS still protects
+        // pushes, but an explicit review can then re-pair this browser instead of
+        // being stuck behind an unrecorded base. Never regress a newer ancestry
+        // observed by a racing pull.
+        const profileStorage = browserStorage();
+        const knownProfileRevision = readSettingsProfileRevision(
+          profileStorage,
+          profileOutcome.profileVaultId
+        );
+        if (knownProfileRevision === null || profileOutcome.revision >= knownProfileRevision.baseRevision) {
           rememberSettingsProfileRevision(
-            browserStorage(),
+            profileStorage,
             profileOutcome.profileVaultId,
             profileOutcome.revision,
             profileOutcome.profile.savedAt
           );
+        }
+        const profileRevision = profileOutcome.profile.ledgerRevision;
+        if (profileRevision === undefined) {
+          // A legacy profile has no binding. It is never auto-applied; the guard
+          // stays until the person reviews and saves the settings explicitly.
+          onSettingsRecovery({
+            status: "missing",
+            message:
+              "Ledger restored, but its financial settings came from an older profile with no ledger binding and were not applied. Review the plan window and reserve before spending guidance is shown.",
+            reviewToken,
+          });
+          setStatusMessage(`Ledger restored (rev ${revision}), but its financial settings are from an older profile with no ledger binding. Review them before spending guidance is shown.`);
+          return;
+        }
+        if (profileRevision !== revision) {
+          // Never apply settings authored for a different ledger generation.
+          onSettingsRecovery({
+            status: "missing",
+            message:
+              `Ledger restored, but its financial settings were saved for ledger revision ${profileRevision}, not the restored revision ${revision}, so they were not applied. Review the plan window and reserve before spending guidance is shown.`,
+            reviewToken,
+          });
+          setStatusMessage(`Ledger restored at revision ${revision}, but its financial settings are bound to ledger revision ${profileRevision}. Review them before spending guidance is shown.`);
+          return;
+        }
+        const resolution = await resolveSettingsReview(
+          {
+            token: reviewToken,
+            apply: async () => {
+              const error = await onApplyRecoveredSettings(profileOutcome.profile);
+              return error ? { ok: false, error } : { ok: true };
+            },
+          },
+          browserStorage()
+        );
+        if (resolution.applied && resolution.cleared) {
           const message = `Recovered financial settings: ${describeRecoveredSettings(profileOutcome.profile)}.`;
           onSettingsRecovery({ status: "applied", message });
           setStatusMessage(`Successfully pulled, decrypted and saved vault (rev ${revision})! ${message}`);
-        } else {
-          const message = `Ledger restored, but its recovered financial settings could not be saved: ${settingsError}`;
-          onSettingsRecovery({ status: "missing", message });
-          setStatusMessage(`Successfully pulled, decrypted and saved vault (rev ${revision})! Financial settings need review before spending guidance is shown.`);
+          return;
         }
+        if (resolution.superseded) {
+          // Do not adopt a newer guard/token here and do not apply this older
+          // profile over it. The pending gate stays; reloading loads the ledger
+          // and guard that actually won.
+          onSettingsRecovery({
+            status: "missing",
+            message:
+              "A newer vault restore replaced this one. Reload to review the current ledger and financial settings before spending guidance is shown.",
+            reviewToken,
+          });
+          setStatusMessage(`Ledger restore (rev ${revision}) was superseded by a newer change. Reload to review the current vault.`);
+          return;
+        }
+        const message = resolution.applied
+          ? `Ledger restored and financial settings were saved, but the review marker could not be cleared: ${resolution.error ?? "storage failure"}`
+          : `Ledger restored, but its recovered financial settings could not be saved: ${resolution.error ?? "storage failure"}`;
+        onSettingsRecovery({
+          status: "missing",
+          message,
+          reviewToken: resolution.current?.token ?? reviewToken,
+        });
+        setStatusMessage(`Ledger restored (rev ${revision}), but financial settings need review before spending guidance is shown.`);
       } else if (profileOutcome?.status === "missing") {
-        if (hasSavedDecisionSettings) {
-          const message =
-            "Ledger restored. This vault has no saved financial settings; kept the settings already saved in this browser.";
-          onSettingsRecovery({ status: "kept", message });
-          setStatusMessage(`Successfully pulled, decrypted and saved vault (rev ${revision})! Financial settings were kept from this browser.`);
-        } else {
-          onSettingsRecovery({ status: "missing", message: missingMessage });
-          setStatusMessage(`Successfully pulled, decrypted and saved vault (rev ${revision})! Financial settings need review before spending guidance is shown.`);
-        }
+        // Keeping locally saved settings is never enough on its own: they were
+        // saved against some other ledger view and must be reviewed explicitly.
+        onSettingsRecovery({
+          status: "missing",
+          message: hasSavedDecisionSettings ? missingWithSavedSettings : missingMessage,
+          reviewToken,
+        });
+        setStatusMessage(`Successfully pulled, decrypted and saved vault (rev ${revision})! Financial settings need review before spending guidance is shown.`);
       } else {
         const detail = profileError
           ?? (profileOutcome?.status === "unreadable" ? profileOutcome.error : "settings were unavailable");
-        if (hasSavedDecisionSettings) {
-          const message = `Ledger restored, but its saved financial settings could not be read (${detail}). Kept the settings already saved in this browser.`;
-          onSettingsRecovery({ status: "kept", message });
-          setStatusMessage(`Successfully pulled, decrypted and saved vault (rev ${revision})! Financial settings were kept from this browser.`);
-        } else {
-          const message = `Ledger restored, but its financial settings could not be recovered (${detail}).`;
-          onSettingsRecovery({ status: "missing", message });
-          setStatusMessage(`Successfully pulled, decrypted and saved vault (rev ${revision})! Financial settings need review before spending guidance is shown.`);
-        }
+        const message = hasSavedDecisionSettings
+          ? `Ledger restored, but its saved financial settings could not be read (${detail}). The settings already saved in this browser were kept but must be reviewed for this ledger before spending guidance is shown.`
+          : `Ledger restored, but its financial settings could not be recovered (${detail}).`;
+        onSettingsRecovery({ status: "missing", message, reviewToken });
+        setStatusMessage(`Successfully pulled, decrypted and saved vault (rev ${revision})! Financial settings need review before spending guidance is shown.`);
       }
     } catch (err: unknown) {
       if (!isCurrent(id, controller)) return;

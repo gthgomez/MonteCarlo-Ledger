@@ -27,6 +27,7 @@ import {
 import { planningMinimumPaymentCents } from "@/lib/scenario-builder";
 import { type PersistenceResult } from "@/lib/sync-state";
 import { type LedgerState, type LiabilityItem } from "@/lib/types";
+import { type PurchaseToRecord } from "./MoneyView";
 import { Button, Explain, fieldClass, Notice, Panel } from "./ui";
 
 function debtMinimumLabel(debt: LiabilityItem): string {
@@ -131,6 +132,7 @@ export function PlanView({
   onEdit,
   onDiscardDraft,
   saving,
+  onRecordPurchase,
 }: {
   state: LedgerState;
   asOf: string;
@@ -145,11 +147,13 @@ export function PlanView({
   onEdit: (result: EditResult, draftKey?: string) => Promise<PersistenceResult>;
   onDiscardDraft: (draftKey: string) => void;
   saving: boolean;
+  onRecordPurchase?: (purchase: PurchaseToRecord) => void;
 }) {
   const [question, setQuestion] = useState<Question>("purchase");
-  const [purchaseAmount, setPurchaseAmount] = useState(350);
+  const [purchaseAmount, setPurchaseAmount] = useState("350");
   const [purchaseDateInput, setPurchaseDate] = useState<string | null>(null);
   const purchaseDate = purchaseDateInput ?? asOf;
+  const purchaseCents = parseDollarsToCents(purchaseAmount);
   const [delayDays, setDelayDays] = useState(3);
   const [billId, setBillId] = useState(String(state.payments[0]?.id ?? ""));
   const [billAmount, setBillAmount] = useState(100);
@@ -185,8 +189,8 @@ export function PlanView({
     () =>
       base === null || question !== "purchase"
         ? null
-        : evaluatePurchase(state, asOf, assumptions, Math.round(purchaseAmount * 100), purchaseDate),
-    [base, question, state, asOf, assumptions, purchaseAmount, purchaseDate]
+        : evaluatePurchase(state, asOf, assumptions, purchaseCents ?? 0, purchaseDate),
+    [base, question, state, asOf, assumptions, purchaseCents, purchaseDate]
   );
   const delay = useMemo(
     () =>
@@ -221,7 +225,8 @@ export function PlanView({
   const monthCount = Number(months);
   const pace = goalCents === null ? null : evenSetAside(goalCents, monthCount);
   const windowEnd = addDaysIso(asOf, assumptions.horizonDays);
-  const sliderMax = Math.max(2500, purchaseAmount);
+  const sliderValue = purchaseCents === null ? 10 : purchaseCents / 100;
+  const sliderMax = Math.max(2500, sliderValue);
 
   let debtResult: { months_to_payoff: number; payoff_date: string; total_interest_cents: number; total_paid_cents: number; did_not_converge?: boolean } | null = null;
   let debtCalcError: string | null = null;
@@ -524,15 +529,15 @@ export function PlanView({
           <div className="mt-4 grid gap-4 lg:grid-cols-2">
             <div>
               <label className="block text-sm font-medium">
-                Purchase Amount: ${purchaseAmount.toLocaleString("en-US")}
+                Purchase Amount{purchaseCents === null ? "" : `: ${formatMoney(purchaseCents)}`}
                 <input
                   className="mt-2 w-full accent-accent"
                   type="range"
                   min={10}
                   max={sliderMax}
                   step={10}
-                  value={purchaseAmount}
-                  onChange={(e) => setPurchaseAmount(Number(e.target.value))}
+                  value={sliderValue}
+                  onChange={(e) => setPurchaseAmount(e.target.value)}
                 />
               </label>
               <label className="mt-3 block text-sm font-medium">
@@ -541,10 +546,7 @@ export function PlanView({
                   className={`${fieldClass} mt-1`}
                   inputMode="decimal"
                   value={purchaseAmount}
-                  onChange={(e) => {
-                    const next = Number(e.target.value);
-                    if (Number.isFinite(next) && next >= 0) setPurchaseAmount(next);
-                  }}
+                  onChange={(e) => setPurchaseAmount(e.target.value)}
                 />
               </label>
               <label className="mt-3 block text-sm font-medium">
@@ -553,11 +555,24 @@ export function PlanView({
                   className={`${fieldClass} mt-1`}
                   type="date"
                   min={asOf}
-                  max={addDaysIso(windowEnd, -1)}
-                  value={purchaseDate}
-                  onChange={(e) => setPurchaseDate(e.target.value)}
-                />
+                max={addDaysIso(windowEnd, -1)}
+                value={purchaseDate}
+                onChange={(e) => setPurchaseDate(e.target.value)}
+              />
               </label>
+              {onRecordPurchase && purchase.status === "ok" && purchaseDate === asOf && purchaseCents !== null && purchaseCents > 0 && (
+                <div className="mt-3 space-y-2">
+                  <Button
+                    type="button"
+                    variant="quiet"
+                    disabled={saving}
+                    onClick={() => onRecordPurchase({ amountCents: purchaseCents, date: purchaseDate })}
+                  >
+                    Review and record this purchase
+                  </Button>
+                  <p className="text-sm text-muted">Use this only if you made the purchase. The comparison itself saves nothing.</p>
+                </div>
+              )}
             </div>
             <Compare
               title="How this changes the plan"

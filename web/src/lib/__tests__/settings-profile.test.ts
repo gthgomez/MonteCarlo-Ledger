@@ -36,6 +36,7 @@ test("a profile with a missing reserve is rejected instead of defaulted", () => 
 
 test("unknown profile versions and fields fail closed", () => {
   const profile: any = serializeSettingsProfile(DEFAULT_ASSUMPTIONS, EMPTY_TARGETS);
+  assert.equal(parseSettingsProfile({ ...profile, schemaVersion: 3 }).ok, false);
   assert.equal(parseSettingsProfile({ ...profile, schemaVersion: 2 }).ok, false);
   assert.equal(parseSettingsProfile({ ...profile, surprise: true }).ok, false);
   assert.equal(
@@ -44,6 +45,14 @@ test("unknown profile versions and fields fail closed", () => {
   );
 });
 
+test("a revision-bound profile only accepts a positive whole ledger revision", () => {
+  const profile = serializeSettingsProfile(DEFAULT_ASSUMPTIONS, EMPTY_TARGETS);
+  const paired = { ...profile, schemaVersion: 2, ledgerRevision: 7 };
+  assert.deepEqual(parseSettingsProfile(paired), { ok: true, profile: paired });
+  assert.equal(parseSettingsProfile({ ...paired, ledgerRevision: 0 }).ok, false);
+  assert.equal(parseSettingsProfile({ ...paired, ledgerRevision: 2.5 }).ok, false);
+  assert.equal(parseSettingsProfile({ ...profile, ledgerRevision: 7 }).ok, false);
+});
 test("invalid financial settings cannot be serialized", () => {
   assert.throws(() =>
     serializeSettingsProfile(

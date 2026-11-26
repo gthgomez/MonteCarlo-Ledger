@@ -36,6 +36,7 @@ interface HomeViewProps {
   needsSchedule: boolean;
   forecast: HomeForecast | null;
   onNavigate: (section: Section) => void;
+  onRecordPurchase?: () => void;
   /** Another ledger edit is pending; onboarding and navigation wait for it. */
   saving?: boolean;
   createOwn: (validated: LedgerState) => Promise<PersistenceResult>;
@@ -221,6 +222,7 @@ export function HomeView({
   needsSchedule,
   forecast,
   onNavigate,
+  onRecordPurchase,
   saving = false,
   createOwn,
 }: HomeViewProps) {
@@ -299,6 +301,20 @@ export function HomeView({
 
   return (
     <div className="space-y-6">
+      {!usingDemo && (onRecordPurchase || forecast) && (
+        <div className="flex flex-wrap gap-3">
+          {onRecordPurchase && (
+            <Button type="button" disabled={saving} onClick={onRecordPurchase}>
+              Record a purchase
+            </Button>
+          )}
+          {forecast && (
+            <Button type="button" variant="quiet" disabled={saving} onClick={() => onNavigate("plan")}>
+              Check a purchase
+            </Button>
+          )}
+        </div>
+      )}
       {usingDemo && (
         <Notice tone="info" title="Demo data — not your finances.">
           This is a sample household so you can see how a plan looks. It is not your bank account. Enter your own
