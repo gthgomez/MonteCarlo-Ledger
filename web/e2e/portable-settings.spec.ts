@@ -609,6 +609,36 @@ test("a durable guard from an interrupted restore survives reload and clears onl
   expect(await storedReview(page)).toBeNull();
 });
 
+test("an unreadable guard and a failed clear keep guidance withheld", async ({ page }) => {
+  await seedSavedLedger(page);
+  await page.evaluate((key) => localStorage.setItem(key, "{broken-review"), SETTINGS_REVIEW_KEY);
+  await page.reload();
+  await expectReviewGate(page);
+  await expect(page.getByText(/financial-settings review record could not be read/i)).toBeVisible();
+
+  await page.evaluate((key) => {
+    const local = localStorage;
+    const originalRemove = Storage.prototype.removeItem;
+    Storage.prototype.removeItem = function (item) {
+      if (this === local && item === key) {
+        throw new DOMException("Synthetic review clear failure", "QuotaExceededError");
+      }
+      return originalRemove.call(this, item);
+    };
+  }, SETTINGS_REVIEW_KEY);
+  const review = page.getByRole("button", { name: "Use the settings shown now" });
+  await review.click();
+  await expect(page.getByText(/vault-restore review could not be cleared/i)).toBeVisible();
+  expect(await storedReview(page)).toBe("{broken-review");
+  await expectReviewGate(page);
+
+  await page.reload();
+  await expectReviewGate(page);
+  await review.click();
+  await expectReviewGate(page, false);
+  expect(await storedReview(page)).toBeNull();
+});
+
 test("a storage event from an unrelated settings write does not erase the durable guard", async ({ page, browser }) => {
   await seedSavedLedger(page);
   const vaultId = uniqueVaultId();

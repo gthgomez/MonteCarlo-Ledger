@@ -42,7 +42,7 @@ def reconcile_flow(as_of: Optional[str] = None):
             choice = input("\n Choice: ").strip()
 
             if choice == "1":
-                actual_cents = prompt_user("Enter actual CURRENT bank balance", "money")
+                actual_cents = prompt_user("Enter actual CURRENT bank balance", "balance")
                 # Re-read: the rendered figure may be stale by the time input returns.
                 latest_bal = db_manager.get_ledger_balance_through(as_of)
                 if actual_cents == latest_bal:

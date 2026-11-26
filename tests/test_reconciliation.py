@@ -116,6 +116,17 @@ class ReconciliationTestCase(unittest.TestCase):
             db_manager.get_ledger_balance(), ACTUAL_CENTS + FUTURE_CREDIT_CENTS
         )
 
+    def test_reconcile_zero_and_overdrawn_bank_balances(self):
+        self._run_reconcile(["1", "0", "", "1", "-$12.34", "", "1", "-12.34", "3"])
+
+        rows = self._transactions()
+        self.assertEqual([row["amount"] for row in rows], [
+            OPENING_CENTS, FUTURE_CREDIT_CENTS, -OPENING_CENTS, -1_234,
+        ])
+        self.assertEqual([row["date"] for row in rows[2:]], [TODAY, TODAY])
+        self.assertEqual(db_manager.get_ledger_balance_through(TODAY), -1_234)
+        self.assertEqual(db_manager.get_stored_balance(), FUTURE_CREDIT_CENTS - 1_234)
+
     def test_zero_delta_rechecks_the_ledger_before_declaring_noop(self):
         answers = iter(["1", "460", "3"])
 

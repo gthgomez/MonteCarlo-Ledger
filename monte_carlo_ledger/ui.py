@@ -101,10 +101,12 @@ def prompt_user(
             cprint(" (!) This field cannot be empty.", Theme.YELLOW)
             continue
 
-        if validation_type == "money":
+        if validation_type in ("money", "balance"):
             try:
                 clean_val = val.replace("$", "").replace(",", "").strip()
                 cents = budget_engine.parse_money_input(clean_val)
+                if validation_type == "balance":
+                    return cents
                 if cents < 0:
                     cprint(" (!) Amount must be non-negative.", Theme.YELLOW)
                     continue
