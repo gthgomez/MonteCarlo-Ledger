@@ -557,6 +557,9 @@ test("a mismatched profile is reviewed, and the next push re-pairs from observed
       deviceB.page.getByText(/bound to ledger revision 1|saved for ledger revision 1/).first()
     ).toBeVisible();
     await expectReviewGate(deviceB.page);
+    await expect(deviceB.page.getByRole("button", { name: "Push (Upload)" })).toBeDisabled();
+    await expect(deviceB.page.getByText("Review your financial settings before pushing this ledger.")).toBeVisible();
+    await expect(deviceB.page.getByRole("button", { name: "Pull (Download)" })).toBeEnabled();
 
     await closeSync(deviceB.page);
     await deviceB.page.getByRole("button", { name: "Use the settings shown now" }).click();
@@ -609,6 +612,7 @@ test("a storage event from an unrelated settings write does not erase the durabl
   const deviceB = await newDevice(browser);
   try {
     await pullAndRestore(deviceB.page, vaultId);
+    await expect(deviceB.page.getByText(/has no saved financial settings/)).toBeVisible();
     await closeSync(deviceB.page);
     await expectReviewGate(deviceB.page);
 

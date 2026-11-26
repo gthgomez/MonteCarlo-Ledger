@@ -20,6 +20,7 @@ import {
 } from "@/lib/settings-profile";
 import {
   newSettingsReviewToken,
+  readSettingsReview,
   type SettingsReviewReason,
 } from "@/lib/settings-review";
 import { pullSettingsProfile, pushSettingsProfile } from "@/lib/settings-vault";
@@ -44,6 +45,7 @@ interface SyncModalProps {
   usingDemo: boolean;
   /** The settings that a push should send with the ledger, or null when invalid. */
   settingsProfile: SettingsProfile | null;
+  settingsReviewRequired: boolean;
   /** True only when this browser already holds explicitly saved decision settings. */
   hasSavedDecisionSettings: boolean;
   /** Apply a recovered profile; resolves to null on success or an error message. */
@@ -106,6 +108,7 @@ export function SyncModal({
   currentVaultId,
   usingDemo,
   settingsProfile,
+  settingsReviewRequired,
   hasSavedDecisionSettings,
   onApplyRecoveredSettings,
   onSettingsRecovery,
@@ -127,6 +130,7 @@ export function SyncModal({
   const [activeOperation, setActiveOperation] = useState<ActiveOperation | null>(null);
   const [pendingConflict, setPendingConflict] = useState<PullTarget | null>(null);
   const isLoading = activeOperation !== null;
+  const reviewBeforePush = "Review your financial settings before pushing this ledger.";
 
   // The page reads the saved vault id after its first render. Adopt it when it
   // arrives so a reload reopens Sync with the remembered id, not a new random one.
@@ -219,6 +223,13 @@ export function SyncModal({
 
   const handlePushToCloud = async () => {
     if (recoveryRequired || activeOperationRef.current) return;
+    // The durable read also covers a restore in another tab whose storage event
+    // has not reached this tab yet.
+    if (settingsReviewRequired || readSettingsReview(browserStorage()).status !== "absent") {
+      setStatusMessage(null);
+      setErrorMessage(reviewBeforePush);
+      return;
+    }
     if (usingDemo) {
       const proceed = window.confirm(
         "This is sample data, not your finances. If you push it, another device will recover it as a real ledger.\n\nEnter your own numbers from Home first unless you are deliberately testing the vault. Push the sample anyway?"
@@ -737,10 +748,11 @@ export function SyncModal({
               />
             </div>
 
+            {settingsReviewRequired && <p className="text-sm text-muted">{reviewBeforePush}</p>}
             <div className="grid grid-cols-2 gap-3 pt-2">
               <button
                 onClick={handlePushToCloud}
-                disabled={isLoading || recoveryRequired}
+                disabled={isLoading || recoveryRequired || settingsReviewRequired}
                 className="flex min-h-11 items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-accent hover:opacity-90 disabled:opacity-50 text-on-accent font-semibold transition"
               >
                 <Upload className="w-3.5 h-3.5" />

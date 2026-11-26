@@ -399,6 +399,12 @@ export default function Home() {
   );
 
   const settingsRecoveryMissing = settingsRecovery.status === "missing";
+  // A verified ledger can still tell us what is posted through today, even
+  // when its forecast settings are awaiting review.
+  const cashDuringReview = settingsRecoveryMissing && ledgerFreshness === "current" &&
+    transactionSumCents(state.transactions) === state.current_balance_cents
+    ? transactionSumCents(state.transactions.filter((transaction) => transaction.date <= asOf))
+    : null;
   const evaluation = useMemo(
     () => assumptionsProblem || ledgerFreshness !== "current" || settingsRecoveryMissing
       ? null
@@ -1240,7 +1246,7 @@ export default function Home() {
             <MoneyView
               state={state}
               asOf={asOf}
-              startingBalanceCents={forecast?.outcome.startingBalanceCents ?? null}
+              startingBalanceCents={forecast?.outcome.startingBalanceCents ?? cashDuringReview}
               onEdit={onEdit}
               onDiscardDraft={discardFailedDraft}
               saving={savesPending}
@@ -1316,6 +1322,7 @@ export default function Home() {
         currentVaultId={currentVaultId}
         usingDemo={usingDemo}
         settingsProfile={portableSettings}
+        settingsReviewRequired={settingsRecoveryMissing}
         hasSavedDecisionSettings={hasSavedDecisionSettings}
         onApplyRecoveredSettings={handleApplyRecoveredSettings}
         onSettingsRecovery={receiveSettingsRecovery}
