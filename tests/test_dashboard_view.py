@@ -114,13 +114,15 @@ class DashboardViewTests(unittest.TestCase):
 
         from monte_carlo_ledger import dashboards
 
-        db_manager.add_transaction(100000, "System", "start", t_type="Adjustment")
+        db_manager.add_transaction(100000, "System", "start", t_type="Adjustment", date_str=FIXED_AS_OF)
+        db_manager.add_transaction(40000, "Pay", "Future paycheck", t_type="Income", date_str="2026-10-08")
         db_manager.add_payment("Rent", 200000, "One-time", "2026-10-05")
 
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             dashboards.render_timeline_dashboard(as_of=date(2026, 10, 1))
         out = buf.getvalue()
+        self.assertRegex(out, r"CASH RECORDED THROUGH TODAY.*\n\+\$1,000\.00")
         self.assertIn("PROJECTED LOW POINT", out)
         self.assertIn("DAILY PACING", out)
 

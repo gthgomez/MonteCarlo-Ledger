@@ -11,8 +11,8 @@ def run_onboarding():
     cprint(f" {Theme.BOLD}WELCOME TO YOUR MONTE CARLO LEDGER{Theme.RESET}", Theme.CYAN)
     cprint(" " + "═" * 50, Theme.CYAN)
     print("\n Real-time visibility into your finances.")
-    print(" Track bills, predict paydays, and always know your")
-    cprint(" 'FREE TO SPEND' amount to avoid overdrafts.", Theme.ITALIC)
+    print(" Record paychecks and bills to see when cash could run low.")
+    cprint(" A plan is an estimate based on what you enter.", Theme.ITALIC)
 
     choice = input("\n Would you like a quick guided setup? (recommended) [Y/n]: ").strip().lower()
     if choice == "n":
