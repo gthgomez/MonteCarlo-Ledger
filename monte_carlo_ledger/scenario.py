@@ -192,18 +192,19 @@ def _linked_payment_slot(payment: Any, year: int, month: int) -> Optional[date]:
     """The date a linked bill pays its debt in one calendar month.
 
     A link means the bill is the debt payment, so the bill's recurrence owns the
-    slot even when the debt's stored due day differs. A one-time bill occupies
-    only its own month; other months fall back to the debt's due day.
+    slot even when the debt's stored due day differs. Months before the bill
+    starts or outside a one-time bill's month fall back to the debt's due day.
     """
     recurrence = getattr(payment, "recurrence", None)
+    due_date = getattr(payment, "due_date", None)
     if recurrence == "Monthly":
         day = getattr(payment, "due_day", None)
         if day is None:
             return None
         last_day = calendar.monthrange(year, month)[1]
-        return date(year, month, min(int(day), last_day))
+        slot = date(year, month, min(int(day), last_day))
+        return None if due_date and slot < date.fromisoformat(due_date) else slot
     if recurrence == "One-time":
-        due_date = getattr(payment, "due_date", None)
         if not due_date:
             return None
         parsed = date.fromisoformat(due_date)
