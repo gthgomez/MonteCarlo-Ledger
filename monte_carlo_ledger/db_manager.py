@@ -670,9 +670,20 @@ def update_payment(payment_id: int, name: str, amount_cents: int, recurrence: st
             if mismatch:
                 raise ValueError("This amount would no longer match a settled bill.")
             conn.execute(
-                "UPDATE payments SET name = ?, amount = ?, recurrence = ?, due_day = ?, due_date = ? "
-                "WHERE id = ?",
-                (name, amount_cents, recurrence, due_day, due_date, payment_id),
+                """
+                UPDATE payments
+                SET name = :name, amount = :amount, recurrence = :recurrence, due_day = :due_day,
+                    due_date = CASE
+                        WHEN recurrence = 'Monthly' AND :recurrence = 'Monthly' AND due_day = :due_day
+                        THEN due_date
+                        ELSE :due_date
+                    END
+                WHERE id = :payment_id
+                """,
+                {
+                    "name": name, "amount": amount_cents, "recurrence": recurrence,
+                    "due_day": due_day, "due_date": due_date, "payment_id": payment_id,
+                },
             )
 
 def delete_payment(payment_id: int):

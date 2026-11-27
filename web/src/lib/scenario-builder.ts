@@ -306,7 +306,7 @@ export function projectBillPayments(
         const d = Math.min(pmt.due_day, maxD);
         const dueIso = `${curY}-${String(actualM).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
 
-        if (dueIso >= asOf && dueIso < windowEnd) {
+        if (dueIso >= asOf && dueIso < windowEnd && (!pmt.due_date || dueIso >= pmt.due_date)) {
           const key = paymentOccurrenceKey(String(pmt.id), dueIso);
           if (!covered.has(key)) {
             addBill({ payment: pmt, slotDate: dueIso, dueDate: dueIso }, true);
@@ -510,7 +510,8 @@ function linkedPaymentSlot(
   if (payment.recurrence === "Monthly" && payment.due_day) {
     const maxD = new Date(Date.UTC(year, month, 0)).getUTCDate();
     const day = Math.min(payment.due_day, maxD);
-    return `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+    const slot = `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+    return payment.due_date && slot < payment.due_date ? null : slot;
   }
   if (payment.recurrence === "One-time" && payment.due_date) {
     const [dueYear, dueMonth] = payment.due_date.split("-").map(Number);

@@ -167,6 +167,56 @@ def test_month_end_and_future_receipt_fixture_is_chronological(tmp_path, monkeyp
     assert result["forecast"]["ending_balance_cents"] == doc["expected"]["ending_cents"]
 
 
+@pytest.mark.parametrize(("anchor", "expected_dates"), [
+    ("2026-11-15", ["2026-11-15", "2026-12-15"]),
+    (None, ["2026-10-15", "2026-11-15", "2026-12-15"]),
+])
+def test_monthly_bill_anchor_survives_python_edit_export_and_web_restore(
+    tmp_path, monkeypatch, household, anchor, expected_dates,
+):
+    monkeypatch.setattr(db_manager, "DB_PATH", str(tmp_path / "anchored.db"))
+    db_manager.init_db()
+    snapshot = {
+        "version": "2.1",
+        "current_balance_cents": 50_000,
+        "incomes": [],
+        "payments": [{
+            "id": "insurance", "name": "Insurance", "amount_cents": 20_000,
+            "recurrence": "Monthly", "due_day": 15,
+        }],
+        "transactions": [{
+            "id": 1, "amount_cents": 50_000, "date": "2026-10-01", "type": "Adjustment",
+        }],
+        "bill_occurrences": [],
+    }
+    if anchor is not None:
+        snapshot["payments"][0]["due_date"] = anchor
+    sync.restore_ledger_snapshot(snapshot)
+    options = {"as_of": "2026-10-10", "horizon_days": 67}
+    original = scenario_mod.build_scenario(**options, read_only=True)
+    assert [event["date"] for event in original["events"]] == expected_dates
+
+    payment_id = db_manager.get_all_payments()[0].id
+    db_manager.update_payment(payment_id, "Renamed insurance", 18_000, "Monthly", 15)
+    exported = sync.export_ledger_snapshot()
+    assert exported["payments"][0]["due_date"] == anchor
+    sync.restore_ledger_snapshot(exported)
+    simulation = dict(household["simulation"], runs=10, surprise_probability_ppm=0)
+
+    python_scenario = scenario_mod.build_scenario(**options, include_simulation=simulation)
+    web_scenario, web_payload = _web_scenario_and_result({
+        **options, "ledger": exported, "simulation": simulation,
+    })
+    assert python_scenario["events"] == web_scenario["events"] == [
+        {"date": due, "type": "expense", "name": "Renamed insurance", "amount_cents": -18_000}
+        for due in expected_dates
+    ]
+    python_forecast = run_scenario(python_scenario)["forecast"]
+    assert python_forecast == web_payload["result"]["forecast"]
+    assert python_forecast["ending_balance_cents"] == 50_000 - 18_000 * len(expected_dates)
+    assert [row["due_date"] for row in sync.export_ledger_snapshot()["bill_occurrences"]] == expected_dates
+
+
 def test_web_and_python_match_the_settled_browser_household_oracle(tmp_path, monkeypatch):
     doc = json.loads(QUALIFICATION_FIXTURE.read_text(encoding="utf-8"))
     household = doc["household"]

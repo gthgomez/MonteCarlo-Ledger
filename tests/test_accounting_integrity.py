@@ -274,6 +274,21 @@ def _add_rent(ledger):
     return int(ledger.get_all_payments()[0].id)
 
 
+def test_monthly_bill_anchor_is_a_lower_bound_until_the_due_day_changes(ledger):
+    snapshot = sync.export_ledger_snapshot()
+    snapshot["payments"] = [{
+        "id": "rent", "name": "Rent", "amount_cents": 50_000,
+        "recurrence": "Monthly", "due_day": 15, "due_date": "2026-11-20",
+    }]
+    sync.restore_ledger_snapshot(snapshot)
+    built = scenario.build_scenario("2026-10-10", 67, read_only=True)
+    assert [event["date"] for event in _events(built)] == ["2026-12-15"]
+
+    payment_id = ledger.get_all_payments()[0].id
+    ledger.update_payment(payment_id, "Rent", 50_000, "Monthly", 20)
+    assert sync.export_ledger_snapshot()["payments"][0]["due_date"] is None
+
+
 def test_moved_unpaid_bill_is_counted_once_at_the_moved_date(ledger):
     pid = _add_rent(ledger)
     db_manager.sync_bill_occurrences(AS_OF, "2027-01-01")

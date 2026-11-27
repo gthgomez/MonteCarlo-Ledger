@@ -922,12 +922,21 @@ export default function Home() {
 
   if (!isLoaded) {
     return (
-      <div role="status" className="workspace-loading">
-        <span className="sr-only">Loading your finances…</span>
-        <div aria-hidden="true">
-          <span className="workspace-loading-bar" />
-          <span className="workspace-loading-bar" />
-          <span className="workspace-loading-bar" />
+      <div key="loading-workspace" className="workspace-frame" aria-busy="true">
+        <p role="status" className="sr-only">Loading your finances…</p>
+        <div className="workspace-rail" aria-hidden="true">
+          <span className="workspace-loading-bar h-8 w-3/4" />
+        </div>
+        <div className="workspace-toolbar workspace-loading-toolbar" aria-hidden="true">
+          <span className="workspace-loading-bar h-6 w-28" />
+        </div>
+        <div className="workspace-main space-y-4" aria-hidden="true">
+          <span className="workspace-loading-bar h-10 w-36" />
+          <span className="workspace-loading-bar h-5 w-48" />
+          <div className="home-position">
+            <span className="workspace-loading-bar h-56" />
+            <span className="workspace-loading-bar h-56" />
+          </div>
         </div>
       </div>
     );

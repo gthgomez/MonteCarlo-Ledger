@@ -174,7 +174,10 @@ def get_upcoming_schedule(payments: List[Dict], start_date_str: str, end_date_st
 
         elif recurrence == 'Monthly':
             due_day = pay['due_day']
-            current_month_start = start_date.replace(day=1)
+            monthly_start = start_date
+            if pay.get('due_date'):
+                monthly_start = max(monthly_start, datetime.strptime(pay['due_date'], '%Y-%m-%d'))
+            current_month_start = monthly_start.replace(day=1)
             while current_month_start <= end_date:
                 year = current_month_start.year
                 month = current_month_start.month
@@ -182,7 +185,7 @@ def get_upcoming_schedule(payments: List[Dict], start_date_str: str, end_date_st
                             31, 30, 31, 30, 31, 31, 30, 31, 30, 31][month - 1]
                 actual_day = min(due_day, last_day)
                 due = datetime(year, month, actual_day)
-                if start_date <= due <= end_date:
+                if monthly_start <= due <= end_date:
                     occurrence = {'date': due.strftime('%Y-%m-%d'), 'name': name, 'amount': amount, 'recurrence': recurrence, 'payment_id': payment_id}
                     schedule.append(occurrence)
                 current_month_start = add_months(current_month_start, 1)

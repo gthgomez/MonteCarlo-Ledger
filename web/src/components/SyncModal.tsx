@@ -696,7 +696,7 @@ export function SyncModal({
         {tab === "cloud" && (
           <div className="space-y-4 text-sm">
             <p className="text-muted">
-              Sync is optional. Your browser encrypts the ledger and never sends your passphrase to the vault.
+              Sync is optional. Your browser encrypts the ledger before sending it and never sends your passphrase.
             </p>
             <p className="rounded-lg border border-warning bg-warning-soft p-3">
               Pulling replaces this browser’s ledger and clears open drafts. To keep a copy, close Vault, open Search and commands, and choose Export first.
@@ -770,7 +770,7 @@ export function SyncModal({
             <details className="rounded-lg border border-line p-3 text-muted">
               <summary className="cursor-pointer font-semibold text-ink">What the vault includes</summary>
               <div className="mt-2 space-y-2">
-                <p>A push sends a separately encrypted copy of your plan window, reserve, risk assumptions, and budget targets. If they cannot be recovered, spending guidance stays hidden until you review them.</p>
+                <p>A push sends a separately encrypted copy of your plan window, reserve, risk assumptions, and budget targets. A vault created by an older client may have no settings profile. If the settings cannot be recovered, spending guidance stays hidden until you review them.</p>
                 <p>The vault receives the encrypted snapshot, vault ID, and sync metadata. Keep both your Vault ID and passphrase somewhere safe before moving devices; the browser remembers only the ID.</p>
                 <p>Android-only data needs a separate native backup. Upload sample data only if you are deliberately testing a separate vault: other devices do not know that a restored sample is fictional.</p>
               </div>

@@ -312,6 +312,19 @@ test("evaluated row sources distinguish identical-looking bills, transactions, a
   })));
 });
 
+test("an anchored monthly bill does not appear before its first saved date", () => {
+  const ledger = emptyLedger(50_000);
+  ledger.payments = [{
+    id: "utility", name: "Utility", amount_cents: 30_000, recurrence: "Monthly", due_day: 15, due_date: "2026-11-15",
+  }];
+  const assumptions = { ...DEFAULT_ASSUMPTIONS, horizonDays: 45 };
+  const result = evaluateLedger(ledger, "2026-10-10", assumptions);
+  assert.equal(result.status, "ok");
+  if (result.status === "ok") {
+    assert.deepEqual(result.rows.map((row) => [row.date, row.amount_cents]), [["2026-11-15", -30_000]]);
+  }
+});
+
 test("legacy edited due days match by explicit payment ID and oldest original slot", () => {
   const ledger = emptyLedger(100_000);
   ledger.payments = [{

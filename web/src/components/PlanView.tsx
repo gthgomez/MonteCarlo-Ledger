@@ -761,8 +761,8 @@ export function PlanView({
                   ? purchase.outcome.safeSpendCents >= 0
                     ? `In this simulation the ${cautiousAmountShortName(base.quantileNum, base.quantileDen)} stays at or above zero after the purchase. That is a model estimate, not a guarantee.`
                     : purchase.outcome.reserveCents > 0
-                      ? "After this purchase, the selected modeled low point is below your reserve. That does not necessarily mean the balance falls below zero."
-                      : "After this purchase, the selected modeled low point falls below zero. That is a model estimate, not a guarantee you will overdraw."
+                      ? "In this simulation, the selected modeled low point is below your reserve after the purchase. That does not necessarily mean the balance falls below zero."
+                      : "In this simulation, the selected modeled low point falls below zero after the purchase. That is a model estimate, not a guarantee you will overdraw."
                   : ""
               }
             />

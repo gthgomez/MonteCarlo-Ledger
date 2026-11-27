@@ -31,6 +31,36 @@ and [PocketGuard](https://pocketguard.com/) for spending decisions; [Vercel](htt
 and [MDN](https://developer.mozilla.org/en-US/docs/Web/API/View_Transition_API) for controls, surfaces, and motion.
 Only public pages and help content were examined.
 
+## Local browser evidence
+
+- The baseline and candidate each cover seven sections at 320, 390, 412, 768, 1024, 1440 and
+  1920 CSS pixels in both themes (98 route views per build). Separate frames cover first-use
+  validation, empty workspaces, shorter-window warnings, the vault, contextual correction,
+  and the component reference. The route captures reported no document-level horizontal
+  overflow or page errors.
+- Chromium exercised Ctrl/⌘K, Escape and focus return, Back/Forward, privacy, a chart keyboard
+  control, a touch-emulated 412px phone, and mobile keyboard focus above the dock. All seven
+  sections stayed within their viewport at 200% text size on desktop. Thirty sampled light
+  and dark color-token pairings met their text or control contrast threshold.
+- Chromium's manifest installability check returned no errors on loopback. The browser tests
+  check the standalone manifest, both PNG icons and the absence of a service-worker registration.
+
+Production-build performance was measured in loopback Chromium, five fresh browser contexts per
+build, at 1440×1000 with 1,801 synthetic entries plus scheduled income, bills and debt.
+
+| Median observation | #68 baseline | Candidate |
+| --- | ---: | ---: |
+| Home → Money, through visible activity | 446 ms | 95 ms |
+| Activity rows added to the first view | 1,801 | 30 |
+| Home financial content ready | 179 ms | 210 ms |
+| Largest contentful paint | 148 ms | 176 ms |
+| Cumulative layout shift | 0 | 0 |
+
+The first redesign build introduced a layout shift of 0.156. The aligned loading
+shell removed it in the repeat measurement. The larger interface added startup work;
+pagination gave the bigger day-to-day improvement for a long ledger. These are controlled
+local measurements, not field Core Web Vitals and not a mobile network benchmark.
+
 ## Scope and rollback
 
 - The Web ledger still has a single manual cash pool. It does not model transfers between accounts, bank aggregation, or statement deduplication. JSON restore replaces a validated snapshot; it is not a merge.
