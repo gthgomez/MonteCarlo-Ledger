@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import pytest
 
 from monte_carlo_ledger import db_manager, sync
+from monte_carlo_ledger.contract import run_scenario
 from monte_carlo_ledger.scenario import _liability_min_payment_events, build_scenario
 
 
@@ -183,6 +184,53 @@ def test_link_survives_repeated_restore_and_delete_keeps_debt(tmp_path, monkeypa
     ]
 
 
+@pytest.mark.parametrize(("recurrence", "due_info"), [("Weekly", "2027-01-15"), ("One-time", None)])
+def test_cannot_edit_a_linked_bill_to_an_incompatible_schedule(tmp_path, monkeypatch, recurrence, due_info):
+    _restore(tmp_path, monkeypatch, _snapshot())
+    payment = db_manager.get_all_payments()[0]
+
+    with pytest.raises(ValueError, match="dated monthly or one-time"):
+        db_manager.update_payment(payment.id, "Changed bill", payment.amount, recurrence, due_info)
+
+    assert db_manager.get_all_payments() == [payment]
+    exported = sync.export_ledger_snapshot()
+    assert next(row for row in exported["liabilities"] if row["id"] == "loan")["linked_payment_id"] == "external-payment"
+    db_manager.update_payment(payment.id, "Renamed bill", payment.amount, "Monthly", 29)
+    assert sync.export_ledger_snapshot()["payments"][0]["name"] == "Renamed bill"
+
+
+@pytest.mark.parametrize(("has_exact_slot", "expected_date"), [
+    (False, "2027-01-20"),
+    (True, "2027-01-25"),
+])
+def test_linked_monthly_slot_prefers_exact_date_then_oldest_original(
+    tmp_path, monkeypatch, has_exact_slot, expected_date,
+):
+    snapshot = _snapshot()
+    payment = snapshot["payments"][0]
+    payment["amount_cents"] = 2_000
+    snapshot["payments"].append(dict(payment, id="unlinked-lookalike"))
+    slots = [
+        (1, "external-payment", "2027-01-08", "2027-01-10"),
+        (2, "external-payment", "2027-01-05", "2027-01-20"),
+        (3, "unlinked-lookalike", "2027-01-01", "2027-01-03"),
+    ]
+    if has_exact_slot:
+        slots.append((4, "external-payment", "2027-01-15", "2027-01-25"))
+    snapshot["bill_occurrences"] = [
+        {
+            "id": occurrence_id, "payment_id": payment_id, "original_due_date": original,
+            "due_date": due, "is_user_modified": True, "paid": False,
+        }
+        for occurrence_id, payment_id, original, due in slots
+    ]
+    _restore(tmp_path, monkeypatch, snapshot)
+
+    assert [event for event in _cash_events(horizon=31) if event[1] == "Debt"] == [
+        (expected_date, "Debt", -1_000),
+    ]
+
+
 @pytest.mark.parametrize(
     ("paid", "moved_to", "expected"),
     [
@@ -207,6 +255,124 @@ def test_linked_one_time_occurrence_uses_original_slot(tmp_path, monkeypatch, pa
     assert _cash_events("2027-01-20", 40) == sorted(
         expected + [("2027-02-15", "Debt", -3_000)], key=lambda row: (row[0], row[1])
     )
+
+
+@pytest.mark.parametrize(
+    ("original", "moved", "horizon"),
+    [
+        ("2027-01-15", "2027-01-22", 25),
+        ("2027-02-15", "2027-01-12", 14),
+    ],
+)
+def test_moved_unpaid_bill_and_debt_shortfall_share_cash_date(tmp_path, monkeypatch, original, moved, horizon):
+    snapshot = _snapshot()
+    snapshot["payments"][0].update(
+        recurrence="One-time", due_day=None, due_date=original, amount_cents=2_000
+    )
+    snapshot["liabilities"][0]["due_day_of_month"] = 28
+    snapshot["bill_occurrences"] = [{
+        "id": 1,
+        "payment_id": "external-payment",
+        "original_due_date": original,
+        "due_date": moved,
+        "paid": False,
+        "is_user_modified": True,
+    }]
+    _restore(tmp_path, monkeypatch, snapshot)
+
+    assert _cash_events(horizon=horizon) == [(moved, "Debt", -1_000), (moved, "Scheduled payment", -2_000)]
+    assert _cash_events(horizon=date.fromisoformat(moved).day - 1) == []
+
+
+def test_far_future_linked_bill_moved_early_includes_shortfall_without_future_interest(tmp_path, monkeypatch):
+    snapshot = _snapshot()
+    snapshot["current_balance_cents"] = 50_000
+    snapshot["transactions"][0].update(date="2026-11-01", amount_cents=50_000)
+    snapshot["payments"][0].update(
+        recurrence="One-time", due_day=None, due_date="2027-01-15", amount_cents=20_000
+    )
+    snapshot["liabilities"][0].update(
+        kind="revolving", balance_cents=60_000, apr_basis_points=1_200,
+        min_payment_cents=0, min_payment_percent_bps=5_000, due_day_of_month=29,
+    )
+    snapshot["bill_occurrences"] = [{
+        "id": 1, "payment_id": "external-payment", "original_due_date": "2027-01-15",
+        "due_date": "2026-11-16", "is_user_modified": True, "paid": False,
+    }]
+    _restore(tmp_path, monkeypatch, snapshot)
+
+    assert _cash_events("2026-11-10", 6) == []
+    assert _cash_events("2026-11-10", 10) == [
+        ("2026-11-16", "Debt", -10_000),
+        ("2026-11-16", "Scheduled payment", -20_000),
+    ]
+    forecast = run_scenario(build_scenario("2026-11-10", 10, read_only=True))["forecast"]
+    assert (forecast["minimum_balance_cents"], forecast["ending_balance_cents"]) == (20_000, 20_000)
+    # The early slot consumes principal before the ordinary November minimum.
+    assert _cash_events("2026-11-10", 20)[-1] == ("2026-11-29", "Debt", -15_000)
+
+
+def test_prior_month_moved_shortfall_carries_principal_without_backdated_interest(tmp_path, monkeypatch):
+    snapshot = _snapshot()
+    snapshot["current_balance_cents"] = 25_000
+    snapshot["transactions"][0].update(date="2026-11-01", amount_cents=25_000)
+    snapshot["incomes"] = [{
+        "id": "paycheck", "name": "Paycheck", "amount_cents": 40_000, "frequency": "One-time",
+        "last_payday": "2026-11-13", "next_payday": "2026-11-13",
+    }]
+    snapshot["payments"][0].update(name="Card bill", amount_cents=20_000, due_day=29)
+    snapshot["bill_occurrences"] = [{
+        "id": "october", "payment_id": "external-payment", "original_due_date": "2026-10-29",
+        "due_date": "2026-11-16", "is_user_modified": True, "paid": False,
+    }]
+    snapshot["liabilities"][0].update(
+        name="Card", balance_cents=55_000, min_payment_cents=30_000,
+        apr_basis_points=1_200, due_day_of_month=29,
+    )
+    _restore(tmp_path, monkeypatch, snapshot)
+
+    as_of = "2026-11-10"
+    expected = [
+        ("2026-11-13", "Paycheck", 40_000),
+        ("2026-11-16", "Card", -10_000),
+        ("2026-11-16", "Card bill", -20_000),
+    ]
+    assert _cash_events(as_of, 10) == expected
+    assert _cash_events(as_of, 20) == expected + [
+        ("2026-11-29", "Card", -5_000),
+        ("2026-11-29", "Card bill", -20_000),
+    ]
+    short = run_scenario(build_scenario(as_of, 10, read_only=True))["forecast"]
+    full = run_scenario(build_scenario(as_of, 20, read_only=True))["forecast"]
+    assert (short["minimum_balance_cents"], short["ending_balance_cents"]) == (25_000, 35_000)
+    assert full["ending_balance_cents"] == 10_000
+
+
+def test_only_unpaid_moved_cycles_use_opening_principal_in_cash_date_order():
+    debt = _liability(id="card", name="Card", balance=55_000, minimum=30_000, due_day=29)
+    debt.update(linked_payment_id=1, apr_basis_points=1_200)
+    payment = SimpleNamespace(id=1, name="Card bill", amount=20_000, recurrence="Monthly", due_day=29)
+    occurrences = [
+        {
+            "payment_id": 1, "original_due_date": original, "due_date": due,
+            "paid": paid, "is_user_modified": original != due,
+        }
+        for original, due, paid in [
+            ("2026-10-29", "2026-11-16", False),
+            ("2026-09-29", "2026-11-19", False),
+            ("2026-08-29", "2026-11-12", True),
+            ("2026-07-29", "2026-07-29", False),
+        ]
+    ]
+
+    events = _liability_min_payment_events(
+        [debt], [payment], date(2026, 11, 10), date(2026, 11, 30), occurrences,
+    )
+
+    assert [(event["date"], event["amount_cents"]) for event in events] == [
+        ("2026-11-16", -10_000),  # October pays first, taking $300 of the $550 opening principal.
+        ("2026-11-19", -5_000),   # September's $250 minimum has $50 left after its bill.
+    ]
 
 
 def test_paid_link_only_covers_recorded_amount_and_preserves_next_minimum(tmp_path, monkeypatch):
@@ -308,8 +474,6 @@ def test_linked_bill_covers_minimum_when_liability_due_day_differs(tmp_path, mon
         "surprise_check_interval_days": 14,
         "reserve_cents": 0,
     }, read_only=True)
-    from monte_carlo_ledger.contract import run_scenario
-
     assert run_scenario(scenario)["risk"]["safe_to_spend_cents"] == 20_000
 
 

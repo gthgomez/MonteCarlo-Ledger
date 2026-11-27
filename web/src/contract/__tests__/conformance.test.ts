@@ -58,7 +58,7 @@ function loadFixtures(dirName: string): Array<{ file: string; rel: string; doc: 
 }
 
 const validFixtures = loadFixtures(".").filter(
-  ({ rel }) => !rel.startsWith("invalid/")
+  ({ rel }) => !rel.startsWith(`invalid${path.sep}`)
 );
 const invalidFixtures = loadFixtures("invalid");
 

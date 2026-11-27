@@ -10,19 +10,20 @@ import {
   deleteCashTransaction,
   dollarsToCents,
   editCashTransaction,
-  linkPostedExpenseToPastOneTimeBill,
+  linkPostedExpenseToPastBill as linkPostedExpenseToPastOneTimeBill,
   markBillOccurrencePaid,
-  markPastOneTimeBillPaidWithoutExpense,
+  markPastBillPaidWithoutExpense as markPastOneTimeBillPaidWithoutExpense,
   moveBillOccurrence,
   parseDollarsToCents,
-  postedExpenseMatchesForPastOneTimeBill,
+  postedExpenseMatchesForPastBill as postedExpenseMatchesForPastOneTimeBill,
   reconcileBalance,
   recordCashflow,
+  recordPaydayReceipt,
   removePayment,
 } from "../ledger-edits";
 import { SAMPLE_LEDGER_STATE, type LedgerState } from "../types";
 import { transactionSumCents } from "../present";
-import { unresolvedPastOneTimeSlots } from "../scenario-builder";
+import { buildScenarioFromLedger, unresolvedPastOneTimeSlots } from "../scenario-builder";
 import { formatDollarsInput } from "../money-format";
 
 test("dollar entry becomes integer cents", () => {
@@ -228,6 +229,132 @@ test("income and installment debt can be added without breaking validation", () 
     minPaymentCents: 2_500,
   });
   assert.equal(debt.ok, true);
+});
+
+test("a same-day payday receipt moves the paycheck from forecast to actual cash", () => {
+  const state = occurrenceState();
+  state.incomes.push({
+    id: 42, name: "Job", amount_cents: 4_500, expected_amount: 5_000,
+    frequency: "Weekly", last_payday: "2027-01-01", next_payday: "2027-01-08",
+  });
+  const before = structuredClone(state);
+  const date = "2027-01-08";
+  const input = {
+    incomeId: "42", scheduledDate: date, expectedUpdatedAt: state.updated_at, date, amountCents: 4_250,
+  };
+
+  const generic = recordCashflow(state, {
+    kind: "Income", date, amountCents: input.amountCents, category: "Income", description: "Paycheck: Job",
+  });
+  assert.ok(generic.ok);
+  assert.deepEqual(generic.state.incomes, before.incomes);
+  assert.equal(buildScenarioFromLedger(generic.state, date, 10).events[0].amount_cents, 5_000);
+
+  const result = recordPaydayReceipt(state, input);
+  assert.ok(result.ok);
+  assert.deepEqual(result.state.incomes, [{
+    ...before.incomes[0], last_payday: date, next_payday: "2027-01-15", expected_amount: null,
+  }]);
+  assert.deepEqual(result.state.transactions, [...before.transactions, {
+    id: "tx-2", type: "Income", amount_cents: 4_250, date, category: "Income", description: "Paycheck: Job",
+  }]);
+  assert.equal(result.state.current_balance_cents, 14_250);
+  const scenario = buildScenarioFromLedger(result.state, date, 10);
+  assert.equal(scenario.starting_balance_cents, 14_250);
+  assert.deepEqual(
+    scenario.events.filter((event: { type: string }) => event.type === "income"),
+    [{ type: "income", date: "2027-01-15", amount_cents: 4_500, name: "Job" }],
+  );
+  assert.deepEqual(state, before);
+  assert.equal(recordPaydayReceipt(result.state, input).ok, false);
+  assert.equal(recordPaydayReceipt(result.state, {
+    ...input, expectedUpdatedAt: result.state.updated_at,
+  }).ok, false, "the consumed date is rejected even if the revision matches");
+});
+
+test("a receipt can consume the visible rolled-forward payday and keeps the monthly anchor", () => {
+  const state = occurrenceState();
+  state.incomes.push({
+    id: "monthly", name: "Job", amount_cents: 4_500, frequency: "Monthly",
+    last_payday: "2026-12-31", next_payday: "2027-01-31",
+  });
+  const february = recordPaydayReceipt(state, {
+    incomeId: "monthly", scheduledDate: "2027-02-28", expectedUpdatedAt: state.updated_at,
+    date: "2027-02-26", amountCents: 4_650, description: " Early deposit ",
+  });
+  assert.ok(february.ok);
+  assert.equal(february.state.transactions.at(-1)?.date, "2027-02-26");
+  assert.equal(february.state.transactions.at(-1)?.description, "Early deposit");
+  assert.equal(february.state.incomes[0].last_payday, "2027-02-28");
+  assert.equal(february.state.incomes[0].next_payday, "2027-03-31");
+  assert.equal("expected_amount" in february.state.incomes[0], false);
+
+  const march = recordPaydayReceipt(february.state, {
+    incomeId: "monthly", scheduledDate: "2027-03-31", expectedUpdatedAt: february.state.updated_at,
+    date: "2027-04-01", amountCents: 4_500,
+  });
+  assert.ok(march.ok);
+  assert.equal(march.state.incomes[0].next_payday, "2027-04-30");
+  const scenario = buildScenarioFromLedger(march.state, "2027-04-01", 70);
+  assert.deepEqual(
+    scenario.events.filter((event: { type: string }) => event.type === "income")
+      .map((event: { date: string }) => event.date),
+    ["2027-04-30", "2027-05-31"],
+  );
+});
+
+test("a one-time receipt closes only the chosen source even when schedule details are identical", () => {
+  const state = occurrenceState();
+  const date = "2027-01-08";
+  state.incomes.push({
+    id: "a", name: "Award", amount_cents: 1_000,
+    frequency: "One-time", last_payday: date, next_payday: date,
+  }, {
+    id: "b", name: "Award", amount_cents: 1_000,
+    frequency: "One-time", last_payday: date, next_payday: date,
+  });
+  const input = {
+    incomeId: "b", scheduledDate: date, expectedUpdatedAt: state.updated_at, date, amountCents: 1_000,
+  };
+
+  const result = recordPaydayReceipt(state, input);
+  assert.ok(result.ok);
+  assert.deepEqual(result.state.incomes, [state.incomes[0]]);
+  assert.equal(result.state.current_balance_cents, 11_000);
+  assert.equal(result.state.transactions.length, 2);
+  assert.equal(recordPaydayReceipt(result.state, {
+    ...input, expectedUpdatedAt: result.state.updated_at,
+  }).ok, false);
+});
+
+test("payday receipt validation leaves cash and schedule intact on failure", () => {
+  const state = occurrenceState();
+  state.incomes.push({
+    id: "pay", name: "Job", amount_cents: 4_500, frequency: "Bi-weekly",
+    last_payday: "2027-01-01", next_payday: "2027-01-15",
+  });
+  const before = structuredClone(state);
+  const date = "2027-01-15";
+  const input = {
+    incomeId: "pay", scheduledDate: date, expectedUpdatedAt: state.updated_at, date, amountCents: 4_250,
+  };
+  for (const invalid of [
+    { incomeId: "Job" },
+    { expectedUpdatedAt: "2027-01-02T00:00:00.000Z" },
+    { scheduledDate: "2027-01-16" },
+    { date: "2027-02-30" },
+    { amountCents: 0 },
+    { amountCents: 10.5 },
+    { amountCents: Number.MAX_SAFE_INTEGER },
+  ]) {
+    assert.equal(recordPaydayReceipt(state, { ...input, ...invalid }).ok, false);
+    assert.deepEqual(state, before);
+  }
+  const drifted = { ...state, current_balance_cents: state.current_balance_cents + 1 };
+  const result = recordPaydayReceipt(drifted, input);
+  assert.ok(!result.ok);
+  assert.match(result.error, /inconsistent with the transaction ledger/);
+  assert.deepEqual(drifted, { ...before, current_balance_cents: before.current_balance_cents + 1 });
 });
 
 const AS_OF = "2026-11-10";

@@ -1,20 +1,22 @@
 "use client";
 
-import React, { useState } from "react";
-import { cautiousAmountHeading, cautiousAmountShortName } from "@/lib/assumptions";
+import React, { useEffect, useRef, useState } from "react";
+import { ArrowDownLeft, ArrowRight, ArrowUpRight, CalendarDays, ShieldCheck } from "lucide-react";
+import { cautiousAmountHeading } from "@/lib/assumptions";
 import { formatDateLabel } from "@/lib/dates";
-import { createStarterLedger, dollarsToCents } from "@/lib/ledger-edits";
+import { createStarterLedger, parseDollarsToCents } from "@/lib/ledger-edits";
 import { formatMoney } from "@/lib/money-format";
 import { type Insight, type PlanSlice, type PositionCopy } from "@/lib/present";
 import { type Section } from "@/lib/sections";
 import { type PersistenceResult } from "@/lib/sync-state";
-import type { IncomeItem, LedgerState } from "@/lib/types";
-import { Button, Explain, fieldClass, Metric, Notice } from "./ui";
+import type { IncomeItem, LedgerState, TransactionItem } from "@/lib/types";
+import { Button, Explain, fieldClass, Notice } from "./ui";
 
 /** Everything Home needs to draw a forecast. Absence of this object means no
  * forecast is shown; it never stands in for a cached or invented one. */
 export interface HomeForecast {
   copy: PositionCopy;
+  nextPayday: { date: string; name: string; amount_cents: number } | null;
   startingBalanceCents: number;
   safeSpendCents: number | null;
   guidanceIssue: string | null;
@@ -34,6 +36,8 @@ interface HomeViewProps {
   asOf: string;
   usingDemo: boolean;
   needsSchedule: boolean;
+  recentActivity: TransactionItem[];
+  openStarter?: boolean;
   forecast: HomeForecast | null;
   onNavigate: (section: Section) => void;
   onRecordPurchase?: () => void;
@@ -55,6 +59,7 @@ function ForecastBody({
 }) {
   const {
     copy,
+    nextPayday,
     startingBalanceCents,
     safeSpendCents,
     guidanceIssue,
@@ -72,10 +77,58 @@ function ForecastBody({
   const previewDays = Math.min(30, horizonDays);
   const hasGap = safeSpendCents !== null && safeSpendCents < 0;
   const hasReserve = reserveCents > 0;
+  const spendLabel = hasGap
+    ? (hasReserve ? "Gap to your safety reserve" : "Modeled cash shortfall")
+    : cautiousAmountHeading(quantileNum, quantileDen);
+  const spendDetail = hasGap
+    ? hasReserve
+      ? `There’s no room for extra spending in this estimate. Going below your ${formatMoney(reserveCents)} reserve does not necessarily mean going below zero.`
+      : "The selected modeled low point goes below zero without extra spending. This is an estimate, not a guarantee."
+    : `Estimated room over your ${horizonDays}-day plan after keeping ${formatMoney(reserveCents)} in reserve. This is separate from today’s cash.`;
 
   return (
     <>
-      <p className="max-w-3xl text-base text-ink">{copy.lead}</p>
+      <div className="home-position">
+        {safeSpendCents !== null ? (
+          <section className={`home-hero ${hasGap ? "home-hero-risk" : ""}`}>
+            <span className="home-hero-kicker"><ShieldCheck size={17} aria-hidden="true" /> {hasGap ? "Needs attention" : quantileNum * 10 === quantileDen ? "Safe-to-Spend estimate" : "Spending outlook"} <span aria-hidden="true">·</span> {horizonDays} days</span>
+            <h2>{spendLabel}</h2>
+            <p className="home-hero-value">{formatMoney(Math.abs(safeSpendCents))}</p>
+            <p className="home-hero-detail">{spendDetail}</p>
+            <button type="button" className="home-hero-link" disabled={saving} onClick={() => onNavigate("plan")}>
+              Explore a what-if <ArrowRight size={16} aria-hidden="true" />
+            </button>
+          </section>
+        ) : (
+          <section className="home-hero home-hero-unavailable">
+            <span className="home-hero-kicker"><ShieldCheck size={17} aria-hidden="true" /> Spending outlook</span>
+            <h2>Not enough information to suggest spending</h2>
+            <p className="home-hero-detail">{guidanceIssue}</p>
+            <Button type="button" variant="quiet" disabled={saving} onClick={() => onNavigate("bills")}>Review bills</Button>
+          </section>
+        )}
+        <div className="home-position-details">
+          <section>
+            <h2>Money available now</h2>
+            <p className="home-position-value">{formatMoney(startingBalanceCents)}</p>
+            <p>Recorded through today. Check this against your actual cash.</p>
+          </section>
+          <section>
+            <h2>Lowest point if the schedule is exact</h2>
+            <p className="home-position-value">{formatMoney(plannedLowCents)}</p>
+            <p>On {formatDateLabel(plannedLowDate)}, inside the {horizonDays}-day plan.</p>
+          </section>
+          <section>
+            <h2>Next expected payday</h2>
+            {nextPayday ? (
+              <>
+                <p className="home-position-value">{formatDateLabel(nextPayday.date)}</p>
+                <p>{nextPayday.name} · {formatMoney(nextPayday.amount_cents)}</p>
+              </>
+            ) : <p>No paycheck is scheduled inside this plan window.</p>}
+          </section>
+        </div>
+      </div>
       {assumptionsChanged && (
         <Notice tone="warning">These results use assumptions you changed under Advanced. They are still estimates.</Notice>
       )}
@@ -87,48 +140,14 @@ function ForecastBody({
         </Notice>
       )}
 
-      <div className="grid gap-4 md:grid-cols-3">
-        <Metric
-          label="Money available now"
-          value={formatMoney(startingBalanceCents)}
-          detail="Based on ledger entries dated today or earlier. Check it against your bank balance."
-        />
-        {safeSpendCents !== null ? (
-          <Metric
-            label={hasGap
-              ? (hasReserve ? "Gap to your safety reserve" : "Modeled cash shortfall")
-              : quantileNum === 1 && quantileDen === 10
-                ? "Cautious amount to spend"
-                : quantileNum * 2 === quantileDen
-                  ? "Middle modeled amount"
-                  : quantileNum * 10 === quantileDen * 9
-                    ? "Optimistic modeled amount"
-                    : `Modeled amount at rank ${quantileNum}/${quantileDen}`}
-            value={formatMoney(Math.abs(safeSpendCents))}
-            detail={hasGap
-              ? hasReserve
-                ? `Nothing is left for extra spending in this estimate. Falling below your ${formatMoney(reserveCents)} reserve does not necessarily mean going below zero.`
-                : "The selected modeled low point goes below zero without extra spending. This is an estimate, not a guarantee."
-              : `An estimate of what you could spend over the ${horizonDays}-day plan while keeping ${formatMoney(reserveCents)} set aside in the modeled low point. It is not your current balance.`}
-          />
-        ) : (
-          <Notice tone="info" title="Not enough information to suggest spending">
-            {guidanceIssue}
-            <div className="mt-2">
-              <Button type="button" variant="quiet" disabled={saving} onClick={() => onNavigate("bills")}>Review bills</Button>
-            </div>
-          </Notice>
-        )}
-        <Metric
-          label="Lowest point if the schedule is exact"
-          value={formatMoney(plannedLowCents)}
-          detail={`On ${formatDateLabel(plannedLowDate)}, inside the ${horizonDays}-day plan. This is the exact schedule, separate from the ${cautiousAmountShortName(quantileNum, quantileDen)}.`}
-        />
-      </div>
-
-      <section className="rounded-2xl border border-line bg-surface p-4 shadow-card sm:p-6">
-        <h2 className="text-lg font-semibold">The next {previewDays} {previewDays === 1 ? "day" : "days"}, if the schedule is exact</h2>
-        <dl className="mt-4 grid gap-4 sm:grid-cols-3">
+      <section className="workspace-panel">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <h2 className="flex items-center gap-2 text-lg font-semibold"><CalendarDays size={19} aria-hidden="true" /> The next {previewDays} {previewDays === 1 ? "day" : "days"}, if the schedule is exact</h2>
+          <Button type="button" variant="quiet" disabled={saving} onClick={() => onNavigate("future")}>
+            Open forecast <ArrowRight size={16} aria-hidden="true" />
+          </Button>
+        </div>
+        <dl className="home-flow-summary">
           <div>
             <dt className="text-sm text-muted">Scheduled income</dt>
             <dd className="text-xl font-semibold tabular-nums">{formatMoney(slice.scheduledIncomeCents)}</dd>
@@ -188,6 +207,7 @@ function ForecastBody({
 
       {safeSpendCents !== null && <section className="space-y-3 rounded-2xl border border-line bg-surface p-4 shadow-card sm:p-6" aria-label="How these numbers were calculated">
         <h2 className="text-lg font-semibold">What these numbers mean</h2>
+        <p className="max-w-3xl text-sm text-ink">{copy.lead}</p>
         <p className="text-sm text-muted">{copy.caution}</p>
         <p className="text-sm text-ink">
           This {horizonDays}-day estimate keeps {formatMoney(reserveCents)} as your reserve.
@@ -212,6 +232,7 @@ function ForecastBody({
           </Explain>
         </div>
       </section>}
+      {safeSpendCents === null && <p className="max-w-3xl text-sm text-muted">{copy.lead}</p>}
     </>
   );
 }
@@ -220,15 +241,20 @@ export function HomeView({
   asOf,
   usingDemo,
   needsSchedule,
+  recentActivity,
+  openStarter = false,
   forecast,
   onNavigate,
   onRecordPurchase,
   saving = false,
   createOwn,
 }: HomeViewProps) {
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(openStarter);
+  const startButton = useRef<HTMLButtonElement>(null);
+  const startingBalance = useRef<HTMLInputElement>(null);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [balanceInvalid, setBalanceInvalid] = useState(false);
   const [balance, setBalance] = useState("");
   const [incomeName, setIncomeName] = useState("");
   const [incomeAmount, setIncomeAmount] = useState("");
@@ -244,6 +270,10 @@ export function HomeView({
   const [billAmount, setBillAmount] = useState("");
   const [dueDay, setDueDay] = useState("1");
 
+  useEffect(() => {
+    if (open) startingBalance.current?.focus();
+  }, [open]);
+
   async function submitOwn(event: React.FormEvent) {
     event.preventDefault();
     if (submitting || saving) return;
@@ -253,16 +283,19 @@ export function HomeView({
       setError("This starter form is only available for the demo. Your saved ledger was not changed.");
       return;
     }
-    const balanceCents = dollarsToCents(Number(balance));
+    const balanceCents = parseDollarsToCents(balance, { allowNegative: true });
     if (balance.trim() === "" || balanceCents === null) {
-      setError("Enter the money you have now, in dollars. Use 0 if you are starting from nothing.");
+      setError("Enter the money you have now in dollars and cents. Use 0 if you are starting from nothing.");
+      setBalanceInvalid(true);
+      startingBalance.current?.focus();
       return;
     }
+    setBalanceInvalid(false);
     const submittedAsOf = openingAsOf;
     const submittedPayday = payday;
     let income: Parameters<typeof createStarterLedger>[0]["income"] = null;
     if (incomeName.trim() || incomeAmount.trim()) {
-      const amountCents = dollarsToCents(Number(incomeAmount));
+      const amountCents = parseDollarsToCents(incomeAmount);
       if (!incomeName.trim() || amountCents === null || amountCents <= 0) {
         setError("A paycheck needs a name and an amount greater than zero, or leave both blank.");
         return;
@@ -271,7 +304,7 @@ export function HomeView({
     }
     let bill: Parameters<typeof createStarterLedger>[0]["bill"] = null;
     if (billName.trim() || billAmount.trim()) {
-      const amountCents = dollarsToCents(Number(billAmount));
+      const amountCents = parseDollarsToCents(billAmount);
       const day = Number(dueDay);
       if (!billName.trim() || amountCents === null || amountCents <= 0 || !Number.isInteger(day) || day < 1 || day > 31) {
         setError("A bill needs a name, an amount greater than zero, and a due day from 1 to 31.");
@@ -284,7 +317,7 @@ export function HomeView({
       setError(starter.error);
       return;
     }
-    if (balanceCents !== 0) setPinnedOpeningAsOf(submittedAsOf);
+    if (balanceCents !== 0 || bill) setPinnedOpeningAsOf(submittedAsOf);
     if (income && paydayInput === null) setPinnedPayday(submittedPayday);
     setSubmitting(true);
     const created = await createOwn(starter.state);
@@ -297,6 +330,10 @@ export function HomeView({
     setPinnedOpeningAsOf((current) => (current === submittedAsOf ? null : current));
     setPinnedPayday((current) => (current === submittedPayday ? null : current));
     setOpen(false);
+    requestAnimationFrame(() => {
+      window.scrollTo(0, 0);
+      document.getElementById("content")?.focus({ preventScroll: true });
+    });
   }
 
   return (
@@ -316,31 +353,41 @@ export function HomeView({
         </div>
       )}
       {usingDemo && (
-        <Notice tone="info" title="Demo data — not your finances.">
-          This is a sample household so you can see how a plan looks. It is not your bank account. Enter your own
-          numbers when you want the plan to be about you.
-          <div className="mt-3">
-            <Button type="button" variant="primary" disabled={saving} onClick={() => setOpen(true)}>
-              Enter my own numbers
-            </Button>
+        <section className="home-sample">
+          <div>
+            <h2 className="font-semibold">Demo data — not your finances.</h2>
+            <p className="text-sm text-muted">Explore a sample household or start a plan with your own numbers.</p>
           </div>
-        </Notice>
+          <Button type="button" ref={startButton} disabled={saving} onClick={() => setOpen(true)}>
+            Enter my own numbers <ArrowRight size={16} aria-hidden="true" />
+          </Button>
+        </section>
       )}
       {usingDemo && open && (
-        <form onSubmit={submitOwn} className="space-y-4 rounded-2xl border border-line bg-surface p-4 shadow-card sm:p-6">
+        <form onSubmit={submitOwn} className="workspace-panel">
           <fieldset disabled={saving || submitting} className="m-0 min-w-0 space-y-4 border-0 p-0">
           <h2 className="text-lg font-semibold">Your numbers</h2>
           <p className="text-sm text-muted">
-            A budget is simply a plan for where your money goes. You can leave the paycheck or the bill blank and add
-            them later.
+            Start with the cash available for bills. A paycheck and bill help build your first forecast; you can add them later.
           </p>
+          <h3 className="border-t border-line pt-3 text-sm font-semibold">1. Available money</h3>
           <label className="block text-sm font-medium">
             Money you have now ($)
-            <input className={`${fieldClass} mt-1`} inputMode="decimal" value={balance} onChange={(e) => setBalance(e.target.value)} />
+            <input id="home-opening-balance" ref={startingBalance} className={`${fieldClass} mt-1`} inputMode="decimal" value={balance}
+              aria-invalid={balanceInvalid || undefined} aria-describedby={balanceInvalid ? "home-opening-error" : undefined}
+              onChange={(e) => {
+                setBalance(e.target.value);
+                if (balanceInvalid) {
+                  setBalanceInvalid(false);
+                  setError(null);
+                }
+              }} />
           </label>
+          {balanceInvalid && <p id="home-opening-error" className="text-sm text-danger" role="alert">{error}</p>}
           {pinnedOpeningAsOf !== null && pinnedOpeningAsOf !== asOf && (
             <p className="text-sm text-muted">Opening balance date: {formatDateLabel(pinnedOpeningAsOf)}.</p>
           )}
+          <h3 className="border-t border-line pt-3 text-sm font-semibold">2. Upcoming income <span className="font-normal text-muted">· Optional</span></h3>
           <div className="grid gap-3 sm:grid-cols-2">
             <label className="block text-sm font-medium">
               Paycheck name
@@ -370,6 +417,9 @@ export function HomeView({
                 }}
               />
             </label>
+          </div>
+          <h3 className="border-t border-line pt-3 text-sm font-semibold">3. Regular bills <span className="font-normal text-muted">· Optional</span></h3>
+          <div className="grid gap-3 sm:grid-cols-2">
             <label className="block text-sm font-medium">
               A regular bill
               <input className={`${fieldClass} mt-1`} value={billName} onChange={(e) => setBillName(e.target.value)} placeholder="Rent" />
@@ -383,12 +433,19 @@ export function HomeView({
               <input className={`${fieldClass} mt-1`} inputMode="numeric" value={dueDay} onChange={(e) => setDueDay(e.target.value)} />
             </label>
           </div>
-          {error && (
+          {error && !balanceInvalid && (
             <p className="text-sm text-danger" role="alert">
               {error}
             </p>
           )}
-          <Button type="submit">Save and show my plan</Button>
+          <p className="border-t border-line pt-3 text-sm text-muted">After setup, use Plan to add debt minimums and include them in your forecast.</p>
+          <div className="flex flex-wrap gap-2">
+            <Button type="submit">Save and show my plan</Button>
+            <Button type="button" variant="quiet" onClick={() => {
+              setOpen(false);
+              startButton.current?.focus();
+            }}>Back to sample overview</Button>
+          </div>
           </fieldset>
         </form>
       )}
@@ -408,6 +465,30 @@ export function HomeView({
       )}
 
       {forecast && <ForecastBody forecast={forecast} onNavigate={onNavigate} saving={saving} />}
+      <section className="workspace-panel">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <h2 className="text-lg font-semibold">Recent activity</h2>
+          <Button type="button" variant="quiet" disabled={saving} onClick={() => onNavigate("money")}>
+            Open Money <ArrowRight size={16} aria-hidden="true" />
+          </Button>
+        </div>
+        {recentActivity.length === 0 ? (
+          <p className="mt-3 text-sm text-muted">There are no posted entries to show yet.</p>
+        ) : (
+          <ul className="mt-2 divide-y divide-line">
+            {recentActivity.map((entry, index) => (
+              <li key={entry.id ?? index} className="home-activity-row">
+                {entry.amount_cents < 0 ? <ArrowUpRight size={18} aria-hidden="true" /> : <ArrowDownLeft size={18} aria-hidden="true" />}
+                <div className="min-w-0">
+                  <p className="break-words text-sm font-semibold">{entry.description || entry.category || entry.type}</p>
+                  <p className="text-xs text-muted">{formatDateLabel(entry.date)} · {entry.type}</p>
+                </div>
+                <p className="min-w-0 break-words text-right text-sm font-semibold tabular-nums">{formatMoney(entry.amount_cents)}</p>
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
     </div>
   );
 }

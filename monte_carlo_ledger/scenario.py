@@ -192,23 +192,31 @@ def _linked_payment_slot(payment: Any, year: int, month: int) -> Optional[date]:
     """The date a linked bill pays its debt in one calendar month.
 
     A link means the bill is the debt payment, so the bill's recurrence owns the
-    slot even when the debt's stored due day differs. A one-time bill occupies
-    only its own month; other months fall back to the debt's due day.
+    slot even when the debt's stored due day differs. Months before the bill
+    starts or outside a one-time bill's month fall back to the debt's due day.
     """
     recurrence = getattr(payment, "recurrence", None)
+    due_date = getattr(payment, "due_date", None)
     if recurrence == "Monthly":
         day = getattr(payment, "due_day", None)
         if day is None:
             return None
         last_day = calendar.monthrange(year, month)[1]
-        return date(year, month, min(int(day), last_day))
+        slot = date(year, month, min(int(day), last_day))
+        return None if due_date and slot < date.fromisoformat(due_date) else slot
     if recurrence == "One-time":
-        due_date = getattr(payment, "due_date", None)
         if not due_date:
             return None
         parsed = date.fromisoformat(due_date)
         return parsed if (parsed.year, parsed.month) == (year, month) else None
     return None
+
+
+def _is_unpaid_moved_occurrence(occurrence: Optional[Dict[str, Any]]) -> bool:
+    return bool(
+        occurrence and not occurrence["paid"] and occurrence.get("original_due_date")
+        and occurrence["original_due_date"] != occurrence["due_date"]
+    )
 
 
 def _liability_min_payment_events(
@@ -226,14 +234,16 @@ def _liability_min_payment_events(
         if link is not None:
             owners[link] = owners.get(link, 0) + 1
     payments_by_id = {payment.id: payment for payment in payments}
-    occurrences_by_slot: Dict[tuple[int, str], Dict[str, Any]] = {}
+    occurrences_by_payment: Dict[int, Dict[str, Dict[str, Any]]] = {}
     for row in occurrences:
-        if row["payment_id"] not in owners:
+        payment_id = row["payment_id"]
+        if payment_id not in owners:
             continue
-        slot = (row["payment_id"], row.get("original_due_date") or row["due_date"])
-        if slot in occurrences_by_slot:
-            raise ValueError(f"Linked payment {row['payment_id']} has duplicate occurrences for {slot[1]}")
-        occurrences_by_slot[slot] = row
+        slot = row.get("original_due_date") or row["due_date"]
+        payment_slots = occurrences_by_payment.setdefault(payment_id, {})
+        if slot in payment_slots:
+            raise ValueError(f"Linked payment {payment_id} has duplicate occurrences for {slot}")
+        payment_slots[slot] = row
     # Generate upcoming slots with the same recurrence helper used by bill events.
     schedule = budget_engine.get_upcoming_schedule(
         [vars(payment) for payment in payments if owners.get(payment.id) == 1],
@@ -247,6 +257,7 @@ def _liability_min_payment_events(
 
     events: List[Dict[str, Any]] = []
     lo, hi = as_of.isoformat(), window_end.isoformat()
+    forecast_offsets = range(horizon_month_span(as_of, window_end) + 1)
     # Stable identity order keeps same-day event order, and therefore seeded risk
     # draws, consistent with the Web adapter even when snapshots use another order.
     for liability in sorted(liabilities, key=lambda item: str(item.get("id") or "")):
@@ -258,22 +269,22 @@ def _liability_min_payment_events(
             continue
         link = liability.get("linked_payment_id")
         payment = payments_by_id.get(link) if link is not None and owners[link] == 1 else None
+        payment_slots = occurrences_by_payment.get(payment.id, {}) if payment is not None else {}
+        # Visit sparse moved slots whose cash date is in the window, even when
+        # their original cycle is far before or after the ordinary forecast.
+        offsets = set(forecast_offsets)
+        oldest_slot_by_month: Dict[str, str] = {}
+        for original, row in payment_slots.items():
+            month = original[:7]
+            oldest_slot_by_month[month] = min(original, oldest_slot_by_month.get(month, original))
+            if row["due_date"] < hi and _is_unpaid_moved_occurrence(row):
+                offsets.add(horizon_month_span(as_of, date.fromisoformat(original)))
 
-        remaining_balance = int(liability.get("balance_cents") or 0)
-        cursor_year, cursor_month = as_of.year, as_of.month
-        first_due = True
-        # Walk calendar months that can intersect [as_of, window_end).
-        for _ in range(horizon_month_span(as_of, window_end) + 2):
-            if not first_due:
-                interest = round_half_away(
-                    remaining_balance * int(liability.get("apr_basis_points") or 0),
-                    120_000,
-                )
-                remaining_balance = checked_add(remaining_balance, interest)
-            first_due = False
-            amount = _planning_minimum_payment_cents(liability, remaining_balance)
-            if amount <= 0:
-                break
+        due_slots: List[tuple[str, int, bool]] = []
+        for offset in sorted(offsets):
+            year_offset, month_index = divmod(as_of.month - 1 + offset, 12)
+            cursor_year, cursor_month = as_of.year + year_offset, month_index + 1
+            month = date(cursor_year, cursor_month, 1).isoformat()[:7]
             last_day = calendar.monthrange(cursor_year, cursor_month)[1]
             day = min(due_day, last_day)
             fallback_due = date(cursor_year, cursor_month, day)
@@ -282,53 +293,67 @@ def _liability_min_payment_events(
                 if payment is not None
                 else None
             )
-            # The linked bill owns this debt's slot for the month. Using the debt's
-            # stored due day here would charge a second minimum when the two differ.
-            due = linked_due or fallback_due
-            # If this month's due day has passed, the minimum is still an outstanding
-            # obligation. Put it at the start of the forecast window so it reduces
-            # current available cash instead of disappearing until next month.
-            event_date = max(due, as_of)
-            event_date_iso = event_date.isoformat()
-            if lo <= event_date_iso < hi:
-                covered = 0
-                already_paid = 0
-                if payment is not None:
-                    slot = (payment.id, due.isoformat())
-                    occurrence = occurrences_by_slot.get(slot)
-                    if occurrence is None and getattr(payment, "recurrence", None) == "Monthly":
-                        # A changed due day leaves the occurrence on its original
-                        # slot. The month still identifies the same payment.
-                        for (owner, stored_slot), row in occurrences_by_slot.items():
-                            stored = row.get("original_due_date") or stored_slot
-                            if owner == payment.id and stored[:7] == due.strftime("%Y-%m"):
-                                occurrence = row
-                                break
-                    if slot in scheduled_slots or occurrence is not None:
-                        # The bill adapter includes overdue unpaid rows at as_of.
-                        if occurrence is not None and occurrence["paid"]:
-                            posted_amount = occurrence.get("transaction_amount")
-                            paid_amount = payment.amount if posted_amount is None else max(0, -posted_amount)
-                            covered = already_paid = min(amount, paid_amount)
-                        else:
-                            covered = min(amount, payment.amount)
-                if covered < amount:
-                    events.append(
-                        {
-                            "date": event_date_iso,
-                            "amount_cents": -(amount - covered),
-                            "type": "expense",
-                            "name": name,
-                        }
-                    )
-                remaining_balance -= amount - already_paid
-            if cursor_month == 12:
-                cursor_year += 1
-                cursor_month = 1
-            else:
-                cursor_month += 1
-            if date(cursor_year, cursor_month, 1) >= window_end:
+            # The linked bill owns the slot; look up coverage by the original
+            # date, then use the date cash will leave for any unpaid shortfall.
+            due_iso = (linked_due or fallback_due).isoformat()
+            cash_due_iso = due_iso
+            covered = 0
+            paid_coverage = False
+            if payment is not None:
+                occurrence = payment_slots.get(due_iso)
+                if occurrence is None and getattr(payment, "recurrence", None) == "Monthly":
+                    # A template edit can leave several slots in this month.
+                    # Pick the oldest original slot, independent of the cash-date order.
+                    oldest_slot = oldest_slot_by_month.get(month)
+                    if oldest_slot is not None:
+                        occurrence = payment_slots[oldest_slot]
+                if offset not in forecast_offsets and not _is_unpaid_moved_occurrence(occurrence):
+                    continue
+                if occurrence is not None:
+                    if occurrence["paid"]:
+                        posted_amount = occurrence.get("transaction_amount")
+                        covered = payment.amount if posted_amount is None else max(0, -posted_amount)
+                        paid_coverage = True
+                    else:
+                        cash_due_iso = occurrence["due_date"]
+                        covered = payment.amount
+                elif (payment.id, due_iso) in scheduled_slots:
+                    covered = payment.amount
+
+            # Keep outstanding overdue minimums in the start-of-window cash plan.
+            event_date_iso = max(cash_due_iso, lo)
+            if event_date_iso < hi:
+                due_slots.append((event_date_iso, covered, paid_coverage))
+
+        # Apply by cash date; the stable sort keeps original-month order for ties.
+        due_slots.sort(key=lambda slot: slot[0])
+        remaining_balance = int(liability.get("balance_cents") or 0)
+        if _planning_minimum_payment_cents(liability, remaining_balance) <= 0:
+            continue
+        interest_through_month = 0
+        for event_date_iso, covered, paid_coverage in due_slots:
+            if remaining_balance <= 0:
                 break
+            cash_month = horizon_month_span(as_of, date.fromisoformat(event_date_iso))
+            while interest_through_month < cash_month:
+                interest = round_half_away(
+                    remaining_balance * int(liability.get("apr_basis_points") or 0),
+                    120_000,
+                )
+                remaining_balance = checked_add(remaining_balance, interest)
+                interest_through_month += 1
+            amount = _planning_minimum_payment_cents(liability, remaining_balance)
+            if amount <= 0:
+                break
+            shortfall = max(0, amount - covered)
+            if shortfall:
+                events.append({
+                    "date": event_date_iso,
+                    "amount_cents": -shortfall,
+                    "type": "expense",
+                    "name": name,
+                })
+            remaining_balance -= shortfall if paid_coverage else amount
     return events
 
 
@@ -373,12 +398,15 @@ def build_scenario(
     include_simulation: Optional[Dict[str, Any]] = None,
     read_only: bool = False,
     ledger: Optional[Dict[str, Any]] = None,
+    *,
+    paycheck_delay_days: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Return a canonical scenario for the given explicit ``as_of`` (YYYY-MM-DD).
 
     When ``ledger`` is supplied (a ``db_manager.read_ledger_view`` result), the whole
     scenario is derived from that one consistent snapshot rather than reopening the
-    database several times.
+    database several times. ``paycheck_delay_days`` affects only the earliest
+    in-window event from the explicit income schedule.
     """
     start = date.fromisoformat(as_of)
     window_end = start + timedelta(days=horizon_days)
@@ -387,9 +415,10 @@ def build_scenario(
             db_manager.sync_bill_occurrences(as_of, window_end.isoformat(), include_lookback=False)
         ledger = db_manager.read_ledger_view(as_of, window_end.isoformat())
     liabilities = ledger.get("liabilities") or []
+    scheduled_income = _income_events_from(ledger["incomes"], start, window_end)
     events = (
         _bill_events_from(ledger["payments"], ledger["occurrences"], start, window_end)
-        + _income_events_from(ledger["incomes"], start, window_end)
+        + scheduled_income
         + _future_transaction_events(ledger["future_transactions"], start, window_end)
         + _liability_min_payment_events(
             liabilities, ledger["payments"], start, window_end, ledger["occurrences"]
@@ -399,6 +428,16 @@ def build_scenario(
     # input-order tie-breaker must not depend on SQL/array order: otherwise the same
     # ledger could assign seeded bill/income draws differently on Web/Python.
     canonical_event_order(events)
+    if paycheck_delay_days is not None:
+        if not scheduled_income:
+            raise ContractError("NO_INCOME", "no paycheck is scheduled in this window")
+        # Follow event identity so a posted transaction with the same fields is
+        # never chosen. Keep the original order for ties at the new date.
+        scheduled_ids = {id(event) for event in scheduled_income}
+        target = next(event for event in events if id(event) in scheduled_ids)
+        target["date"] = (
+            date.fromisoformat(target["date"]) + timedelta(days=paycheck_delay_days)
+        ).isoformat()
     starting_balance = ledger["starting_balance_cents"]
     scenario: Dict[str, Any] = {
         "contract_version": CONTRACT_VERSION,

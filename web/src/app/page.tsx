@@ -49,7 +49,6 @@ import {
   transactionSumCents,
 } from "@/lib/present";
 import { evaluateLedger } from "@/lib/scenarios";
-import { projectedDebtMinimums } from "@/lib/scenario-builder";
 import { SECTION_LABEL, SECTION_QUESTION, sectionFromHash, type Section } from "@/lib/sections";
 import { PersistenceResult, VAULT_ID_STORAGE_KEY } from "@/lib/sync-state";
 import { SAMPLE_LEDGER_STATE, type LedgerState } from "@/lib/types";
@@ -186,10 +185,16 @@ export default function Home() {
   const [isSyncModalOpen, setIsSyncModalOpen] = useState(false);
   const [currentVaultId, setCurrentVaultId] = useState<string | undefined>();
   const [section, setSection] = useState<Section>("home");
+  const [openStarter, setOpenStarter] = useState(false);
+  const historyPosition = useRef(0);
+  const activitySearchRequest = useRef(0);
+  const [activitySearch, setActivitySearch] = useState<{ text: string; request: number }>();
   const [purchaseToRecord, setPurchaseToRecord] = useState<PurchaseToRecord>();
   const [targets, setTargets] = useState<BudgetTargets>(EMPTY_TARGETS);
   const [targetWarning, setTargetWarning] = useState<string | null>(null);
-  const [theme, setTheme] = useState<"light" | "dark" | null>(null);
+  const [theme, setTheme] = useState<"light" | "dark">("light");
+  const [themePreference, setThemePreference] = useState<"light" | "dark" | "system">("system");
+  const [privacy, setPrivacy] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [isSavingSettings, setIsSavingSettings] = useState(false);
   const savesPending = isSaving || isSavingSettings;
@@ -274,6 +279,8 @@ export default function Home() {
       const budget = loadBudgetTargets(localStorage);
       setTargets(budget.targets);
       setTargetWarning(budget.warning);
+      const preference = localStorage.getItem(THEME_KEY);
+      if (preference === "light" || preference === "dark") setThemePreference(preference);
 
       // A vault restore writes this guard in the same bundle as the ledger. It
       // must survive a reload, a tab close, or a storage event until settings
@@ -304,8 +311,23 @@ export default function Home() {
     setTheme(storedTheme === "dark" ? "dark" : "light");
     const fromHash = sectionFromHash(window.location.hash);
     if (fromHash) setSection(fromHash);
+    historyPosition.current = window.history.state?.mcLedgerPosition ?? 0;
+    window.history.replaceState({ ...window.history.state, mcLedgerPosition: historyPosition.current }, "");
     setIsLoaded(true);
   }, [showReadSettings]);
+
+  useEffect(() => {
+    if (!isLoaded) return;
+    const system = window.matchMedia("(prefers-color-scheme: dark)");
+    function applyAppearance() {
+      const active = themePreference === "system" ? (system.matches ? "dark" : "light") : themePreference;
+      document.documentElement.setAttribute("data-theme", active);
+      setTheme(active);
+    }
+    applyAppearance();
+    system.addEventListener("change", applyAppearance);
+    return () => system.removeEventListener("change", applyAppearance);
+  }, [isLoaded, themePreference]);
 
   const refreshLedgerFreshness = useCallback(() => {
     // Rereading matching ledger bytes alone cannot verify vault metadata or a
@@ -393,11 +415,6 @@ export default function Home() {
   }, []);
 
   const asOf = useFinancialDate();
-  const debtMinimums = useMemo(
-    () => projectedDebtMinimums(state, asOf, assumptions.horizonDays),
-    [state, asOf, assumptions.horizonDays]
-  );
-
   const settingsRecoveryMissing = settingsRecovery.status === "missing";
   // A verified ledger can still tell us what is posted through today, even
   // when its forecast settings are awaiting review.
@@ -406,11 +423,19 @@ export default function Home() {
     ? transactionSumCents(state.transactions.filter((transaction) => transaction.date <= asOf))
     : null;
   const evaluation = useMemo(
-    () => assumptionsProblem || ledgerFreshness !== "current" || settingsRecoveryMissing
+    () => !isLoaded || loadError || assumptionsProblem || ledgerFreshness !== "current" || settingsRecoveryMissing
       ? null
       : evaluateLedger(state, asOf, assumptions),
-    [state, asOf, assumptions, assumptionsProblem, ledgerFreshness, settingsRecoveryMissing]
+    [isLoaded, loadError, state, asOf, assumptions, assumptionsProblem, ledgerFreshness, settingsRecoveryMissing]
   );
+  const recentActivity = useMemo(() => state.transactions
+    .filter((entry) => entry.date <= asOf)
+    .reverse()
+    .sort((a, b) => b.date.localeCompare(a.date))
+    .slice(0, 5), [state.transactions, asOf]);
+  const currentSpend = useMemo(() => spendingThisMonth(state.transactions, asOf), [state.transactions, asOf]);
+  const previousSpend = useMemo(() => spendingLastMonth(state.transactions, asOf), [state.transactions, asOf]);
+  const overdue = useMemo(() => computeOverdueObligations(state, asOf), [state, asOf]);
 
   function recordDraftOutcome(draftKey: string | undefined, failed: boolean) {
     if (!draftKey) return;
@@ -439,28 +464,68 @@ export default function Home() {
     setLedgerViewGeneration((current) => current + 1);
   }
 
-  function navigate(next: Section, record?: { purchase?: PurchaseToRecord }) {
+  const navigate = useCallback((next: Section, options?: { purchase?: PurchaseToRecord; setup?: true }, restore = false) => {
     // Navigation is held until the durable result is known so a pending save
     // cannot be mistaken for an abandoned draft or hidden behind another section.
-    if (writeInFlightRef.current || settingsWriteInFlightRef.current) return;
-    if (next === section) return;
+    if (writeInFlightRef.current || settingsWriteInFlightRef.current) return false;
+    if (next === section) {
+      if (next === "money" && options) document.getElementById("money-entry-amount")?.focus();
+      return true;
+    }
     // Every section change goes through here, including header and insight
     // links. Only an explicit confirmation may discard a failed form draft.
     if (failedDraftKeysRef.current.size > 0) {
-      if (!window.confirm(UNSAVED_DRAFT_LEAVE_MESSAGE)) return;
+      if (!window.confirm(UNSAVED_DRAFT_LEAVE_MESSAGE)) return false;
       failedDraftKeysRef.current.clear();
       setSaveWarning(null);
     }
-    setPurchaseToRecord(record?.purchase);
+    setPurchaseToRecord(options?.purchase);
+    if (next !== "money") setActivitySearch(undefined);
+    setOpenStarter(options?.setup ?? false);
     setSection(next);
-    const url = `${window.location.pathname}${window.location.search}#${next}`;
-    window.history.replaceState(null, "", url);
+    if (!restore) {
+      const url = `${window.location.pathname}${window.location.search}#${next}`;
+      historyPosition.current += 1;
+      window.history.pushState({ ...window.history.state, mcLedgerPosition: historyPosition.current }, "", url);
+    }
     requestAnimationFrame(() => {
-      const amount = record && document.getElementById("money-entry-amount");
+      const amount = options && document.getElementById(options.setup ? "home-opening-balance" : "money-entry-amount");
       if (amount) amount.focus();
-      else document.getElementById("content")?.focus({ preventScroll: true });
+      else {
+        window.scrollTo(0, 0);
+        document.getElementById("content")?.focus({ preventScroll: true });
+      }
     });
+    return true;
+  }, [section]);
+
+  function searchActivity(query: string) {
+    if (!navigate("money")) return;
+    setActivitySearch({ text: query, request: ++activitySearchRequest.current });
+    requestAnimationFrame(() => document.getElementById("money-activity-search")?.focus());
   }
+
+  useEffect(() => {
+    if (!isLoaded || loadError) return;
+    function restoreSection(event: PopStateEvent) {
+      const next = sectionFromHash(window.location.hash) ?? "home";
+      const position = event.state?.mcLedgerPosition;
+      if (navigate(next, undefined, true)) {
+        if (typeof position === "number") historyPosition.current = position;
+      } else if (typeof position === "number" && position !== historyPosition.current) {
+        // Stay on the previous history entry without discarding forward history.
+        window.history.go(historyPosition.current - position);
+      } else {
+        window.history.replaceState(
+          { ...window.history.state, mcLedgerPosition: historyPosition.current },
+          "",
+          `${window.location.pathname}${window.location.search}#${section}`,
+        );
+      }
+    }
+    window.addEventListener("popstate", restoreSection);
+    return () => window.removeEventListener("popstate", restoreSection);
+  }, [isLoaded, loadError, navigate, section]);
 
   function reloadLedger() {
     if (writeInFlightRef.current || settingsWriteInFlightRef.current) return;
@@ -480,15 +545,14 @@ export default function Home() {
     reloadLedger();
   }
 
-  function toggleTheme() {
-    const next = theme === "dark" ? "light" : "dark";
-    document.documentElement.setAttribute("data-theme", next);
+  function chooseTheme(next: "light" | "dark" | "system") {
     try {
-      localStorage.setItem(THEME_KEY, next);
+      if (next === "system") localStorage.removeItem(THEME_KEY);
+      else localStorage.setItem(THEME_KEY, next);
     } catch {
       // Theme preference is cosmetic. A storage failure does not change the ledger.
     }
-    setTheme(next);
+    setThemePreference(next);
   }
 
   function showSavedLedger(nextState: LedgerState, demo = false) {
@@ -858,8 +922,22 @@ export default function Home() {
 
   if (!isLoaded) {
     return (
-      <div className="flex min-h-screen items-center justify-center bg-canvas text-sm text-muted">
-        Loading your finances…
+      <div key="loading-workspace" className="workspace-frame" aria-busy="true">
+        <p role="status" className="sr-only">Loading your finances…</p>
+        <div className="workspace-rail" aria-hidden="true">
+          <span className="workspace-loading-bar h-8 w-3/4" />
+        </div>
+        <div className="workspace-toolbar workspace-loading-toolbar" aria-hidden="true">
+          <span className="workspace-loading-bar h-6 w-28" />
+        </div>
+        <div className="workspace-main space-y-4" aria-hidden="true">
+          <span className="workspace-loading-bar h-10 w-36" />
+          <span className="workspace-loading-bar h-5 w-48" />
+          <div className="home-position">
+            <span className="workspace-loading-bar h-56" />
+            <span className="workspace-loading-bar h-56" />
+          </div>
+        </div>
       </div>
     );
   }
@@ -868,13 +946,13 @@ export default function Home() {
   // current. Only a verified matching ledger is evaluated for forecasts.
   const ledgerProblem = ledgerFreshness === "current" ? null : (
     <section className="space-y-3 rounded-2xl border border-warning bg-warning-soft p-4">
-      <h1 className="text-lg font-semibold">
+      <h2 className="text-lg font-semibold">
         {ledgerFreshness === "indeterminate"
           ? "Saved ledger could not be verified"
           : ledgerFreshness === "changed"
             ? "Saved ledger changed"
             : "Saved ledger could not be read"}
-      </h1>
+      </h2>
       <p role="alert" className="text-sm">
         {ledgerFreshness === "indeterminate"
           ? "Some or all of the last change may have persisted. Forecasts, ledger writes, and Sync are paused in this tab."
@@ -942,7 +1020,7 @@ export default function Home() {
 
   const forecastProblem = assumptionsProblem ? (
     <section className="space-y-4 rounded-2xl border border-warning bg-warning-soft p-6">
-      <h1 className="text-lg font-semibold">Financial Settings Not Loaded</h1>
+      <h2 className="text-lg font-semibold">Financial Settings Not Loaded</h2>
       <p className="text-sm" role="alert">{assumptionsProblem.error}</p>
       {assumptionsWarning && <p className="text-sm" role="status">{assumptionsWarning}</p>}
       <p className="text-sm text-muted">
@@ -982,7 +1060,7 @@ export default function Home() {
     </section>
   ) : evaluation?.status === "error" ? (
     <section className="space-y-4 rounded-2xl border border-danger bg-danger-soft p-6">
-      <h1 className="text-lg font-semibold">Calculation Failed</h1>
+      <h2 className="text-lg font-semibold">Calculation Failed</h2>
       <p className="text-sm" role="alert">
         The financial engine could not evaluate this ledger, so no forecast, risk estimate, or safe-to-spend
         number is shown. You can still review saved entries and keep or correct open drafts.
@@ -1018,12 +1096,10 @@ export default function Home() {
 
   const forecast = evaluation?.status === "ok" ? evaluation : null;
   const guidanceIssue = forecast && spendingGuidanceIssue(state, forecast.rows, asOf);
+  const debtMinimums = forecast?.debtMinimums ?? [];
   const windowNotice = forecast && beyondWindowBillNotice(state, asOf, assumptions.horizonDays);
   const isForecastSection = section === "plan" || section === "future" || section === "advanced";
   const showGuidance = forecast !== null && guidanceIssue === null;
-  const currentSpend = spendingThisMonth(state.transactions, asOf);
-  const previousSpend = spendingLastMonth(state.transactions, asOf);
-  const overdue = computeOverdueObligations(state, asOf);
   const assumptionsChanged = JSON.stringify(assumptions) !== JSON.stringify(DEFAULT_ASSUMPTIONS);
   const needsSchedule = state.incomes.length === 0 && state.payments.length === 0;
   let homeForecast: HomeForecast | null = null;
@@ -1065,38 +1141,8 @@ export default function Home() {
       overdueCents: overdue.total_cents,
       overdueEarliest: overdue.earliest_date,
       firstNegativeDate: outcome.firstNegativeDate,
-      nextBill: (() => {
-        const remaining = new Map<string, number>();
-        for (const minimum of debtMinimums) {
-          const key = `${minimum.date}|${minimum.name}|${minimum.amount_cents}`;
-          remaining.set(key, (remaining.get(key) ?? 0) + 1);
-        }
-        return rows.find((row) => {
-          if (row.amount_cents >= 0) return false;
-          const key = `${row.date}|${row.name}|${row.amount_cents}`;
-          const count = remaining.get(key) ?? 0;
-          if (count === 0) return true;
-          if (count === 1) remaining.delete(key);
-          else remaining.set(key, count - 1);
-          return false;
-        }) ?? null;
-      })(),
-      nextDebtMinimum: (() => {
-        const remaining = new Map<string, number>();
-        for (const minimum of debtMinimums) {
-          const key = `${minimum.date}|${minimum.name}|${minimum.amount_cents}`;
-          remaining.set(key, (remaining.get(key) ?? 0) + 1);
-        }
-        return rows.find((row) => {
-          if (row.amount_cents >= 0) return false;
-          const key = `${row.date}|${row.name}|${row.amount_cents}`;
-          const count = remaining.get(key) ?? 0;
-          if (count === 0) return false;
-          if (count === 1) remaining.delete(key);
-          else remaining.set(key, count - 1);
-          return true;
-        }) ?? null;
-      })(),
+      nextBill: rows.find((row) => row.source?.kind === "bill") ?? null,
+      nextDebtMinimum: rows.find((row) => row.source?.kind === "debt-minimum") ?? null,
       spendingNote,
       overage: categoryOverages(currentSpend.byCategory, targets.categories)[0] ?? null,
       safeSpendCents,
@@ -1107,6 +1153,7 @@ export default function Home() {
     });
     homeForecast = {
       copy,
+      nextPayday: rows.find((row) => row.source?.kind === "scheduled-income") ?? null,
       startingBalanceCents: outcome.startingBalanceCents,
       safeSpendCents,
       guidanceIssue,
@@ -1127,48 +1174,59 @@ export default function Home() {
   }
 
   return (
-    <div className="flex min-h-screen min-w-0 flex-col bg-canvas text-ink">
-      <a href="#content" className="skip-link">
+    <div className="workspace-frame">
+      <a href="#content" className="skip-link" onClick={(event) => {
+        event.preventDefault();
+        document.getElementById("content")?.focus();
+      }}>
         Skip to content
       </a>
       <Header
         theme={theme}
-        onToggleTheme={toggleTheme}
-        isSynced={!!currentVaultId}
+        onToggleTheme={() => chooseTheme(theme === "dark" ? "light" : "dark")}
+        onSystemTheme={() => chooseTheme("system")}
+        privacy={privacy}
+        onTogglePrivacy={() => setPrivacy((active) => !active)}
         vaultId={currentVaultId}
-        onOpenSync={openSync}
+        onOpenSync={() => { if (!privacy) openSync(); }}
         onResetDemo={handleResetDemo}
-        onExportJson={ledgerFreshness === "current" ? handleExportJson : undefined}
+        onExportJson={!privacy && ledgerFreshness === "current" ? handleExportJson : undefined}
+        onQuickAdd={!privacy && !usingDemo && ledgerFreshness === "current" && !savesPending ? () => navigate("money", {}) : undefined}
+        transactionSearch={!privacy && ledgerFreshness === "current" ? { entries: state.transactions, open: searchActivity } : undefined}
         section={section}
+        usingDemo={usingDemo}
         onNavigate={navigate}
         isSaving={savesPending}
       />
-      <main id="content" tabIndex={-1} className="mx-auto w-full min-w-0 max-w-5xl flex-1 space-y-4 px-4 py-6 outline-none">
+      <main id="content" tabIndex={-1} className="workspace-main space-y-4">
         <p className="sr-only" role="status" aria-live="polite">Showing the {SECTION_LABEL[section]} section.</p>
-        <p className="text-sm text-muted">{SECTION_QUESTION[section]}</p>
+        <div className="workspace-page-heading">
+          <h1>{SECTION_LABEL[section]}</h1>
+          <p>{SECTION_QUESTION[section]}</p>
+        </div>
+        {privacy && (
+          <Notice title="Privacy mode is on">Financial details are hidden on this screen. Use the eye button to show them again.</Notice>
+        )}
+        <div hidden={privacy} className={privacy ? undefined : "space-y-4"}>
         {savingNotice}
         {saveWarning && <Notice tone="warning" title="Not saved">{saveWarning}</Notice>}
         {usingDemo && section !== "home" && (
-          <Notice tone="warning" title="Sample data — not your finances">
-            This section is still showing the sample household. Edits here stay labelled as sample data until you
-            enter your own numbers.
-            <div className="mt-3">
-              <button
-                type="button"
-                disabled={savesPending}
-                onClick={() => navigate("home")}
-                className="inline-flex min-h-11 items-center rounded-lg bg-accent px-3 text-sm font-semibold text-on-accent disabled:opacity-50"
-              >
-                Enter my own numbers
-              </button>
+          <section className="home-sample">
+            <div>
+              <h2 className="font-semibold">Sample data — not your finances</h2>
+              <p className="text-sm text-muted">Edits here remain part of the sample household.</p>
             </div>
-          </Notice>
+            <button type="button" disabled={savesPending} onClick={() => navigate("home", { setup: true })}
+              className="inline-flex min-h-11 items-center rounded-lg bg-accent px-3 text-sm font-semibold text-on-accent disabled:opacity-50">
+              Enter my own numbers
+            </button>
+          </section>
         )}
         {!assumptionsProblem && assumptionsWarning && <Notice tone="warning" title="Financial settings">{assumptionsWarning}</Notice>}
         {ledgerProblem}
         {settingsRecovery.status === "missing" && (
           <section className="space-y-3 rounded-2xl border border-warning bg-warning-soft p-4">
-            <h1 className="text-lg font-semibold">Financial settings were not recovered</h1>
+            <h2 className="text-lg font-semibold">Financial settings were not recovered</h2>
             <p className="text-sm" role="alert">{settingsRecovery.message}</p>
             <p className="text-sm text-muted">
               No spending recommendation or risk estimate is shown while the plan window and reserve are unknown.
@@ -1222,6 +1280,8 @@ export default function Home() {
               asOf={asOf}
               usingDemo={usingDemo}
               needsSchedule={needsSchedule}
+              recentActivity={ledgerFreshness === "current" ? recentActivity : []}
+              openStarter={openStarter}
               forecast={homeForecast}
               onNavigate={navigate}
               onRecordPurchase={ledgerFreshness === "current" ? () => navigate("money", {}) : undefined}
@@ -1251,6 +1311,7 @@ export default function Home() {
               onDiscardDraft={discardFailedDraft}
               saving={savesPending}
               purchaseToRecord={purchaseToRecord}
+              activitySearch={activitySearch}
             />
           )}
           {section === "budget" && (
@@ -1261,6 +1322,8 @@ export default function Home() {
               targets={targets}
               warning={targetWarning}
               onSave={saveTargets}
+              onOpenMoney={() => navigate("money")}
+              onOpenBills={() => navigate("bills")}
             />
           )}
           {section === "bills" && (
@@ -1308,8 +1371,9 @@ export default function Home() {
             />
           )}
         </React.Fragment>
+        </div>
       </main>
-      <footer className="border-t border-line px-4 py-6 text-center text-sm text-muted">
+      <footer className="workspace-footer">
         <p>MonteCarlo keeps this plan in your browser. Sync is optional. Forecasts are estimates, not guarantees.</p>
       </footer>
       <SyncModal

@@ -1,4 +1,4 @@
-import { unresolvedPastOneTimeSlots } from "./scenario-builder";
+import { unresolvedPastBillSlots } from "./scenario-builder";
 import { LedgerState } from "./types";
 
 export interface OverdueAssessment {
@@ -8,6 +8,7 @@ export interface OverdueAssessment {
   /** Past-due one-time slots with no stored occurrence; these are not in the cash plan. */
   unresolved_one_time_count?: number;
   unresolved_one_time_cents?: number;
+  unresolved_recurring_count?: number;
 }
 
 /**
@@ -39,17 +40,23 @@ export function computeOverdueObligations(
   }
   let unresolvedCount = 0;
   let unresolvedTotal = 0;
-  for (const slot of unresolvedPastOneTimeSlots(state, asOf)) {
-    unresolvedCount += 1;
-    unresolvedTotal += slot.payment.amount_cents;
+  let unresolvedRecurring = 0;
+  for (const slot of unresolvedPastBillSlots(state, asOf)) {
+    if (slot.payment.recurrence === "One-time") {
+      unresolvedCount += 1;
+      unresolvedTotal += slot.payment.amount_cents;
+    } else {
+      unresolvedRecurring += 1;
+    }
+    count += 1;
+    total += slot.payment.amount_cents;
     if (earliest === null || slot.dueDate < earliest) earliest = slot.dueDate;
   }
-  count += unresolvedCount;
-  total += unresolvedTotal;
   const assessment: OverdueAssessment = { count, total_cents: total, earliest_date: earliest };
   if (unresolvedCount > 0) {
     assessment.unresolved_one_time_count = unresolvedCount;
     assessment.unresolved_one_time_cents = unresolvedTotal;
   }
+  if (unresolvedRecurring > 0) assessment.unresolved_recurring_count = unresolvedRecurring;
   return assessment;
 }

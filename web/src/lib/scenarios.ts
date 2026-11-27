@@ -1,8 +1,19 @@
-import { runScenario, runScenarioWithFixedEvents, timelineRows, type TimelineRow } from "../contract/engine";
+import {
+  expand, runScenario, runScenarioWithFixedEvents, sortEvents, timelineRows, type TimelineRow,
+} from "../contract/engine";
 import { ContractError } from "../contract/money";
 import { Assumptions, assumptionError, toSimulationConfig } from "./assumptions";
 import { addDaysIso, isIsoDate } from "./dates";
-import { buildScenarioFromLedger, fixedEventOrders, sortScenarioEvents } from "./scenario-builder";
+import {
+  buildScenarioFromLedger,
+  debtMinimumsFromEvents,
+  fixedEventOrders,
+  ledgerEventSource,
+  sortScenarioEvents,
+  type LedgerEventSource,
+  type LedgerScenarioEvent,
+  type ProjectedDebtMinimum,
+} from "./scenario-builder";
 import { LedgerState } from "./types";
 
 export interface ModelOutcome {
@@ -28,8 +39,12 @@ export interface ModelOutcome {
   scenarioId: string;
 }
 
+export interface EvaluatedTimelineRow extends TimelineRow {
+  source?: LedgerEventSource;
+}
+
 export type EvalResult =
-  | { status: "ok"; outcome: ModelOutcome; rows: TimelineRow[] }
+  | { status: "ok"; outcome: ModelOutcome; rows: EvaluatedTimelineRow[]; debtMinimums: ProjectedDebtMinimum[] }
   | { status: "error"; code: string; message: string };
 
 function fail(code: string, message: string): EvalResult {
@@ -79,8 +94,20 @@ function runBuilt(
     if (!raw.risk || !raw.forecast) {
       return fail("UNKNOWN_ERROR", "The engine returned a result without a forecast.");
     }
-    const rows = timelineRows(scenario);
-    return { status: "ok", outcome: outcomeFrom(raw, assumptions, scenario), rows };
+    // Engine order identifies each explicit event even when its displayed values
+    // are identical to those of another source, or a what-if changes its date.
+    const orderedEvents: LedgerScenarioEvent[] = sortEvents(expand(scenario).events)
+      .map(({ order }) => scenario.events[order]);
+    const rows = timelineRows(scenario).map((row, index): EvaluatedTimelineRow => {
+      const source = ledgerEventSource(orderedEvents[index]);
+      return source ? { ...row, source } : row;
+    });
+    return {
+      status: "ok",
+      outcome: outcomeFrom(raw, assumptions, scenario),
+      rows,
+      debtMinimums: debtMinimumsFromEvents(orderedEvents),
+    };
   } catch (err) {
     return fromThrown(err);
   }
@@ -184,20 +211,15 @@ export function evaluateIncomeDelay(
       assumptions.horizonDays,
       toSimulationConfig(assumptions)
     );
-    const cloned = JSON.parse(JSON.stringify(scenario));
-    const incomes = cloned.events
-      .filter((event: { type: string }) => event.type === "income")
-      .sort((a: { date: string }, b: { date: string }) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
-    if (incomes.length === 0) {
+    const events: LedgerScenarioEvent[] = scenario.events;
+    const target = events.find((event) => ledgerEventSource(event)?.kind === "scheduled-income");
+    if (!target) {
       return fail("NO_INCOME", "No paycheck is scheduled in this window.");
     }
-    const target = incomes[0];
-    const index = cloned.events.indexOf(target);
-    cloned.events[index] = {
-      ...target,
-      date: addDaysIso(target.date, delayDays),
-    };
-    return runBuilt(cloned, assumptions);
+    // The freshly built scenario is already in chronological order. Preserve
+    // input order as the engine's same-day tiebreaker after changing its date.
+    target.date = addDaysIso(target.date, delayDays);
+    return runBuilt(scenario, assumptions);
   } catch (err) {
     return fromThrown(err);
   }

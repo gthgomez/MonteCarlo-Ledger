@@ -269,6 +269,7 @@ test.describe("local-first privacy", () => {
     await page.keyboard.press("Tab");
     await expect(dialog.getByRole("button", { name: "Encrypted vault" })).toBeFocused();
     await expect(page.getByText(/encrypts the ledger before sending it/i)).toBeVisible();
+    await dialog.getByText("What the vault includes", { exact: true }).click();
     await expect(page.getByText(/A vault created by an older client may have no settings profile/i)).toBeVisible();
     await expect(page.getByLabel("Vault Secret Passphrase")).toBeVisible();
     await page.keyboard.press("Escape");
@@ -601,8 +602,8 @@ test.describe("beginner financial journey", () => {
     await expect(page.getByText("$80.00").first()).toBeVisible();
     await page.getByLabel("Monthly spending target ($)").fill("200");
     await page.getByRole("button", { name: "Save target" }).click();
-    await expect(page.getByText(/\$120\.00 under the target/)).toBeVisible();
-    await expect(page.getByText(/not part of the forecast/i)).toBeVisible();
+    await expect(page.getByText("Left under target", { exact: true }).locator("..").getByText("$120.00", { exact: true })).toBeVisible();
+    await expect(page.getByText(/They do not change the forecast/i)).toBeVisible();
 
     await page.getByRole("button", { name: "Bills", exact: true }).click();
     await expect(page.getByRole("button", { name: "Remove Rent" })).toBeVisible();

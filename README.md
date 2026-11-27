@@ -6,8 +6,8 @@ Monte Carlo Ledger is a local-first finance project focused on a more useful que
 > How much can I spend while keeping my reserve through the plan window, and how fragile is that plan under my assumptions?
 
 The project combines a ledger-first SQLite core, a deterministic cash-flow timeline, and a bounded
-Monte Carlo risk model. The result is a CLI and local API that feel practical to use while still
-reading like an intentional engineering project instead of a themed CRUD app.
+Monte Carlo risk model. Use the browser workspace for daily financial decisions or the local
+Python CLI and API for terminal workflows and integrations.
 
 > **Companion app:** [MonteCarloLedger-Android](https://github.com/gthgomez/MonteCarloLedger-Android) — deterministic bill pacing and AES-GCM encrypted backups on Android.
 
@@ -132,6 +132,22 @@ recover](docs/VAULT_COMPATIBILITY.md#what-follows-the-ledger) and the
 
 An already loaded tab can record edits without a connection. Opening the site in a new tab
 still requires the app to load from its host; do not rely on it for an offline restart.
+
+In the web workspace, **Home** distinguishes recorded cash, modeled Safe-to-Spend, and the
+lowest balance on the exact schedule. **Money** tracks one manual cash pool with posted
+activity and expected income. Use **Record receipt** on a paycheck schedule to post actual
+income and advance that specific payday together. **Bills** shows due obligations and payment
+history. **Future** shows dated cash flow and modeled outcome ranks, and **Plan** compares
+what-if decisions without changing the ledger.
+
+Press **Ctrl+K** or **⌘K** to find a section, an action, or matching recorded activity. The eye
+button hides financial details in the current tab; it does not encrypt local browser storage.
+The web workspace follows the system theme unless you select a light or dark override. Browsers
+that support web app installation can launch MonteCarlo in a standalone window. The app does
+not install a service worker or cache ledger/API responses for offline navigation.
+
+The [modern workspace campaign receipt](docs/campaign/MODERN_WEB_QUALIFICATION.md) describes the
+baseline, financial behavior changes, and qualification scope.
 
 You can synchronize your local CLI ledger with the vault (backed by Turso libSQL):
 

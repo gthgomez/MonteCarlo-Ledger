@@ -119,7 +119,7 @@ def _canonical_ids(rows: list[sqlite3.Row], collection: str) -> dict[int, int | 
 
 
 def export_ledger_snapshot() -> Dict[str, Any]:
-    """Export local ledger state as a canonical snapshot dictionary."""
+    """Export local ledger state only if the canonical snapshot passes restore validation."""
     with db_manager.get_db_connection() as conn:
         conn.execute("BEGIN DEFERRED")
         ledger_balance, stored_balance = db_manager.read_balance_consistency(conn)
@@ -216,7 +216,7 @@ def export_ledger_snapshot() -> Dict[str, Any]:
                 item["is_active"] = False
             liabilities.append(item)
 
-    return {
+    snapshot = {
         "version": (
             LINKED_LIABILITY_SNAPSHOT_VERSION
             if any("linked_payment_id" in row or "is_active" in row for row in liabilities)
@@ -230,6 +230,11 @@ def export_ledger_snapshot() -> Dict[str, Any]:
         "bill_occurrences": occurrences,
         "liabilities": liabilities,
     }
+    try:
+        _validate_snapshot(snapshot)
+    except ValueError as exc:
+        raise ValueError(f"Cannot export invalid local ledger: {exc}") from exc
+    return snapshot
 
 
 SNAPSHOT_VERSION = "2.1"
@@ -435,8 +440,8 @@ _SNAPSHOT_TRANSACTION_TYPES = frozenset({"Income", "Expense", "Adjustment"})
 def _validate_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
     """Fully validate a snapshot without touching the database.
 
-    Returns the validated collections and id maps. Callers use this both to restore
-    and to prove compatibility (join/push preflight) before any data is exchanged.
+    Returns the validated collections and id maps. Callers use this for export,
+    restore, and remote compatibility checks.
     Nothing here mutates persistent state.
     """
     if not isinstance(snapshot, dict):
@@ -646,9 +651,9 @@ def _validate_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
                 raise ValueError(f"Snapshot {field}.linked_payment_id is already linked to another debt")
             linked_payment_ids.add(linked_id)
             payment = payments_by_id[linked_id]
-            monthly = payment["recurrence"] == "Monthly" and payment.get("due_day") is not None
-            one_time = payment["recurrence"] == "One-time" and payment.get("due_date") is not None
-            if not (monthly or one_time):
+            if not db_manager.is_supported_linked_payment_schedule(
+                payment["recurrence"], payment.get("due_day"), payment.get("due_date"),
+            ):
                 raise ValueError(f"Snapshot {field}.linked_payment_id requires a dated monthly or one-time payment")
         lid = _require_str(liab.get("id"), f"liabilities[{index}].id")
         if lid in seen_liability_ids:
@@ -901,7 +906,7 @@ def _local_ledger_fingerprint() -> Optional[str]:
     try:
         return _snapshot_fingerprint(export_ledger_snapshot())
     except ValueError:
-        # A desynchronized local ledger cannot be exported; treat it as changed.
+        # An invalid local ledger cannot be exported; treat it as changed.
         return None
 
 

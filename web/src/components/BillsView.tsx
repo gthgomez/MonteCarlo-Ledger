@@ -1,16 +1,17 @@
 "use client";
 
 import React, { useMemo, useState } from "react";
+import { ChevronDown } from "lucide-react";
 import { type Assumptions } from "@/lib/assumptions";
 import { addDaysIso, formatDateLabel, relativeDay } from "@/lib/dates";
 import {
   addBill,
-  dollarsToCents,
-  linkPostedExpenseToPastOneTimeBill,
+  linkPostedExpenseToPastBill,
   markBillOccurrencePaid,
-  markPastOneTimeBillPaidWithoutExpense,
+  markPastBillPaidWithoutExpense,
   moveBillOccurrence,
-  postedExpenseMatchesForPastOneTimeBill,
+  parseDollarsToCents,
+  postedExpenseMatchesForPastBill,
   removePayment,
   type EditResult,
 } from "@/lib/ledger-edits";
@@ -18,13 +19,15 @@ import { formatMoney } from "@/lib/money-format";
 import type { OverdueAssessment } from "@/lib/overdue";
 import { type PlanSlice } from "@/lib/present";
 import {
+  firstMonthlyBillDate,
   paymentOccurrenceKey,
   projectBillPayments,
   type ProjectedDebtMinimum,
-  unresolvedPastOneTimeSlots,
+  unresolvedPastBillSlots,
 } from "@/lib/scenario-builder";
 import type { PersistenceResult } from "@/lib/sync-state";
 import { type LedgerState, type PaymentItem } from "@/lib/types";
+import type { EvaluatedTimelineRow } from "@/lib/scenarios";
 import { Button, fieldClass, Notice, Panel } from "./ui";
 
 function withoutDraft<T>(drafts: Record<string, T>, key: string): Record<string, T> {
@@ -78,7 +81,7 @@ export function BillsView({
 }: {
   state: LedgerState;
   asOf: string;
-  slice: PlanSlice | null;
+  slice: PlanSlice<EvaluatedTimelineRow> | null;
   horizonDays: number;
   assumptions: Assumptions;
   overdue: OverdueAssessment;
@@ -95,6 +98,7 @@ export function BillsView({
   // displayed "Next date" that must not roll forward while the save is pending
   // or after a failure. A date the person typed stays in dueDateInput.
   const [implicitDueDate, setImplicitDueDate] = useState<string | null>(null);
+  const [monthlyAnchorAsOf, setMonthlyAnchorAsOf] = useState<string | null>(null);
   const dueDate = dueDateInput ?? implicitDueDate ?? asOf;
   const [auto, setAuto] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -118,36 +122,29 @@ export function BillsView({
       .sort((left, right) => left.dueDate.localeCompare(right.dueDate)),
     [state, asOf, horizonDays]
   );
-  // Only an unresolved past one-time slot gets the "link a recorded expense" path.
-  // Ordinary occupied slots keep the standard Mark paid behavior and copy.
+  // A past slot without a saved outcome needs explicit review. Ordinary
+  // occupied slots keep the standard Mark paid behavior and copy.
   const unresolvedKeys = useMemo(
     () => new Set(
-      unresolvedPastOneTimeSlots(state, asOf)
+      unresolvedPastBillSlots(state, asOf)
         .filter((slot) => slot.payment.id !== undefined)
         .map((slot) => paymentOccurrenceKey(slot.payment.id as number | string, slot.slotDate))
     ),
     [state, asOf]
   );
-  const upcoming = useMemo(() => {
-    const events = (slice?.events ?? []).filter((event) => event.amount_cents < 0);
-    // Remove exactly as many rows as the debt projection accounts for. Matching on
-    // date/name/amount keeps two independently entered obligations from collapsing.
-    const remaining = new Map<string, number>();
-    const keyOf = (date: string, name: string, amount: number) => `${date}|${name}|${amount}`;
-    for (const minimum of debtMinimums) {
-      const key = keyOf(minimum.date, minimum.name, minimum.amount_cents);
-      remaining.set(key, (remaining.get(key) ?? 0) + 1);
-    }
-    return events.filter((event) => {
-      const key = keyOf(event.date, event.name, event.amount_cents);
-      const count = remaining.get(key) ?? 0;
-      if (count === 0) return true;
-      if (count === 1) remaining.delete(key);
-      else remaining.set(key, count - 1);
-      return false;
-    });
-  }, [slice, debtMinimums]);
+  const upcoming = slice?.events.filter((event) => event.amount_cents < 0 && event.source?.kind !== "debt-minimum") ?? null;
   const hasDebtMinimum = debtMinimums.length > 0;
+  const paidHistory = useMemo(() => {
+    const payments = new Map(state.payments.map((payment) => [String(payment.id), payment]));
+    const transactions = new Map(state.transactions.map((entry) => [String(entry.id), entry]));
+    return state.bill_occurrences.filter((entry) => entry.paid)
+      .sort((a, b) => b.due_date.localeCompare(a.due_date))
+      .map((entry) => ({
+        entry,
+        payment: payments.get(String(entry.payment_id)),
+        expense: entry.transaction_id == null ? undefined : transactions.get(String(entry.transaction_id)),
+      }));
+  }, [state.bill_occurrences, state.payments, state.transactions]);
   // The fallback list is only for drafts whose slot is no longer projected. It
   // deliberately does not add cash events, expose Mark paid, or widen a window.
   const projectedRowKeys = new Set(
@@ -290,7 +287,7 @@ export function BillsView({
 
   async function submit(event: React.FormEvent) {
     event.preventDefault();
-    const cents = dollarsToCents(Number(amount));
+    const cents = parseDollarsToCents(amount);
     if (cents === null) {
       setError("Enter a bill amount greater than zero.");
       return;
@@ -301,6 +298,7 @@ export function BillsView({
       amountCents: cents,
       recurrence,
       dueDay: Number(dueDay),
+      asOf: monthlyAnchorAsOf ?? asOf,
       dueDate: submittedDueDate,
       autoWithdraw: auto,
     });
@@ -310,6 +308,8 @@ export function BillsView({
     }
     if (recurrence !== "Monthly" && dueDateInput === null) {
       setImplicitDueDate(submittedDueDate);
+    } else if (recurrence === "Monthly") {
+      setMonthlyAnchorAsOf((current) => current ?? asOf);
     }
     const saved = await onEdit(result, "bills:add");
     if (!saved.ok) {
@@ -320,6 +320,7 @@ export function BillsView({
     setName("");
     // A fresh default stays live; an explicitly typed date remains in its input.
     setImplicitDueDate(null);
+    setMonthlyAnchorAsOf(null);
   }
 
   return (
@@ -328,7 +329,9 @@ export function BillsView({
         <Notice tone="warning" title={`${overdue.count} past-due ${overdue.count === 1 ? "bill" : "bills"} to review`}>
           They total {formatMoney(overdue.total_cents)}
           {overdue.earliest_date ? `, earliest ${formatDateLabel(overdue.earliest_date)}` : ""}.{" "}
-          {(overdue.unresolved_one_time_count ?? 0) > 0
+          {(overdue.unresolved_recurring_count ?? 0) > 0
+            ? "A recurring payment needs a decision. Review the first unresolved payment for each affected schedule below. No expense was added automatically."
+            : (overdue.unresolved_one_time_count ?? 0) > 0
             ? "A one-time bill with no linked bill record is not in the plan until you resolve it below: link a recorded expense, mark it paid if the payment is already reflected in your current cash, record it if it is not, or move it. A missing link does not prove no payment was made; nothing was added automatically."
             : upcoming
               ? "The forecast counts them today while they are unpaid."
@@ -352,14 +355,18 @@ export function BillsView({
         ) : (
           <ul className="divide-y divide-line">
             {upcoming.map((event, index) => (
-              <li key={`${event.date}-${event.name}-${index}`} className="grid gap-1 py-3 text-sm sm:grid-cols-[1fr_auto]">
-                <div>
-                  <p className="font-medium">{event.name}</p>
+              <li key={`${event.date}-${event.name}-${index}`} className="grid gap-1 py-3 text-sm sm:grid-cols-[minmax(0,1fr)_minmax(0,auto)]">
+                <div className="min-w-0">
+                  <p className="break-words font-medium">{event.name}</p>
                   <p className="text-muted">
-                    {formatDateLabel(event.date)} · {relativeDay(asOf, event.date)} · amount you entered
+                    {event.source?.kind === "bill" && event.source.dueDate < asOf
+                      ? `Overdue since ${formatDateLabel(event.source.dueDate)} · counted today`
+                      : `${formatDateLabel(event.date)} · ${relativeDay(asOf, event.date)} · ${
+                        event.source?.kind === "posted-transaction" ? "Future-dated entry" : "Unpaid"
+                      }`}
                   </p>
                 </div>
-                <div className="text-left sm:text-right">
+                <div className="min-w-0 break-words text-left sm:text-right">
                   <p className="tabular-nums font-semibold">{formatMoney(-event.amount_cents)}</p>
                   <p className="text-muted">
                     Planned balance after {formatMoney(event.balance_after_cents)}
@@ -395,6 +402,33 @@ export function BillsView({
         </Panel>
       )}
 
+      <details className="workspace-panel group">
+        <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-3 font-semibold [&::-webkit-details-marker]:hidden">
+          <span>Payment history</span>
+          <span className="flex items-center gap-2 text-sm font-normal text-muted">
+            {paidHistory.length} marked paid <ChevronDown size={16} className="group-open:rotate-180" aria-hidden="true" />
+          </span>
+        </summary>
+        {paidHistory.length === 0 ? (
+          <p className="text-sm text-muted">No saved bill occurrences have been marked paid.</p>
+        ) : (
+          <ul className="mt-2 divide-y divide-line">
+            {paidHistory.map(({ entry, payment, expense }) => (
+              <li key={paymentOccurrenceKey(entry.payment_id, entry.original_due_date ?? entry.due_date)}
+                className="grid gap-1 py-3 text-sm sm:grid-cols-[minmax(0,1fr)_auto]">
+                <div className="min-w-0">
+                  <p className="break-words font-semibold">{payment?.name ?? "Archived bill"}</p>
+                  <p className="text-muted">Due {formatDateLabel(entry.due_date)} · Marked paid</p>
+                </div>
+                <p className="min-w-0 break-words tabular-nums sm:text-right">
+                  {expense ? `${formatMoney(expense.amount_cents)} on ${formatDateLabel(expense.date)}` : "No linked expense"}
+                </p>
+              </li>
+            ))}
+          </ul>
+        )}
+      </details>
+
       <Panel title="Recurring bills" lede="Add a payment you make regularly. Deleting it removes it from the plan. It does not cancel a payment at a bank.">
         <form onSubmit={submit} className="grid gap-3 sm:grid-cols-2">
           <label className="text-sm font-medium sm:col-span-2">
@@ -422,7 +456,13 @@ export function BillsView({
           {recurrence === "Monthly" ? (
             <label className="text-sm font-medium">
               Due day (1-31)
-              <input className={`${fieldClass} mt-1`} type="number" min="1" max="31" value={dueDay} onChange={(e) => setDueDay(e.target.value)} />
+              <input className={`${fieldClass} mt-1`} type="number" min="1" max="31" value={dueDay} onChange={(e) => {
+                setDueDay(e.target.value);
+                setMonthlyAnchorAsOf(null);
+              }} />
+              {/^(?:[1-9]|[12][0-9]|3[01])$/.test(dueDay) && (
+                <span className="mt-1 block font-normal text-muted">First due {formatDateLabel(firstMonthlyBillDate(monthlyAnchorAsOf ?? asOf, Number(dueDay)))}</span>
+              )}
             </label>
           ) : (
             <label className="text-sm font-medium">
@@ -446,17 +486,17 @@ export function BillsView({
         <ul className="mt-4 divide-y divide-line">
           {state.payments.map((payment) => (
             <li key={String(payment.id)} className="flex flex-wrap items-center justify-between gap-3 py-3 text-sm">
-              <div>
-                <p className="font-medium">{payment.name}</p>
+              <div className="min-w-0">
+                <p className="break-words font-medium">{payment.name}</p>
                 <p className="text-muted">
                   {payment.recurrence}
                   {payment.recurrence === "Monthly" && payment.due_day ? ` · due day ${payment.due_day}` : ""}
-                  {payment.due_date ? ` · ${formatDateLabel(payment.due_date)}` : ""}
+                  {payment.due_date ? ` · ${payment.recurrence === "One-time" ? "on" : "starts"} ${formatDateLabel(payment.due_date)}` : ""}
                   {payment.is_auto_withdraw ? " · you marked this as leaving on its own" : " · amount you entered"}
                 </p>
               </div>
-              <div className="flex items-center gap-3">
-                <span className="tabular-nums font-semibold">{formatMoney(payment.amount_cents)}</span>
+              <div className="flex min-w-0 flex-wrap items-center gap-3">
+                <span className="min-w-0 break-words tabular-nums font-semibold">{formatMoney(payment.amount_cents)}</span>
                 <Button
                   type="button"
                   variant="quiet"
@@ -474,7 +514,7 @@ export function BillsView({
             <p className="mt-1 text-sm text-muted">
               Marking an ordinary bill paid records an expense dated the day you submit Mark paid; a retry keeps
               that same posting date.
-              For a past one-time bill with no linked bill record, choose what happened: link the full posted
+               For a past bill with no linked bill record, choose what happened: link the full posted
               expense if it is already in Money, mark it paid without a debit when the payment is already reflected
               in the cash you entered (for example, it is in “Money you have now”), or record a new expense only if
               the payment is not recorded and current cash excludes it. If it pays a debt, use the lender’s balance
@@ -490,7 +530,7 @@ export function BillsView({
                 const selectedDate = moveDraft?.destination ?? (dueDate < asOf ? asOf : dueDate);
                 const isUnresolved = unresolvedKeys.has(key);
                 const matches = isUnresolved
-                  ? postedExpenseMatchesForPastOneTimeBill(state, paymentId, slotDate, asOf)
+                  ? postedExpenseMatchesForPastBill(state, paymentId, slotDate, asOf)
                   : [];
                 const resolution = resolutionChoices[key];
                 const choice = linkChoices[key] ?? "";
@@ -502,7 +542,7 @@ export function BillsView({
                       <fieldset className="grid gap-2 rounded-lg border border-line p-3">
                         <legend className="px-1 font-medium">What happened to this bill?</legend>
                         <p className="text-muted">
-                          No linked bill record exists for this one-time bill. That does not prove no payment was
+                           No linked bill record exists for this bill. That does not prove no payment was
                           made. Choose one treatment; nothing is inferred from the opening balance.
                         </p>
                         <label className="flex items-start gap-2">
@@ -546,7 +586,7 @@ export function BillsView({
                                 onClick={() => void settleRow(
                                   key,
                                   settlementDraft(payment, slotDate, key, "link"),
-                                  () => linkPostedExpenseToPastOneTimeBill(state, paymentId, slotDate, choice, asOf),
+                                   () => linkPostedExpenseToPastBill(state, paymentId, slotDate, choice, asOf),
                                 )}
                               >
                                 Link recorded expense
@@ -580,7 +620,7 @@ export function BillsView({
                                 onClick={() => void settleRow(
                                   key,
                                   settlementDraft(payment, slotDate, key, "reflected"),
-                                  () => markPastOneTimeBillPaidWithoutExpense(state, paymentId, slotDate, asOf),
+                                   () => markPastBillPaidWithoutExpense(state, paymentId, slotDate, asOf),
                                 )}
                               >
                                 Mark paid without new expense
@@ -696,7 +736,7 @@ export function BillsView({
                         </p>
                         {isUnresolved && settlementAttempt.transactionDate !== null && settlingKey !== key && (
                           <p className="text-muted">
-                            This one-time bill is now past due. Choose one of the review treatments above; a new
+                            This bill is now past due. Choose one of the review treatments above; a new
                             expense keeps the attempted posting date shown here.
                           </p>
                         )}
@@ -775,7 +815,7 @@ export function BillsView({
                   {retainedSettlements.map(([key, draft]) => {
                     const slotLabel = `${draft.name}, original slot ${formatDateLabel(draft.slotDate)}`;
                     const missingPayment = !paymentIds.has(String(draft.paymentId));
-                    // A one-time slot that is now past due is resolved only through
+                    // A slot that is now past due is resolved only through
                     // its explicit review treatments, never a direct paid retry.
                     const needsReview = unresolvedKeys.has(key);
                     const retryable =
@@ -797,7 +837,7 @@ export function BillsView({
                         </p>
                         {needsReview && (
                           <p className="text-muted">
-                            This one-time bill is now past due. Use the review treatments in its bill row; a new
+                            This bill is now past due. Use the review treatments in its bill row; a new
                             expense keeps the attempted posting date.
                           </p>
                         )}

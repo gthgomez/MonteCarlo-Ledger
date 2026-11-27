@@ -610,9 +610,9 @@ export function SyncModal({
         event.preventDefault();
         handleClose();
       }}
-      className="m-auto max-h-[90vh] w-[calc(100%_-_2rem)] max-w-lg overflow-y-auto rounded-2xl border border-line bg-surface p-5 text-ink shadow-card backdrop:bg-ink/50"
+      className="m-auto max-h-[90dvh] w-[calc(100%_-_2rem)] max-w-lg overflow-y-auto scroll-pt-20 rounded-2xl border border-line bg-surface px-4 pb-4 text-ink shadow-card backdrop:bg-ink/50 sm:px-5"
     >
-        <div className="mb-4 flex items-center justify-between border-b border-line pb-3">
+        <div className="sticky top-0 z-10 mb-4 flex items-center justify-between border-b border-line bg-surface py-2">
           <div className="flex items-center gap-2">
             <Cloud className="h-4 w-4 text-accent" />
             <h3 id="sync-title" className="text-base font-semibold">
@@ -694,30 +694,12 @@ export function SyncModal({
 
         {/* Tab 1: Cloud Vault Form */}
         {tab === "cloud" && (
-          <div className="space-y-4 text-xs">
+          <div className="space-y-4 text-sm">
             <p className="text-muted">
-              Sync is optional. Your browser encrypts the ledger before sending it. The vault service handles the
-              encrypted snapshot, vault ID, and sync metadata. It does not receive your passphrase or encryption key.
+              Sync is optional. Your browser encrypts the ledger before sending it and never sends your passphrase.
             </p>
-            <p className="text-ink">
-              A pull replaces the ledger in this browser. When the vault has them, it also applies the saved financial
-              settings: your plan window, reserve, risk assumptions, and budget targets. To keep a copy of the current
-              ledger, close Sync and use Export in the header first. Applying a replacement also clears unsaved values
-              in any open form draft in this tab. A vault created by an older client may have no settings profile; the
-              app then withholds spending guidance until you review the settings instead of assuming zero reserve.
-              Android-only data needs a separate native backup.
-            </p>
-            <p className="text-muted">
-              A push sends the settings currently shown in this browser with the ledger. The settings object is
-              encrypted separately with the same passphrase. It is not part of the portable ledger snapshot, so
-              Python and Android ledgers remain readable without it.
-            </p>
-            <p className="text-muted">
-              Sample data cannot be pushed as your ledger. Enter your own numbers from Home first.
-              After a successful push this browser remembers the Vault ID, but never the passphrase.
-              Before clearing browser data or moving to another device, record the Vault ID and
-              passphrase separately in a safe place outside this browser. You need both to pull the
-              encrypted snapshot into a new profile.
+            <p className="rounded-lg border border-warning bg-warning-soft p-3">
+              Pulling replaces this browser’s ledger and clears open drafts. To keep a copy, close Vault, open Search and commands, and choose Export first.
             </p>
 
             <div>
@@ -729,7 +711,7 @@ export function SyncModal({
                 value={vaultId}
                 disabled={isLoading}
                 onChange={(e) => changeVaultTarget(() => setVaultId(e.target.value))}
-                className="min-h-11 w-full px-3 py-2 rounded-lg bg-inset border border-line text-ink focus:outline-none focus:border-accent"
+                className="workspace-field min-h-11 w-full px-3 py-2 rounded-lg bg-inset border text-base text-ink"
               />
             </div>
 
@@ -744,7 +726,7 @@ export function SyncModal({
                 value={passphrase}
                 disabled={isLoading}
                 onChange={(e) => changeVaultTarget(() => setPassphrase(e.target.value))}
-                className="min-h-11 w-full px-3 py-2 rounded-lg bg-inset border border-line text-ink focus:outline-none focus:border-accent"
+                className="workspace-field min-h-11 w-full px-3 py-2 rounded-lg bg-inset border text-base text-ink"
               />
             </div>
 
@@ -773,7 +755,7 @@ export function SyncModal({
               <div className="space-y-2 rounded-xl border border-warning bg-warning-soft p-3">
                 <p className="text-ink">
                   This device has ledger edits that were never synchronized. Pulling now
-                  would replace them. Close this dialog and export a backup from the header
+                  would replace them. Close this dialog and export a backup from Search and commands
                   first, then reopen Sync and pull again before confirming.
                 </p>
                 <button
@@ -785,6 +767,14 @@ export function SyncModal({
                 </button>
               </div>
             )}
+            <details className="rounded-lg border border-line p-3 text-muted">
+              <summary className="cursor-pointer font-semibold text-ink">What the vault includes</summary>
+              <div className="mt-2 space-y-2">
+                <p>A push sends a separately encrypted copy of your plan window, reserve, risk assumptions, and budget targets. A vault created by an older client may have no settings profile. If the settings cannot be recovered, spending guidance stays hidden until you review them.</p>
+                <p>The vault receives the encrypted snapshot, vault ID, and sync metadata. Keep both your Vault ID and passphrase somewhere safe before moving devices; the browser remembers only the ID.</p>
+                <p>Android-only data needs a separate native backup. Upload sample data only if you are deliberately testing a separate vault: other devices do not know that a restored sample is fictional.</p>
+              </div>
+            </details>
           </div>
         )}
 
@@ -814,9 +804,9 @@ export function SyncModal({
 
         {/* Tab 3: Local JSON File */}
         {tab === "file" && (
-          <div className="space-y-4 text-xs">
+          <div className="space-y-4 text-sm">
             <p className="text-muted">
-              Close this dialog, then export from the header to save an unencrypted ledger file. Keep it private.
+              Close this dialog, then choose Export in Search and commands to save an unencrypted ledger file. Keep it private.
               Importing a valid file here replaces this ledger and clears unsaved values in any open form draft.
               Budget targets and forecast settings are not in the ledger file; use the encrypted vault to move them
               between devices, and keep a separate record of them with any file-only backup.

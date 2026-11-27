@@ -7,7 +7,7 @@ export const metadata: Metadata = {
     "A local-first plan for what you have, what is coming, and what a change might do. Forecasts stay on your device.",
 };
 
-const themeBoot = `try{var t=localStorage.getItem("mc-theme");if(t==="dark"||t==="light")document.documentElement.setAttribute("data-theme",t);}catch(e){}`;
+const themeBoot = `var t;try{t=localStorage.getItem("mc-theme");}catch(e){}document.documentElement.setAttribute("data-theme",t==="dark"||t==="light"?t:matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light");`;
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (

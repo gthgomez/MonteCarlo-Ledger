@@ -1,5 +1,6 @@
+import { addDaysIso } from "./dates";
 import { parseLedgerState } from "./validate";
-import { unresolvedPastOneTimeSlots } from "./scenario-builder";
+import { firstMonthlyBillDate, nextIncomeDate, unresolvedPastBillSlots } from "./scenario-builder";
 import type { IncomeItem, LedgerState, PaymentItem } from "./types";
 
 export type EditResult = { ok: true; state: LedgerState } | { ok: false; error: string };
@@ -58,10 +59,9 @@ function appendPaidOccurrence(
 }
 
 function isScheduledPaymentDate(payment: PaymentItem, value: string): boolean {
-  if (payment.recurrence === "Monthly" && payment.due_day) {
-    const [year, month, day] = value.split("-").map(Number);
-    const lastDay = new Date(Date.UTC(year, month, 0)).getUTCDate();
-    return day === Math.min(payment.due_day, lastDay);
+  if (payment.recurrence === "Monthly") {
+    const day = payment.due_day ?? Number(payment.due_date?.slice(-2));
+    return Number.isInteger(day) && (!payment.due_date || value >= payment.due_date) && firstMonthlyBillDate(value, day) === value;
   }
   if (!payment.due_date || payment.recurrence === "One-time") return payment.due_date === value;
   const start = new Date(`${payment.due_date}T00:00:00Z`).getTime();
@@ -134,21 +134,21 @@ function stableRowId(value: number | string | null | undefined): string | null {
 }
 
 /**
- * Posted expenses that could be the payment for one unresolved past one-time
+ * Posted expenses that could be the payment for one unresolved past
  * bill. This is a review aid, not an automatic match: a person must select one
  * explicitly. Candidates use the full exact amount, an Expense with a negative
  * sign, a date on or before `asOf`, a stable id, and no link from any existing
  * occurrence. Paid or moved occurrences already cover their slot through the
  * bill adapter's slot helper, so they never produce candidates.
  */
-export function postedExpenseMatchesForPastOneTimeBill(
+export function postedExpenseMatchesForPastBill(
   state: LedgerState,
   paymentId: number | string,
   slotDate: string,
   asOf: string,
 ): PostedExpenseMatch[] {
   if (!validIsoDate(slotDate) || !validIsoDate(asOf)) return [];
-  const slot = unresolvedPastOneTimeSlots(state, asOf).find(
+  const slot = unresolvedPastBillSlots(state, asOf).find(
     (candidate) => String(candidate.payment.id) === String(paymentId) && candidate.slotDate === slotDate,
   );
   if (!slot) return [];
@@ -181,13 +181,13 @@ export function postedExpenseMatchesForPastOneTimeBill(
 }
 
 /**
- * Record that an already-posted Expense paid one past one-time bill slot.
+ * Record that an already-posted Expense paid one unresolved past bill slot.
  * The transaction keeps its id, date, amount, and description; the balance is
  * unchanged. Only the bill occurrence is added, with the original due date as
  * both its due date and its stable slot, and `commit` reconciles the ledger.
  * Eligibility is rechecked here so a stale row cannot link the wrong expense.
  */
-export function linkPostedExpenseToPastOneTimeBill(
+export function linkPostedExpenseToPastBill(
   state: LedgerState,
   paymentId: number | string,
   slotDate: string,
@@ -201,13 +201,13 @@ export function linkPostedExpenseToPastOneTimeBill(
   if (transactionKey === null) return { ok: false, error: "Choose a recorded expense to link." };
   const payment = state.payments.find((item) => String(item.id) === String(paymentId));
   if (!payment) return { ok: false, error: "That bill no longer exists." };
-  if (payment.recurrence !== "One-time" || payment.due_date !== slotDate) {
-    return { ok: false, error: "Only a past one-time bill can link an existing recorded expense." };
+  if (!isScheduledPaymentDate(payment, slotDate)) {
+    return { ok: false, error: "That date is not on this bill’s schedule." };
   }
   if (!(slotDate < asOf)) {
     return { ok: false, error: "That bill is not past due yet. Resolve it on its scheduled date." };
   }
-  const match = postedExpenseMatchesForPastOneTimeBill(state, paymentId, slotDate, asOf)
+  const match = postedExpenseMatchesForPastBill(state, paymentId, slotDate, asOf)
     .find((item) => String(item.id) === transactionKey);
   if (!match) {
     return {
@@ -222,7 +222,7 @@ export function linkPostedExpenseToPastOneTimeBill(
 }
 
 /**
- * Mark a past one-time bill paid without posting a debit because the payment is
+ * Mark an unresolved past bill paid without posting a debit because the payment is
  * already included in the starting or reconciled cash balance (for example, it
  * is part of “Money you have now”). Only the paid occurrence is added, with a
  * null transaction id and the original scheduled date as its stable slot. No
@@ -230,7 +230,7 @@ export function linkPostedExpenseToPastOneTimeBill(
  * an already-paid slot with a transaction stays untouched and is rejected.
  * Eligibility is rechecked here so a stale row cannot mark a different slot.
  */
-export function markPastOneTimeBillPaidWithoutExpense(
+export function markPastBillPaidWithoutExpense(
   state: LedgerState,
   paymentId: number | string,
   slotDate: string,
@@ -241,8 +241,8 @@ export function markPastOneTimeBillPaidWithoutExpense(
   }
   const payment = state.payments.find((item) => String(item.id) === String(paymentId));
   if (!payment) return { ok: false, error: "That bill no longer exists." };
-  if (payment.recurrence !== "One-time" || payment.due_date !== slotDate) {
-    return { ok: false, error: "Only a past one-time bill can be marked paid without a new expense." };
+  if (!isScheduledPaymentDate(payment, slotDate)) {
+    return { ok: false, error: "That date is not on this bill’s schedule." };
   }
   if (!(slotDate < asOf)) {
     return { ok: false, error: "That bill is not past due yet. Resolve it on its scheduled date." };
@@ -256,11 +256,11 @@ export function markPastOneTimeBillPaidWithoutExpense(
     }
     return { ok: false, error: "That bill already has a recorded payment. Refresh the bill list." };
   }
-  const slot = unresolvedPastOneTimeSlots(state, asOf).find(
+  const slot = unresolvedPastBillSlots(state, asOf).find(
     (candidate) => String(candidate.payment.id) === String(paymentId) && candidate.slotDate === slotDate,
   );
   if (!slot) {
-    return { ok: false, error: "This is not a past one-time slot on the bill’s schedule. Refresh the bill list." };
+    return { ok: false, error: "This is not an unresolved past bill on the schedule. Refresh the bill list." };
   }
   const next = clone(state);
   appendPaidOccurrence(next, paymentId, slotDate, null);
@@ -356,6 +356,7 @@ export function createStarterLedger(input: {
   } | null;
   bill?: { name: string; amountCents: number; dueDay: number } | null;
 }): EditResult {
+  if (!validIsoDate(input.asOf)) return { ok: false, error: "Use a valid opening balance date." };
   if (!Number.isSafeInteger(input.balanceCents)) {
     return { ok: false, error: "Balance must be a whole number of cents." };
   }
@@ -402,6 +403,7 @@ export function createStarterLedger(input: {
       name,
       amount_cents: input.bill.amountCents,
       due_day: input.bill.dueDay,
+      due_date: firstMonthlyBillDate(input.asOf, input.bill.dueDay),
       recurrence: "Monthly",
       is_auto_withdraw: false,
     });
@@ -444,6 +446,64 @@ export function recordCashflow(
     },
   ];
   return commit(next);
+}
+
+export interface PaydayReceiptInput {
+  incomeId: number | string;
+  /** The selected occurrence and ledger revision when the receipt form opened. */
+  scheduledDate: string;
+  expectedUpdatedAt: string;
+  /** The date and amount actually received, independent of the schedule. */
+  date: string;
+  amountCents: number;
+  description?: string;
+}
+
+/** Consume an explicitly selected payday and post one Income in the same ledger edit. */
+export function recordPaydayReceipt(state: LedgerState, input: PaydayReceiptInput): EditResult {
+  if (!validIsoDate(input.date) || !validIsoDate(input.scheduledDate)) {
+    return { ok: false, error: "Use valid calendar dates for the payday and the receipt." };
+  }
+  // Snapshots have no income occurrence or transaction link. Recheck the form's
+  // revision and the source's schedule; the save path compares the durable ledger.
+  if (input.expectedUpdatedAt !== state.updated_at) {
+    return { ok: false, error: "The ledger changed. Reopen the payday receipt and try again." };
+  }
+  const incomeKey = stableRowId(input.incomeId);
+  const income = incomeKey === null
+    ? undefined
+    : state.incomes.find((row) => stableRowId(row.id) === incomeKey);
+  if (!income) return { ok: false, error: "That income schedule no longer exists." };
+  if (nextIncomeDate(income, input.scheduledDate) !== input.scheduledDate) {
+    return { ok: false, error: "That payday is no longer on this income schedule. Reopen it and try again." };
+  }
+
+  let incomes: IncomeItem[];
+  if (income.frequency === "One-time") {
+    incomes = state.incomes.filter((row) => row !== income);
+  } else {
+    const nextPayday = nextIncomeDate(income, addDaysIso(input.scheduledDate, 1));
+    if (!validIsoDate(nextPayday) || nextPayday <= input.scheduledDate) {
+      return { ok: false, error: "The next payday is outside the supported date range." };
+    }
+    // Advance from the scheduled slot (never the deposit date). Calculate the
+    // next date with the old anchor before updating last_payday: after a clamped
+    // month the next full-length date continues the anchor in both adapters.
+    incomes = state.incomes.map((row) => {
+      if (row !== income) return row;
+      const advanced = { ...row, last_payday: input.scheduledDate, next_payday: nextPayday };
+      if (advanced.expected_amount != null) advanced.expected_amount = null;
+      return advanced;
+    });
+  }
+
+  return recordCashflow({ ...state, incomes }, {
+    kind: "Income",
+    date: input.date,
+    amountCents: input.amountCents,
+    category: "Income",
+    description: input.description?.trim() || `Paycheck: ${income.name}`,
+  });
 }
 
 /** Positive whole-cent fields the Money editor collects for one recorded row. */
@@ -613,6 +673,7 @@ export function addBill(
     recurrence: PaymentItem["recurrence"];
     dueDay?: number | null;
     dueDate?: string | null;
+    asOf?: string;
     autoWithdraw: boolean;
   }
 ): EditResult {
@@ -634,6 +695,10 @@ export function addBill(
       return { ok: false, error: "A monthly bill needs a due day from 1 to 31." };
     }
     row.due_day = bill.dueDay;
+    if (bill.asOf !== undefined) {
+      if (!validIsoDate(bill.asOf)) return { ok: false, error: "Use a valid date to start the bill schedule." };
+      row.due_date = firstMonthlyBillDate(bill.asOf, bill.dueDay!);
+    }
   } else if (!bill.dueDate) {
     return { ok: false, error: "Enter the next date for this bill." };
   } else {
