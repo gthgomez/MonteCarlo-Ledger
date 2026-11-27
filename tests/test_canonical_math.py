@@ -203,34 +203,37 @@ def test_purchase_inside_the_window_is_modeled(ledger):
 # --------------------------------------------------------------------------
 
 
-def test_paycheck_delay_selects_the_earliest_date_not_insertion_order():
-    scenario_dict = {
-        "events": [
-            {"date": "2026-11-20", "type": "income", "amount_cents": 100},
-            {"date": "2026-11-10", "type": "income", "amount_cents": 200},
-        ]
-    }
-    decisions._shift_first_income(scenario_dict, 3)
-    assert scenario_dict["events"][0]["date"] == "2026-11-20"
-    assert scenario_dict["events"][1]["date"] == "2026-11-13"
+def test_paycheck_delay_selects_earliest_scheduled_income_and_leaves_posted_refund(ledger):
+    ledger.add_transaction(5_000, "Refunds", "Refund", t_type="Income", date_str="2026-11-05")
+    ledger.add_income_source("Later paycheck", 10_000, "One-time", "2026-11-20")
+    ledger.add_income_source("Next paycheck", 40_000, "One-time", "2026-11-10")
+    ledger.add_payment("Bill", 30_000, "One-time", "2026-11-12")
+
+    result = decisions.simulate_paycheck_delay(5, AS_OF, 30, {"runs": 5, "seed": 1})
+
+    assert result["baseline"]["forecast"]["minimum_balance_cents"] == 100_000
+    assert result["delayed"]["forecast"]["minimum_balance_cents"] == 75_000
+    assert result["delayed"]["forecast"]["minimum_balance_date"] == "2026-11-12"
+    assert result["delayed"]["forecast"]["ending_balance_cents"] == 125_000
+    assert ledger.get_ledger_stats()["transaction_count"] == 2
 
 
-def test_same_day_incomes_use_scenario_order_as_tie_break():
-    scenario_dict = {
-        "events": [
-            {"date": "2026-11-10", "type": "income", "amount_cents": 100},
-            {"date": "2026-11-10", "type": "income", "amount_cents": 200},
-        ]
-    }
-    decisions._shift_first_income(scenario_dict, 2)
-    assert scenario_dict["events"][0]["date"] == "2026-11-12"
-    assert scenario_dict["events"][1]["date"] == "2026-11-10"
+def test_same_day_incomes_use_scenario_order_as_tie_break(ledger):
+    ledger.add_income_source("Paycheck", 20_000, "One-time", "2026-11-10")
+    ledger.add_income_source("Paycheck", 10_000, "One-time", "2026-11-10")
+    ledger.add_payment("Bill", 125_000, "One-time", "2026-11-10")
+
+    result = decisions.simulate_paycheck_delay(2, AS_OF, 30, {"runs": 5, "seed": 1})
+
+    assert result["baseline"]["forecast"]["minimum_balance_cents"] == 5_000
+    assert result["delayed"]["forecast"]["minimum_balance_cents"] == -5_000
 
 
 def test_paycheck_delay_rejects_zero_and_no_income(ledger):
     with pytest.raises(ContractError) as ctx:
         decisions.simulate_paycheck_delay(0, AS_OF, 30, {"runs": 5, "seed": 1})
     assert ctx.value.code == "INVALID_HORIZON"
+    ledger.add_transaction(5_000, "Refunds", "Refund", t_type="Income", date_str="2026-11-05")
     with pytest.raises(ContractError) as ctx:
         decisions.simulate_paycheck_delay(3, AS_OF, 30, {"runs": 5, "seed": 1})
     assert ctx.value.code == "NO_INCOME"

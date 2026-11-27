@@ -638,22 +638,42 @@ def add_payment(name: str, amount_cents: int, recurrence: str, due_info: Any, is
                     VALUES (?, ?, ?, ?, ?)
                 ''', (name, amount_cents, recurrence, due_info, int(is_auto)))
 
+def is_supported_linked_payment_schedule(
+    recurrence: str, due_day: Optional[int], due_date: Optional[str],
+) -> bool:
+    """A liability link needs a dated monthly or one-time payment."""
+    return (recurrence == "Monthly" and due_day is not None) or (
+        recurrence == "One-time" and due_date is not None
+    )
+
+
 def update_payment(payment_id: int, name: str, amount_cents: int, recurrence: str, due_info: Any):
     domain_rules.validate_amount_positivity(amount_cents, "Payment amount")
+    due_day = due_info if recurrence == "Monthly" else None
+    due_date = None if recurrence == "Monthly" else due_info
     with get_db_connection() as conn:
         with conn:
-            if recurrence == 'Monthly':
-                conn.execute('''
-                    UPDATE payments 
-                    SET name = ?, amount = ?, recurrence = ?, due_day = ?, due_date = NULL 
-                    WHERE id = ?
-                ''', (name, amount_cents, recurrence, due_info, payment_id))
-            else:
-                conn.execute('''
-                    UPDATE payments 
-                    SET name = ?, amount = ?, recurrence = ?, due_date = ?, due_day = NULL 
-                    WHERE id = ?
-                ''', (name, amount_cents, recurrence, due_info, payment_id))
+            conn.execute("BEGIN IMMEDIATE")
+            if not is_supported_linked_payment_schedule(recurrence, due_day, due_date):
+                linked = conn.execute(
+                    "SELECT 1 FROM liabilities WHERE linked_payment_id = ? LIMIT 1", (payment_id,),
+                ).fetchone()
+                if linked:
+                    raise ValueError("A bill linked to a debt must remain a dated monthly or one-time payment.")
+            # The snapshot stores a settlement amount only on the transaction and
+            # requires it to match its bill template even for historical occurrences.
+            mismatch = conn.execute(
+                "SELECT 1 FROM bill_occurrences o JOIN transactions t ON t.id = o.transaction_id "
+                "WHERE o.payment_id = ? AND t.amount != ? LIMIT 1",
+                (payment_id, -amount_cents),
+            ).fetchone()
+            if mismatch:
+                raise ValueError("This amount would no longer match a settled bill.")
+            conn.execute(
+                "UPDATE payments SET name = ?, amount = ?, recurrence = ?, due_day = ?, due_date = ? "
+                "WHERE id = ?",
+                (name, amount_cents, recurrence, due_day, due_date, payment_id),
+            )
 
 def delete_payment(payment_id: int):
     with get_db_connection() as conn:
@@ -682,29 +702,31 @@ def add_transaction(amount_cents: int, category: str, description: str, t_type: 
     Adjustment: any sign
     Returns the new transaction's row ID.
     """
-    domain_rules.validate_transaction_sign(amount_cents, t_type)
-    
     if date_str is None:
         date_str = datetime.now().strftime('%Y-%m-%d')
-    
+
     with get_db_connection() as conn:
         with conn:
-            cursor = conn.execute('''
-                INSERT INTO transactions (amount, category, type, date, description)
-                VALUES (?, ?, ?, ?, ?)
-            ''', (amount_cents, category, t_type, date_str, description))
-            
-            # Update cached balance (direct integer math)
-            conn.execute('''
-                UPDATE settings 
-                SET value = value + ? 
-                WHERE key = 'current_balance'
-            ''', (amount_cents,))
-            
-            lastrowid = cursor.lastrowid
-            if lastrowid is None:
-                raise RuntimeError("Failed to persist transaction row.")
-            return int(lastrowid)
+            return _insert_transaction(conn, amount_cents, category, description, t_type, date_str)
+
+
+def _insert_transaction(
+    conn: sqlite3.Connection, amount_cents: int, category: str, description: str,
+    t_type: str, date_str: str,
+) -> int:
+    domain_rules.validate_transaction_sign(amount_cents, t_type)
+    cursor = conn.execute(
+        "INSERT INTO transactions (amount, category, type, date, description) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (amount_cents, category, t_type, date_str, description),
+    )
+    conn.execute(
+        "UPDATE settings SET value = value + ? WHERE key = 'current_balance'",
+        (amount_cents,),
+    )
+    if cursor.lastrowid is None:
+        raise RuntimeError("Failed to persist transaction row.")
+    return cursor.lastrowid
 
 def get_ledger_stats() -> Dict[str, Any]:
     """Bounded aggregate over the ledger: counts and the newest transaction date.
@@ -1087,29 +1109,55 @@ def get_obligations_total(start_date: str, end_date: str) -> int:
     unpaid = get_unpaid_occurrences(start_date, end_date)
     return sum(item.amount or 0 for item in unpaid)
 
+def _settlement_occurrence(conn: sqlite3.Connection, occurrence_id: int) -> Optional[sqlite3.Row]:
+    return conn.execute(
+        "SELECT o.due_date, o.paid, o.transaction_id, p.name, p.amount AS expected_amount "
+        "FROM bill_occurrences o JOIN payments p ON o.payment_id = p.id WHERE o.id = ?",
+        (occurrence_id,),
+    ).fetchone()
+
+
+def _set_occurrence_paid(conn: sqlite3.Connection, occurrence_id: int, transaction_id: int) -> None:
+    conn.execute(
+        "UPDATE bill_occurrences SET paid = 1, transaction_id = ? WHERE id = ?",
+        (transaction_id, occurrence_id),
+    )
+
+
+def record_occurrence_payment(occurrence_id: int, amount_cents: int, category: str) -> int:
+    """Record a new expense and settle the bill in the same write transaction."""
+    with get_db_connection() as conn, conn:
+        # Lock before reading so settlements and template edits cannot race.
+        conn.execute("BEGIN IMMEDIATE")
+        occ = _settlement_occurrence(conn, occurrence_id)
+        if occ is None:
+            raise ValueError("Occurrence not found.")
+        if occ["paid"] or occ["transaction_id"] is not None:
+            raise ValueError("Bill occurrence is already settled.")
+        amount = -amount_cents
+        domain_rules.validate_occurrence_link(occ, {"type": "Expense", "amount": amount})
+        transaction_id = _insert_transaction(
+            conn, amount, category, f"Paid {occ['name']}", "Expense", occ["due_date"],
+        )
+        _set_occurrence_paid(conn, occurrence_id, transaction_id)
+        return transaction_id
+
+
 def mark_occurrence_paid(occurrence_id: int, transaction_id: int):
-    """Marks an occurrence as paid."""
-    with get_db_connection() as conn:
-        # Validate occurrence exists
-        occ = conn.execute("""
-            SELECT o.*, p.amount as expected_amount 
-            FROM bill_occurrences o
-            JOIN payments p ON o.payment_id = p.id
-            WHERE o.id = ?
-        """, (occurrence_id,)).fetchone()
-        
-        # Retrieve transaction for validation
+    """Link an existing transaction to a bill occurrence."""
+    with get_db_connection() as conn, conn:
+        conn.execute("BEGIN IMMEDIATE")
+        occ = _settlement_occurrence(conn, occurrence_id)
         txn = conn.execute("SELECT * FROM transactions WHERE id = ?", (transaction_id,)).fetchone()
-        
         domain_rules.validate_occurrence_link(occ, txn)
-        
-        # Prevent reuse: Check if this transaction_id is already linked to a DIFFERENT occurrence
-        existing = conn.execute("SELECT id FROM bill_occurrences WHERE transaction_id = ? AND id != ?", (transaction_id, occurrence_id)).fetchone()
+
+        existing = conn.execute(
+            "SELECT 1 FROM bill_occurrences WHERE transaction_id = ? AND id != ?",
+            (transaction_id, occurrence_id),
+        ).fetchone()
         if existing:
             raise ValueError(f"Transaction {transaction_id} is already linked to another bill occurrence.")
-            
-        with conn:
-            conn.execute("UPDATE bill_occurrences SET paid = 1, transaction_id = ? WHERE id = ?", (transaction_id, occurrence_id))
+        _set_occurrence_paid(conn, occurrence_id, transaction_id)
 
 def get_next_unpaid_occurrence(payment_id: int) -> Optional[BillOccurrence]:
     """Finds the next unpaid occurrence for a payment."""

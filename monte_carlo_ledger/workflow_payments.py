@@ -1,5 +1,3 @@
-from datetime import datetime
-
 from . import budget_engine, db_manager
 from .ui import (
     CancelInput,
@@ -44,18 +42,16 @@ def handle_mark_paid():
                 default=f"{budget_engine.from_cents(payment.amount):.2f}",
             )
             category = prompt_user("Reporting Category", default="Bills")
-            date_str = occurrence.due_date if occurrence else datetime.now().strftime("%Y-%m-%d")
-
-            txn_id = db_manager.add_transaction(
-                -amt,
-                category,
-                f"Paid {payment.name}",
-                t_type="Expense",
-                date_str=date_str,
-            )
 
             if occurrence:
-                db_manager.mark_occurrence_paid(occurrence.id, txn_id)
+                try:
+                    db_manager.record_occurrence_payment(occurrence.id, amt, category)
+                except ValueError as exc:
+                    cprint(f"\n Payment not recorded: {exc}", Theme.YELLOW)
+                    wait_for_user()
+                    return
+            else:
+                db_manager.add_transaction(-amt, category, f"Paid {payment.name}", t_type="Expense")
 
             if payment.recurrence == "One-time":
                 cprint(
@@ -157,8 +153,12 @@ def manage_payments_menu():
                         "due_day" if recurrence == "Monthly" else "date",
                         default=due_default,
                     )
-                    db_manager.update_payment(payment.id, name, amount, recurrence, due)
-                    cprint(" Success: Updated!", Theme.GREEN)
+                    try:
+                        db_manager.update_payment(payment.id, name, amount, recurrence, due)
+                    except ValueError as exc:
+                        cprint(f" Bill not updated: {exc}", Theme.YELLOW)
+                    else:
+                        cprint(" Success: Updated!", Theme.GREEN)
                     wait_for_user()
             elif choice == "2":
                 idx = prompt_user("Enter number to delete", "int")

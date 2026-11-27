@@ -8,7 +8,7 @@ from datetime import date
 
 import pytest
 
-from monte_carlo_ledger import db_manager, decisions, scenario, sync
+from monte_carlo_ledger import db_manager, decisions, scenario, sync, workflow_payments
 
 AS_OF = "2026-11-01"
 HORIZON = 30
@@ -152,6 +152,72 @@ def test_marking_the_same_payment_twice_is_safe_and_reuse_is_impossible(ledger):
                     "UPDATE bill_occurrences SET transaction_id = ?, paid = 1 WHERE id = ?",
                     (txn, second.id),
                 )
+
+
+def test_cli_rejects_mismatched_payment_without_posting_cash(ledger, monkeypatch, capsys):
+    ledger.add_payment("Rent", 30_000, "Monthly", 1)
+    occurrence_id = _occ(1, AS_OF)
+    monkeypatch.setattr(workflow_payments, "clear_screen", lambda: None)
+    monkeypatch.setattr(workflow_payments, "wait_for_user", lambda: None)
+    inputs = iter(["1", "100", ""])
+    monkeypatch.setattr("builtins.input", lambda _prompt: next(inputs))
+
+    workflow_payments.handle_mark_paid()
+
+    assert "does not match the bill amount" in capsys.readouterr().out
+    assert ledger.validate_balance_consistency() == (True, 500_000, 500_000)
+    assert ledger.get_ledger_stats()["transaction_count"] == 1
+    assert ledger.get_next_unpaid_occurrence(1).id == occurrence_id
+
+    inputs = iter(["1", "", ""])
+    workflow_payments.handle_mark_paid()
+    snapshot = sync.export_ledger_snapshot()
+    settlement = snapshot["transactions"][-1]
+    assert (settlement["amount_cents"], settlement["date"]) == (-30_000, AS_OF)
+    assert snapshot["bill_occurrences"][0]["transaction_id"] == settlement["id"]
+    assert snapshot["bill_occurrences"][0]["paid"]
+    assert ledger.validate_balance_consistency() == (True, 470_000, 470_000)
+
+
+def test_settlement_rolls_back_after_failed_link_and_rejects_repeat(ledger):
+    ledger.add_payment("Rent", 30_000, "Monthly", 1)
+    occurrence_id = _occ(1, AS_OF)
+    with ledger.get_db_connection() as conn, conn:
+        conn.execute("""
+            CREATE TRIGGER reject_link BEFORE UPDATE OF transaction_id ON bill_occurrences
+            BEGIN SELECT RAISE(ABORT, 'settlement link failed'); END
+        """)
+
+    with pytest.raises(sqlite3.IntegrityError, match="settlement link failed"):
+        ledger.record_occurrence_payment(occurrence_id, 30_000, "Bills")
+    assert ledger.validate_balance_consistency() == (True, 500_000, 500_000)
+    assert ledger.get_ledger_stats()["transaction_count"] == 1
+    assert ledger.get_next_unpaid_occurrence(1).id == occurrence_id
+
+    with ledger.get_db_connection() as conn, conn:
+        conn.execute("DROP TRIGGER reject_link")
+    ledger.record_occurrence_payment(occurrence_id, 30_000, "Bills")
+    with pytest.raises(ValueError, match="already settled"):
+        ledger.record_occurrence_payment(occurrence_id, 30_000, "Bills")
+    assert ledger.validate_balance_consistency() == (True, 470_000, 470_000)
+    assert ledger.get_ledger_stats()["transaction_count"] == 2
+
+
+def test_template_edit_keeps_existing_settlement_valid(ledger):
+    ledger.add_payment("Rent", 30_000, "Monthly", 1)
+    occurrence_id = _occ(1, AS_OF)
+    transaction_id = ledger.add_transaction(-30_000, "Bills", "Rent", date_str=AS_OF)
+    ledger.mark_occurrence_paid(occurrence_id, transaction_id)
+
+    with pytest.raises(ValueError, match="settled bill"):
+        ledger.update_payment(1, "New rent", 40_000, "Monthly", 1)
+    assert ledger.get_all_payments()[0].name == "Rent"
+    ledger.update_payment(1, "Renamed rent", 30_000, "Monthly", 1)
+    snapshot = sync.export_ledger_snapshot()
+    sync.restore_ledger_snapshot(snapshot)
+    assert ledger.get_all_payments()[0].name == "Renamed rent"
+    assert snapshot["bill_occurrences"][0]["transaction_id"] == transaction_id
+    assert ledger.validate_balance_consistency() == (True, 470_000, 470_000)
 
 
 def test_migration_detaches_existing_duplicate_links_without_deleting_records(tmp_path, monkeypatch):

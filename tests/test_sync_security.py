@@ -195,6 +195,45 @@ def test_wrong_passphrase_push_fails_and_never_stores_it(sync_config):
     assert "passphrase" not in stored
 
 
+@pytest.mark.parametrize("operation", ["export", "init", "push"])
+def test_invalid_local_settlement_cannot_be_exported_or_uploaded(
+    operation, sync_config, tmp_path, monkeypatch
+):
+    monkeypatch.setattr(db_manager, "DB_PATH", str(tmp_path / "ledger.db"))
+    db_manager.init_db()
+    db_manager.add_payment("Rent", 30_000, "One-time", "2026-11-01")
+    payment_id = db_manager.get_all_payments()[0].id
+    db_manager.ensure_occurrence_exists(payment_id, "2026-11-01")
+    occurrence = db_manager.get_next_unpaid_occurrence(payment_id)
+    expense = db_manager.add_transaction(-30_000, "Bills", "Rent", date_str="2026-11-01")
+    db_manager.mark_occurrence_paid(occurrence.id, expense)
+
+    server = FakeVaultServer()
+    monkeypatch.setattr(sync, "_request_json", server.request)
+    if operation == "push":
+        sync.sync_init("vault-1", "secret", "https://sync.example.test")
+    before = sync_config.read_bytes() if sync_config.exists() else None
+    remote_before = (server.revision, server.ciphertext_b64, server.nonce_b64)
+    server.calls.clear()
+    # Simulate a historical template edit that predates the local write guard.
+    with db_manager.get_db_connection() as conn, conn:
+        conn.execute("UPDATE payments SET amount = ? WHERE id = ?", (40_000, payment_id))
+
+    with patch.object(sync, "encrypt_payload", wraps=sync.encrypt_payload) as encrypt:
+        with pytest.raises(ValueError, match="does not match the bill amount"):
+            if operation == "export":
+                sync.export_ledger_snapshot()
+            elif operation == "init":
+                sync.sync_init("vault-1", "secret", "https://sync.example.test")
+            else:
+                sync.sync_push(passphrase="secret")
+    encrypt.assert_not_called()
+    assert server.calls == []
+    assert (server.revision, server.ciphertext_b64, server.nonce_b64) == remote_before
+    assert (sync_config.read_bytes() if sync_config.exists() else None) == before
+    assert db_manager.validate_balance_consistency() == (True, -30_000, -30_000)
+
+
 def test_pull_with_wrong_passphrase_never_touches_local_ledger(
     sync_config, tmp_path, monkeypatch
 ):

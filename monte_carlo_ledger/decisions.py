@@ -263,26 +263,6 @@ def risk(
     )
 
 
-def _shift_first_income(scenario: Dict[str, Any], days: int) -> None:
-    """Delay the earliest scheduled paycheck; ties keep scenario order.
-
-    Insertion order is not chronological, so picking the first income event by
-    index could delay a later paycheck. Raises NO_INCOME when nothing is modeled.
-    """
-    indexed = [
-        (index, event)
-        for index, event in enumerate(scenario["events"])
-        if event["type"] == "income"
-    ]
-    if not indexed:
-        raise ContractError(
-            "NO_INCOME",
-            "no in-window income is modeled, so a paycheck delay is meaningless",
-        )
-    _, target = min(indexed, key=lambda pair: (pair[1]["date"], pair[0]))
-    target["date"] = (date.fromisoformat(target["date"]) + timedelta(days=days)).isoformat()
-
-
 def simulate_purchase(
     amount_cents: int,
     purchase_date: str,
@@ -373,8 +353,14 @@ def simulate_paycheck_delay(
     params = _sim(sim)
     view = _view_for(as_of, horizon_days)
     baseline = run_scenario(_build(as_of, horizon_days, dict(params), ledger=view))
-    delayed_scenario = _build(as_of, horizon_days, dict(params), ledger=view)
-    _shift_first_income(delayed_scenario, delay_days)
+    delayed_scenario = scenario_mod.build_scenario(
+        as_of,
+        horizon_days,
+        include_simulation=dict(params),
+        read_only=True,
+        ledger=view,
+        paycheck_delay_days=delay_days,
+    )
     delayed = run_scenario(delayed_scenario)
     return _attach_ledger(
         {
