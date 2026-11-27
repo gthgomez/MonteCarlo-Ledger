@@ -314,6 +314,7 @@ test("evaluated row sources distinguish identical-looking bills, transactions, a
 
 test("an anchored monthly bill does not appear before its first saved date", () => {
   const ledger = emptyLedger(50_000);
+  ledger.transactions[0].date = "2026-10-09";
   ledger.payments = [{
     id: "utility", name: "Utility", amount_cents: 30_000, recurrence: "Monthly", due_day: 15, due_date: "2026-11-15",
   }];
