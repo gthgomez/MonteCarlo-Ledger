@@ -13,13 +13,13 @@ export const SECTION_LABEL: Record<Section, string> = {
 };
 
 export const SECTION_QUESTION: Record<Section, string> = {
-  home: "How am I doing?",
-  money: "What do I have?",
-  budget: "Where is it going?",
-  bills: "What payments are coming?",
-  plan: "Can I afford a change?",
-  future: "What could happen?",
-  advanced: "What assumptions drive this?",
+  home: "What’s available, what’s coming, and what needs attention.",
+  money: "Record cash, confirm paydays, and review activity.",
+  budget: "Compare recorded spending with your monthly targets.",
+  bills: "See what’s due and record payments you’ve made.",
+  plan: "Try a what-if before changing your real plan.",
+  future: "See where your balance may go and what could change it.",
+  advanced: "Set your reserve, forecast window, and risk assumptions.",
 };
 
 export function sectionFromHash(hash: string): Section | null {

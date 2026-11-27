@@ -1,7 +1,7 @@
 import { quantilePlainName } from "./assumptions";
 import { addDaysIso, calendarMonthWindow, formatDateLabel, previousMonthWindow, relativeDay } from "./dates";
 import { formatMoney } from "./money-format";
-import { firstOneTimeBillOutsideWindow, unresolvedPastOneTimeSlots } from "./scenario-builder";
+import { firstOneTimeBillOutsideWindow, unresolvedPastOneTimeSlots, unresolvedPastRecurringSlots } from "./scenario-builder";
 import type { LedgerState, LiabilityItem, TransactionItem } from "./types";
 import type { Section } from "./sections";
 
@@ -38,6 +38,10 @@ export function spendingGuidanceIssue(
       : `${unresolved.length} one-time bills due before today have no linked bill record, starting with “${first.payment.name}” for ${amount} on ${due}`;
     return `${subject}. That means no payment is linked to the bill, not that no payment was made. The plan leaves ${unresolved.length === 1 ? "it" : "them"} out. In Bills, link a recorded expense, mark it paid if your current cash already reflects the payment, or record a new expense only if neither Money nor your current cash reflects it. Move the bill if it is still unpaid.`;
   }
+  const nextRecurringReview = unresolvedPastRecurringSlots(state, asOf)[0];
+  if (nextRecurringReview) {
+    return `The recurring bill “${nextRecurringReview.payment.name}” was due ${formatDateLabel(nextRecurringReview.dueDate)} with no recorded outcome. Confirm whether you paid it or move it in Bills; nothing was debited automatically.`;
+  }
   if (!rows.some((row) => row.type === "expense")) {
     return "No payments are included in this plan window. Check your bill dates or try a longer window under Advanced.";
   }
@@ -59,9 +63,9 @@ export function beyondWindowBillNotice(
   return `The one-time bill “${next.payment.name}” for ${formatMoney(next.payment.amount_cents)} is due ${formatDateLabel(next.dueDate)} (${next.dueDate}), after this ${horizonDays}-day plan window, so this plan does not include it. Extend the plan window under Advanced if you want it counted.`;
 }
 
-export interface PlanSlice {
+export interface PlanSlice<Row extends TimelineLike = TimelineLike> {
   /** Half-open window [asOf, asOf + days). Rows must already be in contract order. */
-  events: TimelineLike[];
+  events: Row[];
   scheduledIncomeCents: number;
   scheduledOutflowCents: number;
   plannedEndingCents: number;
@@ -73,12 +77,12 @@ export interface PlanSlice {
  * The ending balance is the engine's running balance after the last event in
  * the window, or the starting balance when the window has no events.
  */
-export function slicePlan(
-  rows: TimelineLike[],
+export function slicePlan<Row extends TimelineLike>(
+  rows: Row[],
   asOf: string,
   days: number,
   startingBalanceCents: number
-): PlanSlice {
+): PlanSlice<Row> {
   const end = addDaysIso(asOf, days);
   const events = rows.filter((row) => row.date >= asOf && row.date < end);
   let scheduledIncomeCents = 0;

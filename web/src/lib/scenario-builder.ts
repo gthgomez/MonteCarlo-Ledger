@@ -53,6 +53,12 @@ function addMonthsClamped(iso: string, months: number, anchorDay?: number): stri
   return `${ny}-${String(nm).padStart(2, "0")}-${String(nd).padStart(2, "0")}`;
 }
 
+/** First date actually covered by a newly saved monthly bill. */
+export function firstMonthlyBillDate(asOf: string, dueDay: number): string {
+  const thisMonth = addMonthsClamped(asOf, 0, dueDay);
+  return thisMonth >= asOf ? thisMonth : addMonthsClamped(asOf, 1, dueDay);
+}
+
 function getNextDate(iso: string, frequency: string, anchorDay?: number): string {
   const [y, m, d] = iso.split("-").map(Number);
   const date = new Date(Date.UTC(y, m - 1, d));
@@ -114,6 +120,31 @@ export interface ProjectedDebtMinimum {
   due_day_of_month: number | null;
 }
 
+export interface LedgerScenarioEvent {
+  date: string;
+  amount_cents: number;
+  type: "income" | "expense" | "adjustment";
+  name: string;
+}
+
+export type LedgerEventSource =
+  | { kind: "scheduled-income"; incomeId: IncomeItem["id"] }
+  | { kind: "bill"; paymentId: PaymentItem["id"]; slotDate: string; dueDate: string }
+  | { kind: "debt-minimum"; minimum: ProjectedDebtMinimum }
+  | { kind: "posted-transaction"; transactionId: LedgerState["transactions"][number]["id"] };
+
+const sourceByEvent = new WeakMap<LedgerScenarioEvent, LedgerEventSource>();
+
+function sourcedEvent<Event extends LedgerScenarioEvent>(event: Event, source: LedgerEventSource): Event {
+  sourceByEvent.set(event, source);
+  return event;
+}
+
+/** Adapter-private identity, keyed by event object so sorting cannot change it. */
+export function ledgerEventSource(event: LedgerScenarioEvent): LedgerEventSource | undefined {
+  return sourceByEvent.get(event);
+}
+
 export interface ProjectedBillSlot {
   payment: PaymentItem;
   slotDate: string;
@@ -166,6 +197,43 @@ export function unresolvedPastOneTimeSlots(
   return scheduledOneTimeSlots(state.payments, covered).filter((slot) => slot.dueDate < asOf).sort(byDueDate);
 }
 
+/**
+ * Show the earliest unresolved slot for each recurring schedule whose starting
+ * date is known. Day-of-month-only legacy templates have no historical start;
+ * do not invent debts before a user entered them. Never post a guessed debit.
+ */
+export function unresolvedPastRecurringSlots(
+  state: BillInputs,
+  asOf: string,
+  covered = coveredBillSlots(state.bill_occurrences)
+): ProjectedBillSlot[] {
+  const slots: ProjectedBillSlot[] = [];
+  for (const payment of state.payments) {
+    if (payment.id == null || !payment.due_date || payment.recurrence === "One-time") continue;
+    const anchorDay = payment.due_day ?? Number(payment.due_date.split("-")[2]);
+    if (payment.recurrence === "Monthly" && addMonthsClamped(payment.due_date, 0, anchorDay) !== payment.due_date) continue;
+    let current = payment.due_date;
+    while (current < asOf) {
+      if (!covered.has(paymentOccurrenceKey(payment.id, current))) {
+        slots.push({ payment, slotDate: current, dueDate: current });
+        break;
+      }
+      const next = getNextDate(current, payment.recurrence, anchorDay);
+      if (next <= current) break;
+      current = next;
+    }
+  }
+  return slots.sort(byDueDate);
+}
+
+export function unresolvedPastBillSlots(state: BillInputs, asOf: string): ProjectedBillSlot[] {
+  const covered = coveredBillSlots(state.bill_occurrences);
+  return [
+    ...unresolvedPastOneTimeSlots(state, asOf, covered),
+    ...unresolvedPastRecurringSlots(state, asOf, covered),
+  ];
+}
+
 /** The earliest known one-time outflow on or after the first excluded day. */
 export function firstOneTimeBillOutsideWindow(state: BillInputs, windowEnd: string): ProjectedBillSlot | null {
   const slots = scheduledOneTimeSlots(state.payments, coveredBillSlots(state.bill_occurrences));
@@ -192,25 +260,36 @@ export function projectBillPayments(
   windowEnd: string,
   fixedPaymentIds?: ReadonlySet<string>
 ) {
-  const events: { date: string; amount_cents: number; type: "expense"; name: string }[] = [];
-  const fixedEvents = new Set<(typeof events)[number]>();
+  const events: (LedgerScenarioEvent & { type: "expense" })[] = [];
+  const fixedEvents = new Set<LedgerScenarioEvent>();
   const slots: ProjectedBillSlot[] = [];
+  const generated = new Set<string>();
+
+  function addBill(slot: ProjectedBillSlot, isGenerated: boolean): void {
+    const { payment, slotDate, dueDate } = slot;
+    const event = sourcedEvent({
+      date: dueDate < asOf ? asOf : dueDate,
+      amount_cents: -payment.amount_cents,
+      type: "expense",
+      name: payment.name,
+    }, { kind: "bill", paymentId: payment.id, slotDate, dueDate });
+    slots.push(slot);
+    events.push(event);
+    if (isGenerated) {
+      generated.add(paymentOccurrenceKey(String(payment.id), slotDate));
+      if (fixedPaymentIds?.has(String(payment.id))) fixedEvents.add(event);
+    }
+  }
+
   const paymentById = new Map(state.payments.map((p) => [String(p.id), p] as const));
   const covered = coveredBillSlots(state.bill_occurrences);
-  const generated = new Set<string>();
   for (const occ of state.bill_occurrences) {
     if (occ.paid) continue;
     if (occ.due_date >= windowEnd) continue;
     const pmt = paymentById.get(String(occ.payment_id));
     if (!pmt) continue;
     const slotDate = occ.original_due_date || occ.due_date;
-    slots.push({ payment: pmt, slotDate, dueDate: occ.due_date });
-    events.push({
-      date: occ.due_date < asOf ? asOf : occ.due_date,
-      amount_cents: -pmt.amount_cents,
-      type: "expense",
-      name: pmt.name,
-    });
+    addBill({ payment: pmt, slotDate, dueDate: occ.due_date }, false);
   }
 
   for (const pmt of state.payments) {
@@ -230,16 +309,7 @@ export function projectBillPayments(
         if (dueIso >= asOf && dueIso < windowEnd) {
           const key = paymentOccurrenceKey(String(pmt.id), dueIso);
           if (!covered.has(key)) {
-            generated.add(key);
-            slots.push({ payment: pmt, slotDate: dueIso, dueDate: dueIso });
-            const event = {
-              date: dueIso,
-              amount_cents: -pmt.amount_cents,
-              type: "expense" as const,
-              name: pmt.name,
-            };
-            events.push(event);
-            if (fixedPaymentIds?.has(String(pmt.id))) fixedEvents.add(event);
+            addBill({ payment: pmt, slotDate: dueIso, dueDate: dueIso }, true);
           }
         }
       }
@@ -251,16 +321,7 @@ export function projectBillPayments(
         if (current >= asOf) {
           const key = paymentOccurrenceKey(String(pmt.id), current);
           if (!covered.has(key)) {
-            generated.add(key);
-            slots.push({ payment: pmt, slotDate: current, dueDate: current });
-            const event = {
-              date: current,
-              amount_cents: -pmt.amount_cents,
-              type: "expense" as const,
-              name: pmt.name,
-            };
-            events.push(event);
-            if (fixedPaymentIds?.has(String(pmt.id))) fixedEvents.add(event);
+            addBill({ payment: pmt, slotDate: current, dueDate: current }, true);
           }
         }
         if (pmt.recurrence === "One-time") break;
@@ -276,6 +337,9 @@ export function projectBillPayments(
   // still an unresolved obligation. Expose it as an editable row so a person can
   // mark it paid or move it; do not invent a historical expense.
   for (const slot of unresolvedPastOneTimeSlots(state, asOf, covered)) {
+    slots.push(slot);
+  }
+  for (const slot of unresolvedPastRecurringSlots(state, asOf, covered)) {
     slots.push(slot);
   }
 
@@ -299,9 +363,9 @@ export function buildScenarioFromLedger(
     ownedPayments.add(linkedId);
   }
   const windowEnd = addDays(asOf, horizonDays);
-  const events: any[] = [];
+  const events: LedgerScenarioEvent[] = [];
 
-  // 1. Materialize Income Occurrences
+  // 1. Materialize Scheduled Income
   for (const inc of state.incomes) {
     let current = inc.next_payday;
     // Anchor on the original last_payday day, not the possibly clamped next_payday
@@ -320,12 +384,12 @@ export function buildScenarioFromLedger(
           firstInWindow && inc.expected_amount !== undefined && inc.expected_amount !== null
             ? inc.expected_amount
             : inc.amount_cents;
-        events.push({
+        events.push(sourcedEvent({
           date: current,
           amount_cents: amount,
           type: "income",
           name: inc.name,
-        });
+        }, { kind: "scheduled-income", incomeId: inc.id }));
         firstInWindow = false;
       }
       const nextDate = getNextDate(current, inc.frequency, incomeAnchorDay);
@@ -344,12 +408,12 @@ export function buildScenarioFromLedger(
   );
   for (const tx of futureTransactions) {
     const type = tx.type === "Income" ? "income" : tx.type === "Expense" ? "expense" : "adjustment";
-    events.push({
+    events.push(sourcedEvent({
       date: tx.date,
       amount_cents: tx.amount_cents,
       type,
       name: tx.description || tx.category || "Planned transaction",
-    });
+    }, { kind: "posted-transaction", transactionId: tx.id }));
   }
 
   // 4. Entered debt minimums become ordinary cash outflows (Contract callers add events;
@@ -455,22 +519,23 @@ function linkedPaymentSlot(
   return null;
 }
 
+function isUnpaidMovedOccurrence(occurrence: LedgerState["bill_occurrences"][number] | undefined): boolean {
+  return Boolean(
+    occurrence?.original_due_date &&
+    occurrence.original_due_date !== occurrence.due_date &&
+    !occurrence.paid
+  );
+}
+
 function liabilityMinPaymentEvents(
   liabilities: LiabilityItem[],
   payments: PaymentItem[],
-  occurrences: {
-    payment_id: number | string;
-    due_date: string;
-    original_due_date?: string | null;
-    paid: boolean;
-    transaction_id?: number | string | null;
-  }[],
+  occurrences: LedgerState["bill_occurrences"],
   transactions: { id?: number | string; amount_cents: number }[],
   generatedSlots: ReadonlySet<string>,
   asOf: string,
-  windowEnd: string,
-  onEvent?: (detail: ProjectedDebtMinimum) => void
-): any[] {
+  windowEnd: string
+): LedgerScenarioEvent[] {
   const paymentById = new Map(payments.map((payment) => [String(payment.id), payment] as const));
   const occurrenceSlots = new Map<string, Map<string, typeof occurrences[number]>>();
   const transactionById = new Map(transactions.map((tx) => [String(tx.id), tx] as const));
@@ -484,9 +549,13 @@ function liabilityMinPaymentEvents(
   }
 
   const [startYear, startMonth] = asOf.split("-").map(Number);
-  const [endYear, endMonth] = windowEnd.split("-").map(Number);
-  const totalMonths = (endYear - startYear) * 12 + (endMonth - startMonth) + 2;
-  const events: any[] = [];
+  function monthOffset(date: string): number {
+    const [year, month] = date.split("-").map(Number);
+    return (year - startYear) * 12 + month - startMonth;
+  }
+  const forecastMonths = monthOffset(windowEnd) + 1;
+  const forecastOffsets = Array.from({ length: forecastMonths }, (_, offset) => offset);
+  const events: LedgerScenarioEvent[] = [];
 
   // Use stable identity order so same-day expenses receive seeded variation in the
   // same order as Python, regardless of how a snapshot's liabilities are arranged.
@@ -503,15 +572,73 @@ function liabilityMinPaymentEvents(
     const linkedPayment = liability.linked_payment_id == null
       ? undefined
       : paymentById.get(String(liability.linked_payment_id));
+    const slots = linkedPayment ? occurrenceSlots.get(String(linkedPayment.id)) : undefined;
 
-    let remainingBalance = liability.balance_cents;
-    let firstDue = true;
-    for (let i = 0; i < totalMonths; i++) {
-      const curM = startMonth + i;
-      const curY = startYear + Math.floor((curM - 1) / 12);
-      const actualM = ((curM - 1) % 12) + 1;
+    // A moved unpaid bill still owns its original month's minimum. Select that
+    // month directly if it contributes cash, without walking intervening months.
+    const offsets = new Set(forecastOffsets);
+    const firstOccurrenceByMonth = new Map<string, typeof occurrences[number]>();
+    for (const [slot, occurrence] of slots ?? []) {
+      const month = slot.slice(0, 7);
+      const first = firstOccurrenceByMonth.get(month);
+      if (!first || slot < (first.original_due_date || first.due_date)) firstOccurrenceByMonth.set(month, occurrence);
+      if (occurrence.due_date < windowEnd && isUnpaidMovedOccurrence(occurrence)) {
+        offsets.add(monthOffset(slot));
+      }
+    }
+
+    const dueSlots: { date: string; coveredCents: number; paidCoverage: boolean }[] = [];
+    for (const offset of [...offsets].sort((left, right) => left - right)) {
+      const curM = startMonth + offset;
+      const yearOffset = Math.floor((curM - 1) / 12);
+      const curY = startYear + yearOffset;
+      const actualM = curM - yearOffset * 12;
       const maxD = new Date(Date.UTC(curY, actualM, 0)).getUTCDate();
-      if (!firstDue) {
+      const d = Math.min(dueDay, maxD);
+      const fallbackDueIso = `${curY}-${String(actualM).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+      // The linked bill owns this debt's slot for the month. Using the debt's stored
+      // due day here would charge a second minimum whenever the two dates differ.
+      const dueIso = linkedPayment
+        ? linkedPaymentSlot(linkedPayment, curY, actualM) ?? fallbackDueIso
+        : fallbackDueIso;
+      let projectedDueIso = dueIso;
+      let coveredCents = 0;
+      let paidCoverage = false;
+      if (linkedPayment) {
+        // A past edit can change the bill's due day while an occurrence keeps the
+        // original slot. The month still identifies the same scheduled payment.
+        const occurrence = slots?.get(dueIso) ?? (linkedPayment.recurrence === "Monthly"
+          ? firstOccurrenceByMonth.get(dueIso.slice(0, 7))
+          : undefined);
+        const outsideForecastMonths = offset < 0 || offset >= forecastMonths;
+        if (outsideForecastMonths && !isUnpaidMovedOccurrence(occurrence)) continue;
+        const occurrenceAmount = occurrence?.paid && occurrence.transaction_id != null
+          ? Math.abs(transactionById.get(String(occurrence.transaction_id))?.amount_cents ?? linkedPayment.amount_cents)
+          : linkedPayment.amount_cents;
+        const generatedCovers = generatedSlots.has(paymentOccurrenceKey(String(linkedPayment.id), dueIso));
+        if (occurrence || generatedCovers) coveredCents = occurrenceAmount;
+        paidCoverage = occurrence?.paid ?? false;
+        // Keep the original slot for coverage, but project the unpaid shortfall
+        // with its bill on the date cash will actually leave.
+        if (occurrence && !occurrence.paid) projectedDueIso = occurrence.due_date;
+      }
+      // An overdue minimum still reduces today's available cash.
+      const eventDate = projectedDueIso < asOf ? asOf : projectedDueIso;
+      if (eventDate < windowEnd) {
+        dueSlots.push({ date: eventDate, coveredCents, paidCoverage });
+      }
+    }
+
+    // Apply payments in cash-date order (original month breaks same-date ties).
+    // Accrue only through the event's cash month, on the remaining principal.
+    dueSlots.sort((left, right) => compareCodePoints(left.date, right.date));
+    let remainingBalance = liability.balance_cents;
+    if (planningMinimumPaymentCents(liability, remainingBalance) <= 0) continue;
+    let interestThroughMonth = 0;
+    for (const { date, coveredCents, paidCoverage } of dueSlots) {
+      if (remainingBalance <= 0) break;
+      const cashMonth = monthOffset(date);
+      while (interestThroughMonth < cashMonth) {
         const interest = toSafeNumber(
           roundHalfAway(
             BigInt(remainingBalance) * BigInt(liability.apr_basis_points),
@@ -521,72 +648,42 @@ function liabilityMinPaymentEvents(
         remainingBalance = toSafeNumber(
           checkedAdd(BigInt(remainingBalance), BigInt(interest))
         );
+        interestThroughMonth += 1;
       }
-      firstDue = false;
       const amount = planningMinimumPaymentCents(liability, remainingBalance);
       if (amount <= 0) break;
-      const d = Math.min(dueDay, maxD);
-      const fallbackDueIso = `${curY}-${String(actualM).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
-      // The linked bill owns this debt's slot for the month. Using the debt's stored
-      // due day here would charge a second minimum whenever the two dates differ.
-      const dueIso = linkedPayment
-        ? linkedPaymentSlot(linkedPayment, curY, actualM) ?? fallbackDueIso
-        : fallbackDueIso;
-      // A minimum whose due day passed earlier this month is still owed. Project it
-      // at the start of the window so today's available-cash estimate includes it.
-      const eventDate = dueIso < asOf ? asOf : dueIso;
-      let coveredCents = 0;
-      if (linkedPayment) {
-        const slots = occurrenceSlots.get(String(liability.linked_payment_id));
-        let occurrence = slots?.get(dueIso);
-        // A past edit can change the bill's due day while an occurrence keeps the
-        // original slot. The month still identifies the same scheduled payment.
-        if (!occurrence && linkedPayment.recurrence === "Monthly" && slots) {
-          const month = dueIso.slice(0, 7);
-          for (const candidate of slots.values()) {
-            if ((candidate.original_due_date || candidate.due_date).slice(0, 7) === month) {
-              occurrence = candidate;
-              break;
-            }
-          }
-        }
-        const occurrenceAmount = occurrence?.paid && occurrence.transaction_id != null
-          ? Math.abs(transactionById.get(String(occurrence.transaction_id))?.amount_cents ?? linkedPayment.amount_cents)
-          : linkedPayment.amount_cents;
-        const occurrenceCovers = occurrence !== undefined;
-        const generatedCovers = generatedSlots.has(`${linkedPayment.id}::${dueIso}`);
-        if (occurrenceCovers || generatedCovers) coveredCents = occurrenceAmount;
-        const paidCoverage = occurrenceCovers && occurrence?.paid;
-        const shortfall = Math.max(0, amount - coveredCents);
-        const principalReduction = paidCoverage ? shortfall : amount;
-        if (eventDate < windowEnd && shortfall > 0) {
-          events.push({ date: eventDate, amount_cents: -shortfall, type: "expense", name });
-          onEvent?.({
-            liability_id: String(liability.id),
-            name,
-            date: eventDate,
-            amount_cents: -shortfall,
-            due_day_of_month: liability.due_day_of_month ?? null,
-          });
-        }
-        if (eventDate < windowEnd) remainingBalance -= principalReduction;
-        continue;
-      }
-      if (eventDate < windowEnd) {
-        events.push({ date: eventDate, amount_cents: -amount, type: "expense", name });
-        onEvent?.({
+      const shortfall = Math.max(0, amount - coveredCents);
+      if (shortfall > 0) {
+        const minimum: ProjectedDebtMinimum = {
           liability_id: String(liability.id),
           name,
-          date: eventDate,
-          amount_cents: -amount,
+          date,
+          amount_cents: -shortfall,
           due_day_of_month: liability.due_day_of_month ?? null,
-        });
-        remainingBalance -= amount;
+        };
+        events.push(sourcedEvent(
+          { date, amount_cents: -shortfall, type: "expense", name },
+          { kind: "debt-minimum", minimum }
+        ));
       }
-      if (`${curY}-${String(actualM).padStart(2, "0")}-01` >= windowEnd) break;
+      remainingBalance -= paidCoverage ? shortfall : amount;
     }
   }
   return events;
+}
+
+/** Debt minimums already computed for these cash events, in display order. */
+export function debtMinimumsFromEvents(events: readonly LedgerScenarioEvent[]): ProjectedDebtMinimum[] {
+  const details: ProjectedDebtMinimum[] = [];
+  for (const event of events) {
+    const source = ledgerEventSource(event);
+    if (source?.kind === "debt-minimum") details.push(source.minimum);
+  }
+  return details.sort(
+    (left, right) =>
+      left.date.localeCompare(right.date) ||
+      left.liability_id.localeCompare(right.liability_id)
+  );
 }
 
 /**
@@ -600,20 +697,14 @@ export function projectedDebtMinimums(
 ): ProjectedDebtMinimum[] {
   const windowEnd = addDays(asOf, horizonDays);
   const bills = projectBillPayments(state, asOf, windowEnd);
-  const details: ProjectedDebtMinimum[] = [];
-  liabilityMinPaymentEvents(
+  const events = liabilityMinPaymentEvents(
     state.liabilities ?? [],
     state.payments,
     state.bill_occurrences,
     state.transactions,
     bills.generated,
     asOf,
-    windowEnd,
-    (detail) => details.push(detail)
+    windowEnd
   );
-  return details.sort(
-    (left, right) =>
-      left.date.localeCompare(right.date) ||
-      left.liability_id.localeCompare(right.liability_id)
-  );
+  return debtMinimumsFromEvents(events);
 }

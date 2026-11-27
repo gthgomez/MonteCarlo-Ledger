@@ -94,8 +94,11 @@ test.describe("ordinary ledger edit draft safety", () => {
       await expect(page.getByRole("button", { name: "Record this" })).toBeDisabled();
       await expect(page.getByRole("button", { name: "Plan", exact: true })).toBeDisabled();
       await expect(page.getByRole("button", { name: /Cloud Vault/ })).toBeDisabled();
-      await expect(page.getByRole("button", { name: "Use sample" })).toBeDisabled();
-      await expect(page.getByRole("button", { name: "Export", exact: true })).toBeEnabled();
+      await page.getByRole("button", { name: "Search and commands", exact: true }).click();
+      const commands = page.getByRole("dialog", { name: "Search and commands" });
+      await expect(commands.getByRole("button", { name: /^Use sample/ })).toBeDisabled();
+      await expect(commands.getByRole("button", { name: /^Export/ })).toBeEnabled();
+      await commands.getByRole("button", { name: "Close commands" }).click();
       expect(await storedRaw(page)).toBe(originalRaw);
 
       // The native handler is registered while the write is actually outstanding.

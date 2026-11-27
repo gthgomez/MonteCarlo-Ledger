@@ -1,9 +1,14 @@
 "use client";
 
-import React, { useMemo, useState } from "react";
+import React, { useMemo, useRef, useState } from "react";
 import { amortize } from "@/contract/debt";
-import { cautiousAmountHeading, cautiousAmountShortName, type Assumptions } from "@/lib/assumptions";
-import { addDaysIso } from "@/lib/dates";
+import {
+  cautiousAmountHeading,
+  cautiousAmountShortName,
+  quantilePlainName,
+  type Assumptions,
+} from "@/lib/assumptions";
+import { addDaysIso, formatDateLabel } from "@/lib/dates";
 import {
   addInstallmentDebt,
   updateLiabilityBalance,
@@ -58,18 +63,60 @@ function withKey<V>(map: Map<string, V>, key: string, value: V): Map<string, V> 
   return next;
 }
 
+interface ComparisonRow {
+  label: string;
+  from: string;
+  to: string;
+  requiresGuidance?: true;
+}
+
+function comparisonRows(
+  base: ModelOutcome,
+  compared: ModelOutcome,
+  showGuidance: boolean
+): ComparisonRow[] {
+  const rows: ComparisonRow[] = [];
+  if (showGuidance) {
+    rows.push({
+      label: cautiousAmountHeading(base.quantileNum, base.quantileDen),
+      from: formatCautiousSpend(base.safeSpendCents, base.reserveCents),
+      to: formatCautiousSpend(compared.safeSpendCents, compared.reserveCents),
+      requiresGuidance: true,
+    });
+    rows.push({
+      label: "Chance of running short",
+      from: formatProbability(base.overdraftPpm),
+      to: formatProbability(compared.overdraftPpm),
+      requiresGuidance: true,
+    });
+  }
+  rows.push({
+    label: "Lowest point if the schedule is exact",
+    from: formatMoney(base.projectedLowCents),
+    to: formatMoney(compared.projectedLowCents),
+  });
+  rows.push({
+    label: "Ending balance if the schedule is exact",
+    from: formatMoney(base.endingBalanceCents),
+    to: formatMoney(compared.endingBalanceCents),
+  });
+  return rows;
+}
+
 function Compare({
   title,
   base,
   next,
   showGuidance,
   note,
+  onKeep,
 }: {
   title: string;
   base: ModelOutcome;
   next: EvalResult;
   showGuidance: boolean;
   note: string;
+  onKeep?: (rows: ComparisonRow[]) => void;
 }) {
   if (next.status === "error") {
     return (
@@ -79,14 +126,7 @@ function Compare({
     );
   }
   const compared = next.outcome;
-  const rows = [
-    ...(showGuidance ? [
-      [cautiousAmountHeading(base.quantileNum, base.quantileDen), formatCautiousSpend(base.safeSpendCents, base.reserveCents), formatCautiousSpend(compared.safeSpendCents, compared.reserveCents)],
-      ["Chance of running short", formatProbability(base.overdraftPpm), formatProbability(compared.overdraftPpm)],
-    ] : []),
-    ["Lowest point if the schedule is exact", formatMoney(base.projectedLowCents), formatMoney(compared.projectedLowCents)],
-    ["Ending balance if the schedule is exact", formatMoney(base.endingBalanceCents), formatMoney(compared.endingBalanceCents)],
-  ];
+  const rows = comparisonRows(base, compared, showGuidance);
   return (
     <div className="min-w-0 rounded-xl border border-line bg-inset p-4">
       <h3 className="text-base font-semibold">{title}</h3>
@@ -101,13 +141,13 @@ function Compare({
             </tr>
           </thead>
           <tbody>
-            {rows.map(([label, from, to]) => (
-              <tr key={label} className="border-t border-line">
+            {rows.map((row) => (
+              <tr key={row.label} className="border-t border-line">
                 <th scope="row" className="py-2 pr-3 font-medium">
-                  {label}
+                  {row.label}
                 </th>
-                <td className="py-2 pr-3 tabular-nums">{from}</td>
-                <td className="py-2 tabular-nums font-semibold">{to}</td>
+                <td className="py-2 pr-3 tabular-nums">{row.from}</td>
+                <td className="py-2 tabular-nums font-semibold">{row.to}</td>
               </tr>
             ))}
           </tbody>
@@ -119,9 +159,93 @@ function Compare({
         </p>
       )}
       {note && <p className="mt-3 text-sm text-muted">{note}</p>}
+      {onKeep && (
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          <Button type="button" variant="quiet" onClick={() => onKeep(rows)}>
+            Keep this comparison
+          </Button>
+          <span className="text-xs text-muted">Kept on this screen only; nothing is saved.</span>
+        </div>
+      )}
     </div>
   );
 }
+
+interface KeptComparison {
+  id: string;
+  label: string;
+  detail: string;
+  rows: ComparisonRow[];
+}
+
+function PlanBaseline({ base, showGuidance }: { base: ModelOutcome; showGuidance: boolean }) {
+  const cautious = showGuidance
+    ? base.safeSpendCents < 0
+      ? formatCautiousSpend(base.safeSpendCents, base.reserveCents)
+      : formatMoney(base.safeSpendCents)
+    : null;
+  return (
+    <section
+      aria-labelledby="plan-baseline-heading"
+      className="overflow-hidden rounded-2xl border border-line bg-surface shadow-card"
+    >
+      <div className="bg-[color:var(--forest)] px-4 py-4 text-[color:var(--forest-text)] sm:px-6">
+        <div className="flex flex-wrap items-start justify-between gap-2">
+          <div>
+            <p className="text-xs font-semibold uppercase tracking-[0.16em] text-[color:var(--signature)]">Your plan right now</p>
+            <h2 id="plan-baseline-heading" className="mt-1 text-xl font-semibold tracking-tight text-[color:var(--forest-text)]">
+              Where the exact schedule lands
+            </h2>
+          </div>
+          <span className="rounded-full border border-[color:var(--forest-muted)] px-2.5 py-0.5 text-xs font-medium text-[color:var(--forest-muted)]">
+            {base.horizonDays}-day window
+          </span>
+        </div>
+        <p className="mt-1 max-w-3xl text-sm text-[color:var(--forest-muted)]">
+          Every comparison below starts from these figures. They come from the same engine and assumptions as the rest of
+          the app.
+        </p>
+      </div>
+      <div className="p-4 sm:p-6">
+        <dl className="grid gap-3 sm:grid-cols-3">
+          <div className="min-w-0 rounded-xl border border-line bg-inset p-3">
+            <dt className="text-xs font-semibold uppercase tracking-[0.08em] text-muted">
+              Lowest point if the schedule is exact
+            </dt>
+            <dd className="mt-1 text-xl font-semibold tabular-nums tracking-tight text-ink">
+              {formatMoney(base.projectedLowCents)}
+            </dd>
+            <dd className="text-xs text-muted">On {formatDateLabel(base.projectedLowDate)}</dd>
+          </div>
+          <div className="min-w-0 rounded-xl border border-line bg-inset p-3">
+            <dt className="text-xs font-semibold uppercase tracking-[0.08em] text-muted">
+              Ending balance if the schedule is exact
+            </dt>
+            <dd className="mt-1 text-xl font-semibold tabular-nums tracking-tight text-ink">
+              {formatMoney(base.endingBalanceCents)}
+            </dd>
+            <dd className="text-xs text-muted">At the end of the {base.horizonDays}-day plan</dd>
+          </div>
+          {cautious !== null && (
+            <div className="min-w-0 rounded-xl border border-line bg-accent-soft p-3">
+              <dt className="text-xs font-semibold uppercase tracking-[0.08em] text-muted">
+                {cautiousAmountHeading(base.quantileNum, base.quantileDen)}
+              </dt>
+              <dd className="mt-1 text-xl font-semibold tabular-nums tracking-tight text-ink">{cautious}</dd>
+              <dd className="text-xs text-muted">Uses the {quantilePlainName(base.quantileNum, base.quantileDen)} modeled low point</dd>
+            </div>
+          )}
+        </dl>
+        {!showGuidance && (
+          <p className="mt-3 text-sm text-muted">
+            Modeled risk and the cautious amount stay hidden until the schedule has usable bill dates.
+          </p>
+        )}
+      </div>
+    </section>
+  );
+}
+
 
 export function PlanView({
   state,
@@ -181,6 +305,9 @@ export function PlanView({
   const [balanceDrafts, setBalanceDrafts] = useState<Map<string, string>>(() => new Map());
   const [balanceErrors, setBalanceErrors] = useState<Map<string, string>>(() => new Map());
   const [openBalanceId, setOpenBalanceId] = useState<string | null>(null);
+  const [keptComparisons, setKeptComparisons] = useState<KeptComparison[]>([]);
+  const [keptNotice, setKeptNotice] = useState("");
+  const keptCounter = useRef(0);
 
   // No scenario is evaluated while the ledger cannot be forecast. This is not
   // only a display guard: it keeps a failed ledger from producing any estimate
@@ -220,6 +347,7 @@ export function PlanView({
       : null,
     [base, question, hasOutstandingDebt, paymentPreview, state, asOf, assumptions]
   );
+  const selectedBill = state.payments.find((payment) => String(payment.id) === billId);
 
   const goalCents = dollarsToCents(Number(goal));
   const monthCount = Number(months);
@@ -246,6 +374,25 @@ export function PlanView({
     { id: "aside", label: "What if I set money aside?" },
     { id: "debt", label: "How do I pay off debt?" },
   ];
+
+  function handleTabKeyDown(event: React.KeyboardEvent<HTMLDivElement>) {
+    const currentIndex = tabs.findIndex((tab) => tab.id === question);
+    let nextIndex: number | null = null;
+    if (event.key === "ArrowRight" || event.key === "ArrowDown") {
+      nextIndex = (currentIndex + 1) % tabs.length;
+    } else if (event.key === "ArrowLeft" || event.key === "ArrowUp") {
+      nextIndex = (currentIndex - 1 + tabs.length) % tabs.length;
+    } else if (event.key === "Home") {
+      nextIndex = 0;
+    } else if (event.key === "End") {
+      nextIndex = tabs.length - 1;
+    }
+    if (nextIndex === null) return;
+    event.preventDefault();
+    const next = tabs[nextIndex];
+    setQuestion(next.id);
+    document.getElementById(`plan-tab-${next.id}`)?.focus();
+  }
 
   async function submitDebt(event: React.FormEvent) {
     event.preventDefault();
@@ -303,6 +450,18 @@ export function PlanView({
     }
     setPaymentError(null);
     setPaymentPreview({ amountCents, date: paymentDate });
+  }
+
+  function keepComparison(label: string, detail: string, rows: ComparisonRow[]) {
+    keptCounter.current += 1;
+    const id = `kept-comparison-${keptCounter.current}`;
+    setKeptComparisons((current) => [...current, { id, label, detail, rows }]);
+    setKeptNotice(`Kept ${label}. It stays on this screen only.`);
+  }
+
+  function discardComparison(item: KeptComparison) {
+    setKeptComparisons((current) => current.filter((entry) => entry.id !== item.id));
+    setKeptNotice(`Discarded ${item.label}.`);
   }
 
   function openBalanceEditor(debt: LiabilityItem) {
@@ -497,17 +656,26 @@ export function PlanView({
 
   return (
     <div className="space-y-4">
+      <PlanBaseline base={base} showGuidance={showGuidance} />
       <Panel
         title="Try a decision"
         lede="Each comparison uses the same engine as the rest of the app. Results are estimates from your assumptions, not guarantees. Nothing is saved until you edit the ledger itself."
       >
-        <div role="tablist" aria-label="Decisions" className="flex flex-wrap gap-2">
+        <div
+          role="tablist"
+          aria-label="Decisions"
+          className="flex flex-wrap gap-2"
+          onKeyDown={handleTabKeyDown}
+        >
           {tabs.map((tab) => (
             <button
               key={tab.id}
+              id={`plan-tab-${tab.id}`}
               type="button"
               role="tab"
               aria-selected={question === tab.id}
+              aria-controls="plan-tabpanel"
+              tabIndex={question === tab.id ? 0 : -1}
               disabled={saving}
               onClick={() => setQuestion(tab.id)}
               className={`min-h-11 shrink-0 rounded-lg px-3 text-sm font-semibold disabled:opacity-50 ${
@@ -524,6 +692,8 @@ export function PlanView({
             <Notice tone="info">Comparisons show scheduled balances only. Check for missing bill dates or payments outside the plan window before using the comparison to decide what you can afford.</Notice>
           </div>
         )}
+
+        <div role="tabpanel" id="plan-tabpanel" aria-labelledby={`plan-tab-${question}`}>
 
         {question === "purchase" && purchase && (
           <div className="mt-4 grid gap-4 lg:grid-cols-2">
@@ -579,11 +749,20 @@ export function PlanView({
               base={base}
               next={purchase}
               showGuidance={showGuidance}
+              onKeep={(rows) =>
+                keepComparison(
+                  "Purchase comparison",
+                  `${formatMoney(purchaseCents ?? 0)} on ${formatDateLabel(purchaseDate)}`,
+                  rows
+                )
+              }
               note={
                 showGuidance && purchase.status === "ok"
                   ? purchase.outcome.safeSpendCents >= 0
                     ? `In this simulation the ${cautiousAmountShortName(base.quantileNum, base.quantileDen)} stays at or above zero after the purchase. That is a model estimate, not a guarantee.`
-                    : `In this simulation the ${cautiousAmountShortName(base.quantileNum, base.quantileDen)} goes below zero. That is a model estimate, not a guarantee you will overdraw.`
+                    : purchase.outcome.reserveCents > 0
+                      ? "After this purchase, the selected modeled low point is below your reserve. That does not necessarily mean the balance falls below zero."
+                      : "After this purchase, the selected modeled low point falls below zero. That is a model estimate, not a guarantee you will overdraw."
                   : ""
               }
             />
@@ -612,6 +791,13 @@ export function PlanView({
               base={base}
               next={delay}
               showGuidance={showGuidance}
+              onKeep={(rows) =>
+                keepComparison(
+                  "Late paycheck comparison",
+                  `Paycheck delayed ${delayDays} ${delayDays === 1 ? "day" : "days"}`,
+                  rows
+                )
+              }
               note="This compares cash if payday moves. It does not estimate how likely a delay is."
             />
           </div>
@@ -655,6 +841,13 @@ export function PlanView({
                   base={base}
                   next={bill}
                   showGuidance={showGuidance}
+                  onKeep={(rows) =>
+                    keepComparison(
+                      "Changed bill comparison",
+                      `${selectedBill?.name ?? "Bill"} at ${formatMoney(Math.round(billAmount * 100))}`,
+                      rows
+                    )
+                  }
                   note="In this simulation only that bill's amount changes. Other assumptions stay as they are."
                 />
               </>
@@ -706,6 +899,13 @@ export function PlanView({
                 base={base}
                 next={asideResult}
                 showGuidance={showGuidance}
+                onKeep={(rows) =>
+                  keepComparison(
+                    "Monthly set-aside comparison",
+                    `${formatMoney(Math.round(aside * 100))} each month`,
+                    rows
+                  )
+                }
                 note="The ending balance here is what would remain in this account, not a savings pile. In this simulation the difference is the cash-flow effect of moving the money out."
               />
             </div>
@@ -802,6 +1002,15 @@ export function PlanView({
                       base={base}
                       next={extraPayment}
                       showGuidance={showGuidance}
+                      onKeep={(rows) =>
+                        keepComparison(
+                          "Extra debt payment comparison",
+                          paymentPreview
+                            ? `${formatMoney(paymentPreview.amountCents)} on ${formatDateLabel(paymentPreview.date)}`
+                            : "One-time extra payment",
+                          rows
+                        )
+                      }
                       note="In the exact schedule this amount leaves on the date you chose. The other dated payments stay the same."
                     />
                   )}
@@ -815,6 +1024,62 @@ export function PlanView({
             </Explain>
           </div>
         )}
+
+        </div>
+
+        {keptComparisons.length > 0 && (
+          <section aria-labelledby="plan-kept-heading" className="mt-6 border-t border-line pt-4">
+            <div className="flex flex-wrap items-baseline justify-between gap-2">
+              <h3 id="plan-kept-heading" className="text-base font-semibold">
+                Kept comparisons
+              </h3>
+              <p className="text-xs text-muted">On this screen only · not saved</p>
+            </div>
+            <p className="mt-1 text-sm text-muted">
+              These snapshots use the plan as it was when you kept them. They are not recalculated if the ledger or
+              assumptions change.
+            </p>
+            <ul className="mt-3 grid gap-3 lg:grid-cols-2">
+              {keptComparisons.map((item) => (
+                <li key={item.id} className="min-w-0 rounded-xl border border-line bg-inset p-3">
+                  <div className="flex flex-wrap items-start justify-between gap-2">
+                    <div className="min-w-0">
+                      <p className="text-sm font-semibold text-ink">{item.label}</p>
+                      {item.detail && <p className="text-xs text-muted">{item.detail}</p>}
+                    </div>
+                    <Button
+                      type="button"
+                      variant="quiet"
+                      onClick={() => discardComparison(item)}
+                      aria-label={`Discard kept comparison: ${item.label}`}
+                    >
+                      Discard
+                    </Button>
+                  </div>
+                  <dl className="mt-2 space-y-1 text-xs">
+                    {item.rows.filter((row) => showGuidance || !row.requiresGuidance).map((row) => (
+                      <div
+                        key={row.label}
+                        className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5 border-t border-line pt-1"
+                      >
+                        <dt className="text-muted">{row.label}</dt>
+                        <dd className="tabular-nums text-right">
+                          <span className="text-muted">{row.from}</span>
+                          <span aria-hidden="true"> → </span>
+                          <span className="sr-only"> changed to </span>
+                          <span className="font-semibold text-ink">{row.to}</span>
+                        </dd>
+                      </div>
+                    ))}
+                  </dl>
+                </li>
+              ))}
+            </ul>
+          </section>
+        )}
+        <p className="sr-only" role="status" aria-live="polite">
+          {keptNotice}
+        </p>
       </Panel>
     </div>
   );

@@ -124,7 +124,8 @@ test("a debt minimum is identified as a Plan obligation, not an entered bill", a
 
 test("the page has one h1 and a visible-name Sync control", async ({ page }) => {
   await page.goto("/");
-  await expect(page.getByRole("heading", { level: 1, name: "MonteCarlo" })).toHaveCount(1);
+  await expect(page.getByRole("heading", { level: 1 })).toHaveCount(1);
+  await expect(page.getByRole("heading", { level: 1, name: "Home" })).toBeVisible();
   const sync = page.getByRole("button", { name: /Cloud Vault/ });
   await expect(sync).toHaveText("Cloud Vault");
 });

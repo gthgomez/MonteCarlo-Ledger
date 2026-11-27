@@ -104,10 +104,249 @@ test("a purchase result is the engine result for that added expense", () => {
   assert.equal(evaluated.outcome.projectedLowCents, raw.forecast.minimum_balance_cents);
 });
 
-test("delaying income with no paycheck returns NO_INCOME", () => {
-  const result = evaluateIncomeDelay(emptyLedger(10_000), AS_OF, DEFAULT_ASSUMPTIONS, 3);
+test("delaying income with only a future posted refund returns NO_INCOME", () => {
+  const ledger = emptyLedger(10_000);
+  ledger.current_balance_cents += 5_000;
+  ledger.transactions.push({
+    id: "refund", amount_cents: 5_000, type: "Income", date: "2026-11-11", description: "Refund",
+  });
+  const result = evaluateIncomeDelay(ledger, AS_OF, DEFAULT_ASSUMPTIONS, 3);
   assert.equal(result.status, "error");
   if (result.status === "error") assert.equal(result.code, "NO_INCOME");
+});
+
+test("late paycheck moves the first scheduled payday and leaves a posted refund in place", () => {
+  const ledger = emptyLedger(50_000);
+  ledger.current_balance_cents += 5_000;
+  ledger.transactions.push({
+    id: "refund", amount_cents: 5_000, type: "Income", date: "2026-11-11", description: "Refund",
+  });
+  ledger.incomes = [{
+    id: "paycheck", name: "Paycheck", amount_cents: 40_000, frequency: "One-time",
+    last_payday: "2026-11-12", next_payday: "2026-11-12",
+  }];
+  ledger.payments = [{
+    id: "bill", name: "Bill", amount_cents: 30_000, recurrence: "One-time", due_date: "2026-11-15",
+  }];
+  const assumptions = {
+    ...DEFAULT_ASSUMPTIONS, horizonDays: 10, runs: 10, surpriseProbabilityPpm: 0,
+  };
+  const saved = structuredClone(ledger);
+  const delayed = evaluateIncomeDelay(ledger, AS_OF, assumptions, 5);
+  assert.equal(delayed.status, "ok");
+  if (delayed.status !== "ok") return;
+  assert.equal(delayed.outcome.startingBalanceCents, 50_000);
+  assert.equal(delayed.outcome.projectedLowCents, 25_000);
+  assert.equal(delayed.outcome.endingBalanceCents, 65_000);
+  assert.deepEqual(delayed.rows.map(({ date, amount_cents }) => [date, amount_cents]), [
+    ["2026-11-11", 5_000], ["2026-11-15", -30_000], ["2026-11-17", 40_000],
+  ]);
+  assert.deepEqual(delayed.rows.map(({ source }) => source?.kind), [
+    "posted-transaction", "bill", "scheduled-income",
+  ]);
+  assert.deepEqual(ledger, saved);
+});
+
+test("a moved unpaid linked bill and its minimum shortfall leave cash on the moved date", () => {
+  const ledger = emptyLedger(50_000);
+  ledger.version = "2.2";
+  ledger.payments = [{
+    id: "card-bill", name: "Card bill", amount_cents: 20_000, recurrence: "Monthly", due_day: 12,
+  }];
+  ledger.bill_occurrences = [{
+    payment_id: "card-bill", original_due_date: "2026-11-12", due_date: "2026-11-17",
+    is_user_modified: true, paid: false,
+  }];
+  ledger.liabilities = [{
+    id: "card", name: "Card", balance_cents: 100_000, apr_basis_points: 0,
+    min_payment_cents: 30_000, due_day_of_month: 15, linked_payment_id: "card-bill",
+  }];
+  const assumptions = {
+    ...DEFAULT_ASSUMPTIONS, horizonDays: 10, runs: 10, surpriseProbabilityPpm: 0,
+  };
+  const full = evaluateLedger(ledger, AS_OF, assumptions);
+  assert.equal(full.status, "ok");
+  if (full.status !== "ok") return;
+  assert.deepEqual(full.rows.map(({ date, amount_cents, name }) => [date, amount_cents, name]), [
+    ["2026-11-17", -10_000, "Card"], ["2026-11-17", -20_000, "Card bill"],
+  ]);
+  assert.equal(full.outcome.projectedLowCents, 20_000);
+  assert.equal(full.outcome.projectedLowDate, "2026-11-17");
+  assert.deepEqual(full.debtMinimums, [{
+    liability_id: "card", name: "Card", date: "2026-11-17",
+    amount_cents: -10_000, due_day_of_month: 15,
+  }]);
+  assert.deepEqual(full.rows[1].source, {
+    kind: "bill", paymentId: "card-bill", slotDate: "2026-11-12", dueDate: "2026-11-17",
+  });
+
+  const short = evaluateLedger(ledger, AS_OF, { ...assumptions, horizonDays: 7 });
+  assert.equal(short.status, "ok");
+  if (short.status !== "ok") return;
+  assert.deepEqual(short.rows, []);
+  assert.deepEqual(short.debtMinimums, []);
+  assert.equal(short.outcome.endingBalanceCents, 50_000);
+});
+
+test("an unpaid linked slot from before the forecast month carries its shortfall past a paycheck", () => {
+  const ledger = emptyLedger(25_000);
+  ledger.version = "2.2";
+  ledger.incomes = [{
+    id: "paycheck", name: "Paycheck", amount_cents: 40_000, frequency: "One-time",
+    last_payday: "2026-11-13", next_payday: "2026-11-13",
+  }];
+  ledger.payments = [{
+    id: "card-bill", name: "Card bill", amount_cents: 20_000, recurrence: "Monthly", due_day: 29,
+  }];
+  ledger.bill_occurrences = [{
+    payment_id: "card-bill", original_due_date: "2026-10-29", due_date: "2026-11-16",
+    is_user_modified: true, paid: false,
+  }];
+  ledger.liabilities = [{
+    id: "card", name: "Card", balance_cents: 55_000, apr_basis_points: 1_200,
+    min_payment_cents: 30_000, due_day_of_month: 29, linked_payment_id: "card-bill",
+  }];
+  const assumptions = {
+    ...DEFAULT_ASSUMPTIONS, horizonDays: 10, runs: 10,
+    incomeVariationMin: 0, incomeVariationMax: 0, surpriseProbabilityPpm: 0,
+  };
+  const short = evaluateLedger(ledger, AS_OF, assumptions);
+  assert.equal(short.status, "ok");
+  if (short.status !== "ok") return;
+  // $250 opening + $400 payday - $100 shortfall - $200 bill = $350 ending.
+  assert.deepEqual(short.rows.map(({ date, amount_cents, name }) => [date, amount_cents, name]), [
+    ["2026-11-13", 40_000, "Paycheck"],
+    ["2026-11-16", -10_000, "Card"],
+    ["2026-11-16", -20_000, "Card bill"],
+  ]);
+  assert.equal(short.outcome.projectedLowCents, 25_000);
+  assert.equal(short.outcome.endingBalanceCents, 35_000);
+  assert.equal(short.outcome.safeSpendCents, 25_000);
+
+  const full = evaluateLedger(ledger, AS_OF, { ...assumptions, horizonDays: 20 });
+  assert.equal(full.status, "ok");
+  if (full.status !== "ok") return;
+  // The $300 carried minimum leaves $250 of opening principal. November's
+  // $200 bill covers all but $50 of it, with no interest charged for October.
+  assert.deepEqual(full.debtMinimums.map(({ date, amount_cents }) => [date, amount_cents]), [
+    ["2026-11-16", -10_000],
+    ["2026-11-29", -5_000],
+  ]);
+  assert.equal(full.outcome.endingBalanceCents, 10_000);
+});
+
+test("an accelerated one-time linked bill includes its shortfall even when its original month is outside the window", () => {
+  const ledger = emptyLedger(50_000);
+  ledger.version = "2.2";
+  ledger.payments = [{
+    id: "card-bill", name: "Card bill", amount_cents: 20_000, recurrence: "One-time", due_date: "2027-01-15",
+  }];
+  ledger.bill_occurrences = [{
+    payment_id: "card-bill", original_due_date: "2027-01-15", due_date: "2026-11-16",
+    is_user_modified: true, paid: false,
+  }];
+  ledger.liabilities = [{
+    id: "card", name: "Card", balance_cents: 300_000, apr_basis_points: 2_400,
+    kind: "revolving", min_payment_cents: 0, min_payment_percent_bps: 1_000,
+    due_day_of_month: 30, linked_payment_id: "card-bill",
+  }];
+  const assumptions = {
+    ...DEFAULT_ASSUMPTIONS, horizonDays: 10, runs: 10, surpriseProbabilityPpm: 0,
+  };
+  const short = evaluateLedger(ledger, AS_OF, assumptions);
+  assert.equal(short.status, "ok");
+  if (short.status !== "ok") return;
+  // At the November cash date, the $3,000 opening debt needs $300 before
+  // any later month's interest. The linked bill covers $200 of that amount.
+  assert.deepEqual(short.rows.map(({ date, amount_cents, name }) => [date, amount_cents, name]), [
+    ["2026-11-16", -10_000, "Card"],
+    ["2026-11-16", -20_000, "Card bill"],
+  ]);
+  assert.equal(short.outcome.projectedLowCents, 20_000);
+  assert.equal(short.outcome.endingBalanceCents, 20_000);
+  assert.equal(short.outcome.safeSpendCents, 20_000);
+
+  const full = evaluateLedger(ledger, AS_OF, { ...assumptions, horizonDays: 83 });
+  assert.equal(full.status, "ok");
+  if (full.status !== "ok") return;
+  // November's fallback is 10% of the $2,700 remaining after the move. In
+  // December, $2,430 gains 2% interest before its $247.86 minimum. January
+  // has no separate fallback: its linked slot has already been moved.
+  assert.deepEqual(full.debtMinimums.map(({ date, amount_cents }) => [date, amount_cents]), [
+    ["2026-11-16", -10_000],
+    ["2026-11-30", -27_000],
+    ["2026-12-30", -24_786],
+  ]);
+  assert.equal(full.outcome.endingBalanceCents, -31_786);
+});
+
+test("evaluated row sources distinguish identical-looking bills, transactions, and debt minimums", () => {
+  const date = "2026-11-12";
+  const ledger = emptyLedger(50_000);
+  ledger.current_balance_cents -= 10_000;
+  ledger.transactions.push({
+    id: "posted-card", amount_cents: -10_000, type: "Expense", date, description: "Card",
+  });
+  ledger.payments = [{
+    id: "card-bill", name: "Card", amount_cents: 10_000, recurrence: "One-time", due_date: date,
+  }];
+  ledger.liabilities = [{
+    id: "card", name: "Card", balance_cents: 10_000, apr_basis_points: 0,
+    min_payment_cents: 10_000, due_day_of_month: 12,
+  }];
+  const assumptions = {
+    ...DEFAULT_ASSUMPTIONS, horizonDays: 10, runs: 10, surpriseProbabilityPpm: 0,
+  };
+  const result = evaluateLedger(ledger, AS_OF, assumptions);
+  assert.equal(result.status, "ok");
+  if (result.status !== "ok") return;
+  assert.deepEqual(result.rows.map(({ source, balance_after_cents }) => [source, balance_after_cents]), [
+    [{ kind: "bill", paymentId: "card-bill", slotDate: date, dueDate: date }, 40_000],
+    [{ kind: "posted-transaction", transactionId: "posted-card" }, 30_000],
+    [{ kind: "debt-minimum", minimum: result.debtMinimums[0] }, 20_000],
+  ]);
+  assert.equal(result.debtMinimums.length, 1);
+  const scenario = buildScenarioFromLedger(ledger, AS_OF, assumptions.horizonDays);
+  assert.deepEqual(scenario.events, Array.from({ length: 3 }, () => ({
+    date, amount_cents: -10_000, type: "expense", name: "Card",
+  })));
+});
+
+test("legacy edited due days match by explicit payment ID and oldest original slot", () => {
+  const ledger = emptyLedger(100_000);
+  ledger.payments = [{
+    id: "bill", name: "Loan bill", amount_cents: 20_000, recurrence: "Monthly", due_day: 15,
+  }];
+  ledger.bill_occurrences = [
+    { payment_id: "bill", original_due_date: "2026-11-08", due_date: "2026-11-10", paid: false, is_user_modified: true },
+    { payment_id: "bill", original_due_date: "2026-11-05", due_date: "2026-11-20", paid: false, is_user_modified: true },
+  ];
+  ledger.liabilities = [{
+    id: "loan", name: "Loan", balance_cents: 50_000, apr_basis_points: 0,
+    min_payment_cents: 30_000, due_day_of_month: 15, linked_payment_id: "bill",
+  }];
+  const assumptions = { ...DEFAULT_ASSUMPTIONS, horizonDays: 21 };
+  for (const occurrences of [ledger.bill_occurrences, [...ledger.bill_occurrences].reverse()]) {
+    const result = evaluateLedger({ ...ledger, bill_occurrences: occurrences }, AS_OF, assumptions);
+    assert.equal(result.status, "ok");
+    if (result.status === "ok") {
+      assert.deepEqual(result.debtMinimums.map((minimum) => [minimum.date, minimum.amount_cents]), [
+        ["2026-11-20", -10_000],
+      ]);
+    }
+  }
+});
+
+test("an overflowing debt projection fails within evaluation without publishing partial minimums", () => {
+  const ledger = emptyLedger(50_000);
+  ledger.liabilities = [{
+    id: "card", name: "Card", balance_cents: Number.MAX_SAFE_INTEGER, apr_basis_points: 1_200,
+    min_payment_cents: 1, due_day_of_month: 12,
+  }];
+  const result = evaluateLedger(ledger, AS_OF, DEFAULT_ASSUMPTIONS);
+  assert.equal(result.status, "error");
+  if (result.status === "error") assert.equal(result.code, "MONEY_OVERFLOW");
+  assert.equal("debtMinimums" in result, false);
 });
 
 test("an extra debt payment consumes the reserve margin once without changing a linked minimum", () => {

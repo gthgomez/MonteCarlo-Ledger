@@ -1,7 +1,7 @@
 import React from "react";
 
 export const fieldClass =
-  "w-full min-h-11 rounded-lg border border-line bg-surface px-3 text-base text-ink";
+  "workspace-field w-full min-h-11 rounded-lg border bg-surface px-3 text-base text-ink";
 
 type Tone = "info" | "warning" | "danger" | "ok";
 
@@ -41,8 +41,8 @@ export function Panel({
   id?: string;
 }) {
   return (
-    <section id={id} className="rounded-2xl border border-line bg-surface p-4 shadow-card sm:p-6">
-      <h2 className="text-lg font-semibold text-ink">{title}</h2>
+    <section id={id} className="workspace-panel">
+      <h2 className="text-lg font-semibold tracking-tight text-ink">{title}</h2>
       {lede && <p className="mt-1 max-w-3xl text-sm text-muted">{lede}</p>}
       <div className="mt-4">{children}</div>
     </section>
@@ -61,7 +61,7 @@ export function Metric({
   return (
     <section className="rounded-xl border border-line bg-surface p-4 shadow-card">
       <h2 className="text-sm font-medium text-muted">{label}</h2>
-      <p className="mt-1 text-2xl font-semibold tabular-nums tracking-tight text-ink sm:text-3xl">{value}</p>
+      <p className="mt-1 break-words text-2xl font-semibold tabular-nums tracking-tight text-ink sm:text-3xl">{value}</p>
       <p className="mt-2 text-sm text-muted">{detail}</p>
     </section>
   );
@@ -71,7 +71,7 @@ export function Button({
   variant = "primary",
   className = "",
   ...props
-}: React.ButtonHTMLAttributes<HTMLButtonElement> & { variant?: "primary" | "quiet" | "danger" }) {
+}: React.ComponentPropsWithRef<"button"> & { variant?: "primary" | "quiet" | "danger" }) {
   const styles = {
     primary: "bg-accent text-on-accent hover:opacity-90",
     quiet: "border border-line bg-inset text-ink hover:bg-surface",

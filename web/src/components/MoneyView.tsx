@@ -1,15 +1,14 @@
 "use client";
 
-import React, { useEffect, useState } from "react";
-import { formatDateLabel } from "@/lib/dates";
+import React, { useEffect, useRef, useState } from "react";
+import { formatDateLabel, isIsoDate } from "@/lib/dates";
 import {
   addIncomeSchedule,
-  deleteCashTransaction,
   dollarsToCents,
-  editCashTransaction,
   parseDollarsToCents,
   reconcileBalance,
   recordCashflow,
+  recordPaydayReceipt,
   removeIncome,
   type EditResult,
 } from "@/lib/ledger-edits";
@@ -17,13 +16,31 @@ import { formatDollarsInput, formatMoney } from "@/lib/money-format";
 import { cashMinusEnteredDebt, enteredDebtCents, transactionSumCents } from "@/lib/present";
 import { nextIncomeDate } from "@/lib/scenario-builder";
 import { type PersistenceResult } from "@/lib/sync-state";
-import { type IncomeItem, type LedgerState, type TransactionItem } from "@/lib/types";
+import { type IncomeItem, type LedgerState } from "@/lib/types";
+import { MoneyActivity } from "./MoneyActivity";
 import { Button, Explain, fieldClass, Notice, Panel } from "./ui";
 
 const RECONCILE_UNAVAILABLE_MESSAGE =
   "Reconcile was not submitted because the current cash summary and adjustment preview are unavailable.";
 
 export type PurchaseToRecord = { amountCents: number; date: string };
+
+/**
+ * One explicit payday receipt. The schedule and ledger revision are captured
+ * when the form opens; the actual receipt date and amount stay independent.
+ */
+interface PaydayReceiptDraft {
+  draftKey: string;
+  incomeId: number | string;
+  name: string;
+  scheduledDate: string;
+  firstScheduledDate: string;
+  expectedAmountCents: number;
+  expectedUpdatedAt: string;
+  date: string;
+  amount: string;
+  description: string;
+}
 
 export function MoneyView({
   state,
@@ -33,6 +50,7 @@ export function MoneyView({
   onDiscardDraft,
   saving,
   purchaseToRecord,
+  activitySearch,
 }: {
   state: LedgerState;
   asOf: string;
@@ -41,6 +59,7 @@ export function MoneyView({
   onDiscardDraft: (draftKey: string) => void;
   saving: boolean;
   purchaseToRecord?: PurchaseToRecord;
+  activitySearch?: { text: string; request: number };
 }) {
   const [kind, setKind] = useState<"Expense" | "Income">("Expense");
   const [amount, setAmount] = useState(() =>
@@ -55,15 +74,6 @@ export function MoneyView({
   const date = dateInput ?? pinnedDate ?? asOf;
   const [formError, setFormError] = useState<string | null>(null);
   const [recordNotice, setRecordNotice] = useState("");
-  const [transactionEdit, setTransactionEdit] = useState<{
-    id: string | number;
-    amount: string;
-    date: string;
-    category: string;
-    description: string;
-  } | null>(null);
-  const [transactionError, setTransactionError] = useState<string | null>(null);
-  const [transactionNotice, setTransactionNotice] = useState("");
 
   const [incomeName, setIncomeName] = useState("");
   const [incomeAmount, setIncomeAmount] = useState("");
@@ -72,6 +82,11 @@ export function MoneyView({
   const [pinnedPayday, setPinnedPayday] = useState<string | null>(null);
   const payday = paydayInput ?? pinnedPayday ?? asOf;
   const [incomeError, setIncomeError] = useState<string | null>(null);
+  const [receipt, setReceipt] = useState<PaydayReceiptDraft | null>(null);
+  const [receiptError, setReceiptError] = useState<string | null>(null);
+  const [receiptNotice, setReceiptNotice] = useState("");
+  const receiptTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const restoreReceiptFocusRef = useRef(false);
 
   const [reconcile, setReconcile] = useState(() =>
     startingBalanceCents === null ? "" : formatDollarsInput(startingBalanceCents)
@@ -106,6 +121,12 @@ export function MoneyView({
       setReconcileError((current) => (current === RECONCILE_UNAVAILABLE_MESSAGE ? null : current));
     }
   }, [reconcilePreviewUnavailable]);
+
+  useEffect(() => {
+    if (receipt !== null || saving || !restoreReceiptFocusRef.current) return;
+    restoreReceiptFocusRef.current = false;
+    receiptTriggerRef.current?.focus();
+  }, [receipt, saving]);
 
   async function submitRecord(event: React.FormEvent) {
     event.preventDefault();
@@ -182,6 +203,88 @@ export function MoneyView({
     setIncomeName((current) => (current === submittedName ? "" : current));
   }
 
+  function openReceipt(income: IncomeItem, trigger?: HTMLButtonElement | null) {
+    if (income.id === undefined) return;
+    // The persisted date is the first still-unconfirmed occurrence. Defaulting
+    // to a rolled-forward projection would consume a different paycheck.
+    const scheduledDate = income.next_payday;
+    // The plan uses expected_amount for the next projected paycheck; fall back
+    // to the usual take-home amount when no one-off expectation is recorded.
+    const expectedCents = income.expected_amount ?? income.amount_cents;
+    receiptTriggerRef.current = trigger ?? null;
+    restoreReceiptFocusRef.current = false;
+    setReceipt({
+      draftKey: `money:receipt:${String(income.id)}:${scheduledDate}`,
+      incomeId: income.id,
+      name: income.name,
+      scheduledDate,
+      firstScheduledDate: scheduledDate,
+      expectedAmountCents: expectedCents,
+      expectedUpdatedAt: state.updated_at,
+      date: asOf,
+      amount: formatDollarsInput(expectedCents),
+      description: "",
+    });
+    setReceiptError(null);
+    setReceiptNotice("");
+  }
+
+  function cancelReceipt() {
+    if (!receipt) return;
+    onDiscardDraft(receipt.draftKey);
+    restoreReceiptFocusRef.current = true;
+    setReceipt(null);
+    setReceiptError(null);
+  }
+
+  async function submitReceipt(event: React.FormEvent) {
+    event.preventDefault();
+    if (!receipt || saving) return;
+    const cents = parseDollarsToCents(receipt.amount);
+    if (cents === null || cents <= 0) {
+      setReceiptError("Enter the amount actually received, greater than zero with no more than two decimal places.");
+      return;
+    }
+    if (!isIsoDate(receipt.date)) {
+      setReceiptError("Use a valid calendar date for the receipt.");
+      return;
+    }
+    if (receipt.date > asOf) {
+      setReceiptError("The receipt date cannot be after today. Change the date or record it on that day.");
+      return;
+    }
+    const submittedName = receipt.name;
+    const submittedDate = receipt.date;
+    const result = recordPaydayReceipt(state, {
+      incomeId: receipt.incomeId,
+      scheduledDate: receipt.scheduledDate,
+      expectedUpdatedAt: receipt.expectedUpdatedAt,
+      date: receipt.date,
+      amountCents: cents,
+      description: receipt.description,
+    });
+    if (!result.ok) {
+      setReceiptError(result.error);
+      return;
+    }
+    const saved = await onEdit(result, receipt.draftKey);
+    if (!saved.ok) {
+      // Keep the exact submitted schedule, dates, amount, and ledger revision so
+      // a retry does not silently consume a different payday.
+      setReceiptError(saved.error);
+      return;
+    }
+    // Clear only after the write is verified. Until then the form retains the
+    // selected schedule and any typed values for a straightforward retry.
+    onDiscardDraft(receipt.draftKey);
+    restoreReceiptFocusRef.current = true;
+    setReceipt(null);
+    setReceiptError(null);
+    setReceiptNotice(
+      `Recorded ${formatMoney(cents)} received on ${formatDateLabel(submittedDate)} for ${submittedName}. The selected payday is no longer pending.`
+    );
+  }
+
   async function submitReconcile(event: React.FormEvent) {
     event.preventDefault();
     if (reconcilePreviewUnavailable) {
@@ -211,65 +314,6 @@ export function MoneyView({
     setPinnedReconcileDate((current) => (current === submittedDate ? null : current));
   }
 
-  const rows = [...state.transactions].reverse();
-
-  function openTransactionEdit(tx: TransactionItem) {
-    if (tx.id === undefined || tx.type === "Adjustment") return;
-    setTransactionNotice("");
-    setTransactionError(null);
-    setTransactionEdit({
-      id: tx.id,
-      amount: formatDollarsInput(Math.abs(tx.amount_cents)),
-      date: tx.date,
-      category: tx.category ?? "",
-      description: tx.description ?? "",
-    });
-  }
-
-  function closeTransactionEdit() {
-    onDiscardDraft("money:edit");
-    setTransactionEdit(null);
-    setTransactionError(null);
-  }
-
-  async function submitTransactionEdit(event: React.FormEvent) {
-    event.preventDefault();
-    if (!transactionEdit || saving) return;
-    const amountCents = parseDollarsToCents(transactionEdit.amount);
-    if (amountCents === null || amountCents <= 0) {
-      setTransactionError("Enter a positive amount with no more than two decimal places.");
-      return;
-    }
-    const original = state.transactions.find((row) => row.id === transactionEdit.id);
-    const result = editCashTransaction(state, transactionEdit.id, {
-      amountCents,
-      date: transactionEdit.date,
-      category: transactionEdit.category === (original?.category ?? "") ? undefined : transactionEdit.category,
-      description: transactionEdit.description === (original?.description ?? "") ? undefined : transactionEdit.description,
-    });
-    if (!result.ok) {
-      setTransactionError(result.error);
-      return;
-    }
-    const saved = await onEdit(result, "money:edit");
-    if (!saved.ok) {
-      setTransactionError(saved.error);
-      return;
-    }
-    closeTransactionEdit();
-    setTransactionNotice("Transaction updated.");
-  }
-
-  async function removeTransaction(tx: TransactionItem) {
-    if (tx.id === undefined || saving) return;
-    const name = tx.description || tx.category || tx.type;
-    if (!window.confirm(`Delete “${name}”? If this paid a bill, that bill will be reopened.`)) return;
-    setTransactionNotice("");
-    const saved = await onEdit(deleteCashTransaction(state, tx.id));
-    setTransactionError(saved.ok ? null : saved.error);
-    if (saved.ok) setTransactionNotice("Transaction deleted.");
-  }
-
   return (
     <fieldset disabled={saving} className="m-0 min-w-0 w-full space-y-6 border-0 p-0">
       <Panel
@@ -279,7 +323,19 @@ export function MoneyView({
           : "This balance uses transactions dated today or earlier. Expected paychecks appear on their scheduled dates."}
       >
         {startingBalanceCents !== null && (
-          <p className="text-3xl font-semibold tabular-nums">{formatMoney(startingBalanceCents)}</p>
+          <div className="rounded-xl border border-line bg-inset p-4">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <p className="text-xs font-medium uppercase tracking-wide text-muted">Cash on hand today</p>
+                <p className="mt-1 break-words text-3xl font-semibold tabular-nums text-ink sm:text-4xl">
+                  {formatMoney(startingBalanceCents)}
+                </p>
+              </div>
+              <span className="inline-flex items-center rounded-full border border-line bg-surface px-2.5 py-1 text-xs font-medium text-muted">
+                One cash pool
+              </span>
+            </div>
+          </div>
         )}
         {matches && startingBalanceCents !== null && (
           <p className="mt-2 text-sm text-muted">
@@ -319,23 +375,32 @@ export function MoneyView({
         {purchaseToRecord && !recordNotice && (
           <p className="mb-3 text-sm text-muted">Review the amount and date from your purchase comparison before saving.</p>
         )}
+        {kind === "Income" && (
+          <p className="mb-3 text-sm text-muted">
+            This adds cash only. It does not mark a scheduled paycheck as received. Use Record receipt for a paycheck
+            under “Paychecks you expect” when the money that arrived belongs to that schedule.
+          </p>
+        )}
         <form onSubmit={submitRecord} className="grid gap-3 sm:grid-cols-2">
-          <label className="text-sm font-medium">
+          <label className="block text-sm font-medium text-ink">
             Kind
             <select className={`${fieldClass} mt-1`} value={kind} onChange={(e) => setKind(e.target.value as "Expense" | "Income")}>
               <option value="Expense">Money out</option>
               <option value="Income">Money in</option>
             </select>
           </label>
-          <label className="text-sm font-medium">
+          <label className="block text-sm font-medium text-ink">
             Amount ($)
-            <input id="money-entry-amount" className={`${fieldClass} mt-1`} inputMode="decimal" value={amount} onChange={(e) => setAmount(e.target.value)} />
+            <input
+              id="money-entry-amount"
+              className={`${fieldClass} mt-1`}
+              inputMode="decimal"
+              autoComplete="off"
+              value={amount}
+              onChange={(e) => setAmount(e.target.value)}
+            />
           </label>
-          <label className="text-sm font-medium">
-            Category
-            <input className={`${fieldClass} mt-1`} value={category} onChange={(e) => setCategory(e.target.value)} placeholder="Groceries" />
-          </label>
-          <label className="text-sm font-medium">
+          <label className="block text-sm font-medium text-ink">
             Date
             <input
               className={`${fieldClass} mt-1`}
@@ -347,100 +412,73 @@ export function MoneyView({
               }}
             />
           </label>
-          <label className="text-sm font-medium sm:col-span-2">
+          <label className="block text-sm font-medium text-ink">
+            Category
+            <input
+              className={`${fieldClass} mt-1`}
+              value={category}
+              onChange={(e) => setCategory(e.target.value)}
+              placeholder="Groceries"
+            />
+          </label>
+          <label className="block text-sm font-medium text-ink sm:col-span-2">
             Note
-            <input className={`${fieldClass} mt-1`} value={description} onChange={(e) => setDescription(e.target.value)} />
+            <input
+              className={`${fieldClass} mt-1`}
+              value={description}
+              autoComplete="off"
+              onChange={(e) => setDescription(e.target.value)}
+              placeholder="What was this for?"
+            />
           </label>
           {formError && (
             <p className="text-sm text-danger sm:col-span-2" role="alert">
               {formError}
             </p>
           )}
-          <div>
-            <Button type="submit">Record this</Button>
+          <div className="sm:col-span-2">
+            <Button type="submit" className="w-full sm:w-auto">Record this</Button>
           </div>
           <p className="text-sm text-muted sm:col-span-2 empty:hidden" role="status">{recordNotice}</p>
         </form>
       </Panel>
 
-      <Panel title="Recorded activity">
-        <p className="text-sm text-muted empty:hidden" role="status">{transactionNotice}</p>
-        {transactionError && transactionEdit === null && (
-          <p className="text-sm text-danger" role="alert">{transactionError}</p>
-        )}
-        {rows.length === 0 ? (
-          <p className="text-sm text-muted">No transactions yet. Record income or spending above, or set an opening balance.</p>
-        ) : (
-          <ul className="divide-y divide-line">
-            {rows.map((tx) => {
-              const name = tx.description || tx.category || tx.type;
-              const editable = tx.id !== undefined && tx.type !== "Adjustment";
-              return (
-              <li key={String(tx.id)} className="flex flex-wrap items-baseline justify-between gap-2 py-3 text-sm">
-                <div>
-                  <p className="font-medium">{name}</p>
-                  <p className="text-muted">
-                    {formatDateLabel(tx.date)} · {tx.category || tx.type}
-                    {tx.date > asOf ? " · Scheduled, not spent yet" : ""}
-                  </p>
-                </div>
-                <p className="tabular-nums font-semibold">{formatMoney(tx.amount_cents)}</p>
-                {editable && transactionEdit === null && (
-                  <div className="flex flex-wrap gap-2">
-                    <Button type="button" variant="quiet" aria-label={`Edit ${name}`} onClick={() => openTransactionEdit(tx)}>Edit</Button>
-                    <Button type="button" variant="quiet" aria-label={`Delete ${name}`} onClick={() => void removeTransaction(tx)}>Delete</Button>
-                  </div>
-                )}
-                {transactionEdit !== null && transactionEdit.id === tx.id && (
-                  <form onSubmit={submitTransactionEdit} className="grid w-full gap-3 sm:grid-cols-2">
-                    <label>
-                      Corrected amount ($)
-                      <input className={`${fieldClass} mt-1`} inputMode="decimal" value={transactionEdit.amount}
-                        onChange={(event) => setTransactionEdit({ ...transactionEdit, amount: event.target.value })} />
-                    </label>
-                    <label>
-                      Corrected date
-                      <input className={`${fieldClass} mt-1`} type="date" value={transactionEdit.date}
-                        onChange={(event) => setTransactionEdit({ ...transactionEdit, date: event.target.value })} />
-                    </label>
-                    <label>
-                      Corrected category
-                      <input className={`${fieldClass} mt-1`} value={transactionEdit.category}
-                        onChange={(event) => setTransactionEdit({ ...transactionEdit, category: event.target.value })} />
-                    </label>
-                    <label>
-                      Corrected note
-                      <input className={`${fieldClass} mt-1`} value={transactionEdit.description}
-                        onChange={(event) => setTransactionEdit({ ...transactionEdit, description: event.target.value })} />
-                    </label>
-                    {transactionError && <p className="text-danger sm:col-span-2" role="alert">{transactionError}</p>}
-                    <div className="flex gap-2 sm:col-span-2">
-                      <Button type="submit">Save correction</Button>
-                      <Button type="button" variant="quiet" onClick={closeTransactionEdit}>Cancel</Button>
-                    </div>
-                  </form>
-                )}
-              </li>
-              );
-            })}
-          </ul>
-        )}
-      </Panel>
+      <MoneyActivity
+        key={activitySearch?.request}
+        initialQuery={activitySearch?.text}
+        state={state}
+        asOf={asOf}
+        onEdit={onEdit}
+        onDiscardDraft={onDiscardDraft}
+        saving={saving}
+      />
 
       <Panel
         title="Paychecks you expect"
-        lede="These dates tell the plan when money arrives. They are not the same as money you have already recorded."
+        lede="These dates tell the plan when money arrives. They are not the same as money you have already recorded. A recorded receipt posts actual Income and consumes only that paycheck's selected payday."
       >
         <form onSubmit={submitIncome} className="grid gap-3 sm:grid-cols-2">
-          <label className="text-sm font-medium">
+          <label className="block text-sm font-medium text-ink">
             Name
-            <input className={`${fieldClass} mt-1`} value={incomeName} onChange={(e) => setIncomeName(e.target.value)} placeholder="Primary job" />
+            <input
+              className={`${fieldClass} mt-1`}
+              value={incomeName}
+              autoComplete="off"
+              onChange={(e) => setIncomeName(e.target.value)}
+              placeholder="Primary job"
+            />
           </label>
-          <label className="text-sm font-medium">
+          <label className="block text-sm font-medium text-ink">
             Take-home amount ($)
-            <input className={`${fieldClass} mt-1`} inputMode="decimal" value={incomeAmount} onChange={(e) => setIncomeAmount(e.target.value)} />
+            <input
+              className={`${fieldClass} mt-1`}
+              inputMode="decimal"
+              autoComplete="off"
+              value={incomeAmount}
+              onChange={(e) => setIncomeAmount(e.target.value)}
+            />
           </label>
-          <label className="text-sm font-medium">
+          <label className="block text-sm font-medium text-ink">
             How often
             <select className={`${fieldClass} mt-1`} value={frequency} onChange={(e) => setFrequency(e.target.value as IncomeItem["frequency"])}>
               <option>Weekly</option>
@@ -449,7 +487,7 @@ export function MoneyView({
               <option>One-time</option>
             </select>
           </label>
-          <label className="text-sm font-medium">
+          <label className="block text-sm font-medium text-ink">
             Next payday
             <input
               className={`${fieldClass} mt-1`}
@@ -466,19 +504,28 @@ export function MoneyView({
               {incomeError}
             </p>
           )}
-          <div>
-            <Button type="submit">Add income</Button>
+          <div className="sm:col-span-2">
+            <Button type="submit" className="w-full sm:w-auto">Add income</Button>
           </div>
         </form>
         <ul className="mt-4 divide-y divide-line">
-          {state.incomes.length === 0 && <li className="py-3 text-sm text-muted">No paycheck is scheduled.</li>}
+          {state.incomes.length === 0 && (
+            <li className="rounded-xl border border-dashed border-line bg-inset p-4 text-sm">
+              <p className="font-medium text-ink">No paycheck is scheduled</p>
+              <p className="mt-1 text-muted">
+                Add expected take-home pay above so the plan knows when money arrives. It is not recorded cash.
+              </p>
+            </li>
+          )}
           {state.incomes.map((income) => {
             const nextDate = nextIncomeDate(income, asOf);
             const oneTimePast = income.frequency === "One-time" && income.next_payday < asOf;
+            const receiptOpen =
+              receipt !== null && String(receipt.incomeId) === String(income.id);
             return (
-            <li key={String(income.id)} className="flex flex-wrap items-center justify-between gap-3 py-3 text-sm">
-              <div>
-                <p className="font-medium">{income.name}</p>
+            <li key={String(income.id)} className="grid gap-2 py-3 text-sm sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
+              <div className="min-w-0">
+                <p className="break-words font-medium text-ink">{income.name}</p>
                 <p className="text-muted">
                   {income.frequency} ·{" "}
                   {oneTimePast
@@ -488,8 +535,20 @@ export function MoneyView({
                       : `next ${formatDateLabel(income.next_payday)}`}
                 </p>
               </div>
-              <div className="flex items-center gap-3">
-                <span className="tabular-nums font-semibold">{formatMoney(income.amount_cents)}</span>
+              <div className="flex flex-wrap items-center gap-2 sm:justify-end">
+                <span className="min-w-0 break-words tabular-nums font-semibold">{formatMoney(income.amount_cents)}</span>
+                {income.id !== undefined && (
+                  <Button
+                    type="button"
+                    variant="quiet"
+                    disabled={receipt !== null}
+                    aria-expanded={receiptOpen}
+                    aria-controls={receiptOpen ? "payday-receipt-form" : undefined}
+                    onClick={(event) => openReceipt(income, event.currentTarget)}
+                  >
+                    Record receipt for {income.name}
+                  </Button>
+                )}
                 <Button type="button" variant="quiet" onClick={() => void onEdit(removeIncome(state, income.id ?? ""))}>
                   Remove {income.name}
                 </Button>
@@ -498,6 +557,83 @@ export function MoneyView({
             );
           })}
         </ul>
+        <p className="mt-4 text-sm text-muted empty:hidden" role="status">{receiptNotice}</p>
+        {receipt !== null && (
+          <form
+            id="payday-receipt-form"
+            onSubmit={submitReceipt}
+            className="mt-4 space-y-3 rounded-xl border border-line bg-inset p-4"
+            aria-labelledby="payday-receipt-title"
+            aria-describedby="payday-receipt-help"
+          >
+            <div className="min-w-0">
+              <h3 id="payday-receipt-title" className="break-words text-base font-semibold text-ink">
+                Record a receipt for {receipt.name}
+              </h3>
+              <p className="mt-1 text-sm text-muted">
+                First unconfirmed payday: {formatDateLabel(receipt.firstScheduledDate)} · expected {formatMoney(receipt.expectedAmountCents)}
+              </p>
+            </div>
+            <p id="payday-receipt-help" className="text-sm text-muted">
+              Pick the scheduled payday this deposit belongs to. Saving posts the actual income and advances this
+              schedule past the selected date. If it arrived late, keep its original payday and enter the actual receipt date below.
+            </p>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <label className="block text-sm font-medium text-ink">
+                Scheduled payday
+                <input
+                  className={`${fieldClass} mt-1`}
+                  type="date"
+                  min={receipt.firstScheduledDate}
+                  value={receipt.scheduledDate}
+                  onChange={(event) => setReceipt({ ...receipt, scheduledDate: event.target.value })}
+                />
+              </label>
+              <label className="block text-sm font-medium text-ink">
+                Receipt date
+                <input
+                  className={`${fieldClass} mt-1`}
+                  type="date"
+                  max={asOf}
+                  value={receipt.date}
+                  onChange={(event) => setReceipt({ ...receipt, date: event.target.value })}
+                />
+              </label>
+              <label className="block text-sm font-medium text-ink">
+                Amount received ($)
+                <input
+                  className={`${fieldClass} mt-1`}
+                  inputMode="decimal"
+                  autoComplete="off"
+                  autoFocus
+                  value={receipt.amount}
+                  onChange={(event) => setReceipt({ ...receipt, amount: event.target.value })}
+                />
+              </label>
+              <label className="block text-sm font-medium text-ink sm:col-span-2">
+                Description (optional)
+                <input
+                  className={`${fieldClass} mt-1`}
+                  autoComplete="off"
+                  value={receipt.description}
+                  placeholder={`Paycheck: ${receipt.name}`}
+                  onChange={(event) => setReceipt({ ...receipt, description: event.target.value })}
+                />
+              </label>
+            </div>
+            {receiptError && (
+              <p className="text-sm text-danger" role="alert">
+                {receiptError}
+              </p>
+            )}
+            <div className="flex flex-wrap gap-2">
+              <Button type="submit">Save receipt</Button>
+              <Button type="button" variant="quiet" onClick={cancelReceipt}>
+                Cancel receipt
+              </Button>
+            </div>
+          </form>
+        )}
       </Panel>
 
       <Panel
@@ -511,31 +647,36 @@ export function MoneyView({
               disabled and your typed balance and date are kept. Nothing is submitted.
             </Notice>
           )}
-          <label className="block text-sm font-medium">
+          <label className="block text-sm font-medium text-ink">
             Balance you want recorded ($)
             <input
               className={`${fieldClass} mt-1`}
               inputMode="decimal"
+              autoComplete="off"
               value={reconcile}
               required
               readOnly={reconcilePreviewUnavailable}
               onChange={(e) => setReconcile(e.target.value)}
             />
           </label>
-          {reconcileDiff !== null && reconcileDiff !== 0 && Number.isSafeInteger(reconcileDiff) && (
-            <p className="text-sm text-muted">
-              This will add an adjustment of {formatMoney(reconcileDiff)} dated {formatDateLabel(reconcileDate)}.
-            </p>
+          {((reconcileDiff !== null && Number.isSafeInteger(reconcileDiff)) || reconcileError) && (
+            <div className="rounded-xl border border-line bg-inset p-3 text-sm">
+              {reconcileDiff !== null && reconcileDiff !== 0 && Number.isSafeInteger(reconcileDiff) && (
+                <p className="text-muted">
+                  This will add an adjustment of {formatMoney(reconcileDiff)} dated {formatDateLabel(reconcileDate)}.
+                </p>
+              )}
+              {reconcileDiff === 0 && (
+                <p className="text-muted">This already matches the recorded balance. No adjustment will be added.</p>
+              )}
+              {reconcileError && (
+                <p className="text-danger" role="alert">
+                  {reconcileError}
+                </p>
+              )}
+            </div>
           )}
-          {reconcileDiff === 0 && (
-            <p className="text-sm text-muted">This already matches the recorded balance. No adjustment will be added.</p>
-          )}
-          {reconcileError && (
-            <p className="text-sm text-danger" role="alert">
-              {reconcileError}
-            </p>
-          )}
-          <Button type="submit" disabled={reconcilePreviewUnavailable}>Reconcile Ledger</Button>
+          <Button type="submit" className="w-full sm:w-auto" disabled={reconcilePreviewUnavailable}>Reconcile Ledger</Button>
         </form>
       </Panel>
     </fieldset>
